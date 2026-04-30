@@ -1,0 +1,13 @@
+node_modules
+dist
+.DS_Store
+*.log
+npm-debug.log*
+Dockerfile
+.dockerignore
+README.md
+tsconfig.tsbuildinfo
+tsconfig.node.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+

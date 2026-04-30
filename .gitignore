@@ -1,0 +1,23 @@
+.DS_Store
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+
+# Node / frontend
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Go
+.gocache/
+coverage.out
+
+# Local AI planning/context notes
+ai-docs/
+
+# Logs and editor state
+*.log
+.idea/
+.vscode/

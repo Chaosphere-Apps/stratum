@@ -1,0 +1,16 @@
+import type { DesignDocument } from '../types'
+
+export interface ReactFlowPreviewProps {
+  design: DesignDocument
+  selectedComponentId?: string | null
+  selectedConnectorId?: string | null
+  onSelectComponent?: (componentId: string) => void
+  onSelectConnector?: (connectorId: string) => void
+  onMoveComponent?: (componentId: string, position: { x: number; y: number }, parentFrameId?: string) => void
+  onResizeComponent?: (componentId: string, size: { width: number; height: number }) => void
+  onConnectComponents?: (fromComponentId: string, toComponentId: string) => void
+  onReconnectConnector?: (connectorId: string, fromComponentId: string, toComponentId: string) => void
+  onDuplicateComponent?: (componentId: string) => void
+  onDeleteComponents?: (componentIds: string[]) => void
+  onDeleteConnectors?: (connectorIds: string[]) => void
+}

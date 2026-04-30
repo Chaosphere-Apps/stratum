@@ -1,0 +1,9 @@
+.DS_Store
+*.log
+Dockerfile
+.dockerignore
+README.md
+bin
+tmp
+coverage.out
+
