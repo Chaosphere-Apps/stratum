@@ -55,6 +55,10 @@ import type { ReactFlowPreviewProps } from './types'
 type ArchitectureNodeData = {
   component: DesignComponent
   selected: boolean
+  readOnly: boolean
+  inTraversal: boolean
+  activeTraversal: boolean
+  dimmedByTraversal: boolean
   onResizeEnd?: (componentId: string, size: { width: number; height: number }) => void
   onRequestDelete?: (componentId: string) => void
   onRequestDuplicate?: (componentId: string) => void
@@ -67,11 +71,17 @@ function ArchitectureNode({ data, id }: NodeProps<Node<ArchitectureNodeData>>) {
   if (data.component.type === 'frame.cloud') {
     return (
       <div
-        className={`rf-cloud-frame ${data.selected ? 'selected' : ''}`}
+        className={[
+          'rf-cloud-frame',
+          data.selected ? 'selected' : '',
+          data.inTraversal ? 'in-traversal' : '',
+          data.activeTraversal ? 'active-traversal' : '',
+          data.dimmedByTraversal ? 'dimmed-by-traversal' : '',
+        ].filter(Boolean).join(' ')}
         style={{ '--node-color': item.color } as CSSProperties}
       >
         <NodeResizer
-          isVisible={data.selected}
+          isVisible={data.selected && !data.readOnly}
           minWidth={320}
           minHeight={220}
           handleClassName="rf-resize-handle"
@@ -82,7 +92,7 @@ function ArchitectureNode({ data, id }: NodeProps<Node<ArchitectureNodeData>>) {
         />
         <CanvasNodeToolbar
           componentId={id}
-          isVisible={data.selected}
+          isVisible={data.selected && !data.readOnly}
           onRequestDelete={data.onRequestDelete}
           onRequestDuplicate={data.onRequestDuplicate}
           onRequestSelect={data.onRequestSelect}
@@ -97,13 +107,19 @@ function ArchitectureNode({ data, id }: NodeProps<Node<ArchitectureNodeData>>) {
 
   return (
     <div
-      className={`rf-architecture-node ${data.selected ? 'selected' : ''}`}
+      className={[
+        'rf-architecture-node',
+        data.selected ? 'selected' : '',
+        data.inTraversal ? 'in-traversal' : '',
+        data.activeTraversal ? 'active-traversal' : '',
+        data.dimmedByTraversal ? 'dimmed-by-traversal' : '',
+      ].filter(Boolean).join(' ')}
       style={{ '--node-color': item.color } as CSSProperties}
       data-component-type={data.component.type}
     >
       <div className="rf-node-depth" aria-hidden="true" />
       <NodeResizer
-        isVisible={data.selected}
+        isVisible={data.selected && !data.readOnly}
         minWidth={180}
         minHeight={72}
         handleClassName="rf-resize-handle"
@@ -112,7 +128,7 @@ function ArchitectureNode({ data, id }: NodeProps<Node<ArchitectureNodeData>>) {
       />
       <CanvasNodeToolbar
         componentId={id}
-        isVisible={data.selected}
+        isVisible={data.selected && !data.readOnly}
         onRequestDelete={data.onRequestDelete}
         onRequestDuplicate={data.onRequestDuplicate}
         onRequestSelect={data.onRequestSelect}
@@ -203,7 +219,13 @@ export function ReactFlowCanvasProvider({
   onDuplicateComponent,
   onDeleteComponents,
   onDeleteConnectors,
+  readOnly = false,
+  traversalFocus,
 }: ReactFlowPreviewProps) {
+  const traversalComponentIds = useMemo(() => new Set(traversalFocus?.componentIds ?? []), [traversalFocus?.componentIds])
+  const traversalConnectorIds = useMemo(() => new Set(traversalFocus?.connectorIds ?? []), [traversalFocus?.connectorIds])
+  const hasTraversalFocus = traversalComponentIds.size > 0 || traversalConnectorIds.size > 0
+
   const nodes = useMemo<Node<ArchitectureNodeData>[]>(
     () =>
       [...design.components]
@@ -224,6 +246,10 @@ export function ReactFlowCanvasProvider({
           data: {
             component,
             selected: component.id === selectedComponentId,
+            readOnly,
+            inTraversal: traversalComponentIds.has(component.id),
+            activeTraversal: component.id === traversalFocus?.activeComponentId,
+            dimmedByTraversal: hasTraversalFocus && !traversalComponentIds.has(component.id) && component.type !== 'frame.cloud',
             onResizeEnd: onResizeComponent,
             onRequestDelete: (componentId) => onDeleteComponents?.([componentId]),
             onRequestDuplicate: onDuplicateComponent,
@@ -236,43 +262,74 @@ export function ReactFlowCanvasProvider({
           },
           zIndex: component.type === 'frame.cloud' ? 0 : 2,
         })),
-    [design.components, onDeleteComponents, onDuplicateComponent, onResizeComponent, onSelectComponent, selectedComponentId],
+    [
+      design.components,
+      hasTraversalFocus,
+      onDeleteComponents,
+      onDuplicateComponent,
+      onResizeComponent,
+      onSelectComponent,
+      readOnly,
+      selectedComponentId,
+      traversalComponentIds,
+      traversalFocus?.activeComponentId,
+    ],
   )
 
   const edges = useMemo<Edge[]>(
     () =>
-      design.connectors.map((connector) => ({
-        id: connector.id,
-        source: connector.fromComponentId,
-        target: connector.toComponentId,
-        animated: connector.animated,
-        type: 'smoothstep',
-        selected: connector.id === selectedConnectorId,
-        reconnectable: true,
-        zIndex: 4,
-        interactionWidth: 28,
-        label: (
-          <div className={`rf-edge-label ${connector.id === selectedConnectorId ? 'selected' : ''}`}>
-            <strong>{connector.type.replaceAll('_', ' ')}</strong>
-            {connector.protocol ? <span>{connector.protocol}</span> : null}
-          </div>
-        ),
-        labelShowBg: false,
-        labelBgPadding: [0, 0],
-        labelBgBorderRadius: 0,
-        labelStyle: {
-          fill: '#0f172a',
-        },
-        markerEnd: { type: MarkerType.ArrowClosed },
-        style: {
-          strokeWidth: connector.id === selectedConnectorId ? 3 : 2.5,
-          stroke: connector.id === selectedConnectorId ? '#2563eb' : '#0f172a',
-        },
-      })),
-    [design.connectors, selectedConnectorId],
+      design.connectors.map((connector) => {
+        const inTraversal = traversalConnectorIds.has(connector.id)
+        const activeTraversal = connector.id === traversalFocus?.activeConnectorId
+        const dimmedByTraversal = hasTraversalFocus && !inTraversal
+        return {
+          id: connector.id,
+          source: connector.fromComponentId,
+          target: connector.toComponentId,
+          animated: connector.animated || inTraversal,
+          type: 'smoothstep',
+          selected: connector.id === selectedConnectorId,
+          reconnectable: true,
+          zIndex: inTraversal ? 8 : 4,
+          interactionWidth: 28,
+          label: (
+            <div
+              className={[
+                'rf-edge-label',
+                connector.id === selectedConnectorId ? 'selected' : '',
+                inTraversal ? 'in-traversal' : '',
+                activeTraversal ? 'active-traversal' : '',
+                dimmedByTraversal ? 'dimmed-by-traversal' : '',
+              ].filter(Boolean).join(' ')}
+            >
+              <strong>{connector.type.replaceAll('_', ' ')}</strong>
+              {connector.protocol ? <span>{connector.protocol}</span> : null}
+            </div>
+          ),
+          labelShowBg: false,
+          labelBgPadding: [0, 0],
+          labelBgBorderRadius: 0,
+          labelStyle: {
+            fill: '#0f172a',
+          },
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            color: activeTraversal || connector.id === selectedConnectorId ? '#2563eb' : inTraversal ? '#0f766e' : '#0f172a',
+          },
+          style: {
+            strokeWidth: activeTraversal || connector.id === selectedConnectorId ? 3.5 : inTraversal ? 3 : 2.5,
+            stroke: activeTraversal || connector.id === selectedConnectorId ? '#2563eb' : inTraversal ? '#0f766e' : '#0f172a',
+            opacity: dimmedByTraversal ? 0.22 : 1,
+          },
+        }
+      }),
+    [design.connectors, hasTraversalFocus, selectedConnectorId, traversalConnectorIds, traversalFocus?.activeConnectorId],
   )
 
   const handleNodesChange: OnNodesChange<Node<ArchitectureNodeData>> = (changes) => {
+    if (readOnly && changes.some((change) => change.type === 'remove' || change.type === 'position' || change.type === 'dimensions')) {
+      return
+    }
     const removed = changes.filter((change): change is NodeChange & { type: 'remove' } => change.type === 'remove')
     if (removed.length) {
       onDeleteComponents?.(removed.map((change) => change.id))
@@ -288,6 +345,7 @@ export function ReactFlowCanvasProvider({
   }
 
   const handleNodeDragStop: OnNodeDrag<Node<ArchitectureNodeData>> = (_, node) => {
+    if (readOnly) return
     if (node.data.component.type === 'frame.cloud') return
     const width = Number(node.style?.width ?? node.width ?? 230)
     const height = Number(node.style?.height ?? node.height ?? 78)
@@ -321,6 +379,9 @@ export function ReactFlowCanvasProvider({
   }
 
   const handleEdgesChange: OnEdgesChange<Edge> = (changes: EdgeChange[]) => {
+    if (readOnly && changes.some((change) => change.type === 'remove')) {
+      return
+    }
     const removed = changes.filter((change) => change.type === 'remove')
     if (removed.length) {
       onDeleteConnectors?.(removed.map((change) => change.id))
@@ -330,11 +391,13 @@ export function ReactFlowCanvasProvider({
   }
 
   function handleConnect(connection: Connection) {
+    if (readOnly) return
     if (!connection.source || !connection.target || connection.source === connection.target) return
     onConnectComponents?.(connection.source, connection.target)
   }
 
   const handleReconnect: OnReconnect<Edge> = (oldEdge, nextConnection) => {
+    if (readOnly) return
     if (!nextConnection.source || !nextConnection.target || nextConnection.source === nextConnection.target) return
     onReconnectConnector?.(oldEdge.id, nextConnection.source, nextConnection.target)
   }
@@ -349,12 +412,12 @@ export function ReactFlowCanvasProvider({
           fitView
           fitViewOptions={{ padding: 0.25 }}
           proOptions={{ hideAttribution: true }}
-          nodesDraggable
-          nodesConnectable
+          nodesDraggable={!readOnly}
+          nodesConnectable={!readOnly}
           elementsSelectable
-          edgesReconnectable
-          deleteKeyCode={['Backspace', 'Delete']}
-          connectOnClick
+          edgesReconnectable={!readOnly}
+          deleteKeyCode={readOnly ? null : ['Backspace', 'Delete']}
+          connectOnClick={!readOnly}
           connectionMode={ConnectionMode.Loose}
           reconnectRadius={18}
           selectionOnDrag

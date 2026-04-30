@@ -4,6 +4,13 @@ export interface ReactFlowPreviewProps {
   design: DesignDocument
   selectedComponentId?: string | null
   selectedConnectorId?: string | null
+  readOnly?: boolean
+  traversalFocus?: {
+    componentIds: string[]
+    connectorIds: string[]
+    activeComponentId?: string | null
+    activeConnectorId?: string | null
+  } | null
   onSelectComponent?: (componentId: string) => void
   onSelectConnector?: (connectorId: string) => void
   onMoveComponent?: (componentId: string, position: { x: number; y: number }, parentFrameId?: string) => void

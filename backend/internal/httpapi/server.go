@@ -49,13 +49,20 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/ai/provider/verify", s.handleVerifyAIProvider)
 	s.mux.HandleFunc("GET /api/workspaces", s.handleListWorkspaces)
 	s.mux.HandleFunc("POST /api/workspaces", s.handleCreateWorkspace)
+	s.mux.HandleFunc("DELETE /api/workspaces/{workspaceID}", s.handleDeleteWorkspace)
 	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/designs", s.handleListDesigns)
 	s.mux.HandleFunc("POST /api/workspaces/{workspaceID}/designs", s.handleCreateDesign)
 	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/designs/{designID}", s.handleGetDesign)
+	s.mux.HandleFunc("DELETE /api/workspaces/{workspaceID}/designs/{designID}", s.handleDeleteDesign)
 	s.mux.HandleFunc("PATCH /api/workspaces/{workspaceID}/designs/{designID}", s.handleUpdateDesignMetadata)
 	s.mux.HandleFunc("PUT /api/workspaces/{workspaceID}/designs/{designID}/document", s.handleSaveDesignDocument)
 	s.mux.HandleFunc("POST /api/workspaces/{workspaceID}/designs/{designID}/analysis", s.handleAnalyzeDesign)
 	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/designs/{designID}/versions", s.handleListDesignVersions)
+	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/designs/{designID}/docs", s.handleListDesignDocs)
+	s.mux.HandleFunc("POST /api/workspaces/{workspaceID}/designs/{designID}/docs", s.handleCreateDesignDoc)
+	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}", s.handleGetDesignDoc)
+	s.mux.HandleFunc("PATCH /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}", s.handleUpdateDesignDoc)
+	s.mux.HandleFunc("DELETE /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}", s.handleDeleteDesignDoc)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -216,6 +223,15 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"workspace": workspace})
 }
 
+func (s *Server) handleDeleteWorkspace(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	if err := s.hub.Repository().DeleteWorkspace(r.Context(), workspaceID); err != nil {
+		writeError(w, statusForDeleteError(err), err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleListDesigns(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designs, err := s.hub.Repository().ListDesigns(r.Context(), workspaceID)
@@ -253,6 +269,16 @@ func (s *Server) handleGetDesign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"design": design})
+}
+
+func (s *Server) handleDeleteDesign(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	designID := r.PathValue("designID")
+	if err := s.hub.Repository().DeleteDesign(r.Context(), workspaceID, designID); err != nil {
+		writeError(w, statusForDeleteError(err), err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleUpdateDesignMetadata(w http.ResponseWriter, r *http.Request) {
@@ -344,6 +370,98 @@ func (s *Server) handleAnalyzeDesign(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"analysis": report})
 }
 
+func (s *Server) handleListDesignDocs(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	designID := r.PathValue("designID")
+	docs, err := s.hub.Repository().ListDesignDocs(r.Context(), workspaceID, designID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"docs": docs})
+}
+
+func (s *Server) handleGetDesignDoc(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	designID := r.PathValue("designID")
+	docID := r.PathValue("docID")
+	doc, err := s.hub.Repository().GetDesignDoc(r.Context(), workspaceID, designID, docID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"doc": doc})
+}
+
+func (s *Server) handleCreateDesignDoc(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	designID := r.PathValue("designID")
+	var body struct {
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		Format string `json:"format"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	doc, err := s.hub.Repository().CreateDesignDoc(r.Context(), workspaceID, designID, body.Title, body.Body, body.Format)
+	if err != nil {
+		writeError(w, statusForDeleteError(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"doc": doc})
+}
+
+func (s *Server) handleUpdateDesignDoc(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	designID := r.PathValue("designID")
+	docID := r.PathValue("docID")
+	existing, err := s.hub.Repository().GetDesignDoc(r.Context(), workspaceID, designID, docID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	var body struct {
+		Title  *string `json:"title"`
+		Body   *string `json:"body"`
+		Format *string `json:"format"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	title := existing.Title
+	docBody := existing.Body
+	format := existing.Format
+	if body.Title != nil {
+		title = *body.Title
+	}
+	if body.Body != nil {
+		docBody = *body.Body
+	}
+	if body.Format != nil {
+		format = *body.Format
+	}
+	doc, err := s.hub.Repository().UpdateDesignDoc(r.Context(), workspaceID, designID, docID, title, docBody, format)
+	if err != nil {
+		writeError(w, statusForDeleteError(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"doc": doc})
+}
+
+func (s *Server) handleDeleteDesignDoc(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	designID := r.PathValue("designID")
+	docID := r.PathValue("docID")
+	if err := s.hub.Repository().DeleteDesignDoc(r.Context(), workspaceID, designID, docID); err != nil {
+		writeError(w, statusForDeleteError(err), err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeCORSHeaders(w, r, s.cfg.AllowedOrigins)
@@ -407,6 +525,20 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
+func statusForDeleteError(err error) int {
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "not found") {
+		return http.StatusNotFound
+	}
+	if strings.Contains(message, "not empty") {
+		return http.StatusConflict
+	}
+	if strings.Contains(message, "cannot be deleted") || strings.Contains(message, "required") {
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
+}
+
 func writeCORSHeaders(w http.ResponseWriter, r *http.Request, allowedOrigins []string) {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
@@ -416,7 +548,7 @@ func writeCORSHeaders(w http.ResponseWriter, r *http.Request, allowedOrigins []s
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Add("Vary", "Origin")
 	}
-	w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,PUT,OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,PUT,DELETE,OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type")
 	w.Header().Set("Access-Control-Allow-Private-Network", "true")
 	w.Header().Set("Access-Control-Max-Age", "600")

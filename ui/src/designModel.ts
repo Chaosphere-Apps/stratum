@@ -25,6 +25,7 @@ export function createEmptyDesign(input: { id?: string; title?: string; requirem
     requirementBrief: createEmptyRequirementBrief(input.requirementBrief),
     components: [],
     connectors: [],
+    journeys: [],
     updatedAt: new Date().toISOString(),
   }
 }
@@ -51,6 +52,7 @@ export function touchDesign(design: DesignDocument): DesignDocument {
   return {
     ...design,
     requirementBrief: createEmptyRequirementBrief(design.requirementBrief),
+    journeys: design.journeys ?? [],
     updatedAt: new Date().toISOString(),
   }
 }

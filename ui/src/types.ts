@@ -100,6 +100,24 @@ export interface DesignNote {
   tone: 'neutral' | 'risk' | 'decision' | 'question'
 }
 
+export interface DesignJourneyStep {
+  id: string
+  componentId?: string
+  connectorId?: string
+  title: string
+  description: string
+}
+
+export interface DesignJourney {
+  id: string
+  title: string
+  description: string
+  entryComponentId?: string
+  steps: DesignJourneyStep[]
+  createdAt: string
+  updatedAt: string
+}
+
 export interface DesignDocument {
   schemaVersion: 'sde-ui/v0.1'
   id: string
@@ -107,5 +125,6 @@ export interface DesignDocument {
   requirementBrief: RequirementBrief
   components: DesignComponent[]
   connectors: DesignConnector[]
+  journeys: DesignJourney[]
   updatedAt: string
 }

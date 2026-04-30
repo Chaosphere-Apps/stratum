@@ -18,6 +18,7 @@ type MemoryRepository struct {
 	workspaces map[string]domain.Workspace
 	designs    map[string]domain.Design
 	versions   map[string][]domain.DesignVersion
+	docs       map[string]domain.DesignDoc
 	clock      func() time.Time
 }
 
@@ -26,6 +27,7 @@ func NewMemoryRepository() *MemoryRepository {
 		workspaces: make(map[string]domain.Workspace),
 		designs:    make(map[string]domain.Design),
 		versions:   make(map[string][]domain.DesignVersion),
+		docs:       make(map[string]domain.DesignDoc),
 		clock:      time.Now,
 	}
 }
@@ -111,6 +113,32 @@ func (r *MemoryRepository) CreateWorkspace(ctx context.Context, name string) (do
 	}
 	r.workspaces[workspace.ID] = workspace
 	return workspace, nil
+}
+
+func (r *MemoryRepository) DeleteWorkspace(ctx context.Context, workspaceID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(workspaceID) == "" {
+		return errors.New("workspace id is required")
+	}
+	if workspaceID == domain.GuestWorkspaceID {
+		return errors.New("default workspace cannot be deleted")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, ok := r.workspaces[workspaceID]; !ok {
+		return errors.New("workspace not found")
+	}
+	for _, design := range r.designs {
+		if design.WorkspaceID == workspaceID {
+			return errors.New("workspace is not empty")
+		}
+	}
+	delete(r.workspaces, workspaceID)
+	return nil
 }
 
 func (r *MemoryRepository) ListDesigns(ctx context.Context, workspaceID string) ([]domain.Design, error) {
@@ -309,6 +337,35 @@ func (r *MemoryRepository) UpsertDesign(ctx context.Context, design domain.Desig
 	return design, nil
 }
 
+func (r *MemoryRepository) DeleteDesign(ctx context.Context, workspaceID string, designID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if workspaceID == "" || designID == "" {
+		return errors.New("workspace id and design id are required")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	design, ok := r.designs[designID]
+	if !ok || design.WorkspaceID != workspaceID {
+		return errors.New("design not found")
+	}
+	delete(r.designs, designID)
+	delete(r.versions, designID)
+	for docID, doc := range r.docs {
+		if doc.DesignID == designID && doc.WorkspaceID == workspaceID {
+			delete(r.docs, docID)
+		}
+	}
+	if workspace, ok := r.workspaces[workspaceID]; ok {
+		workspace.UpdatedAt = r.clock().UTC()
+		r.workspaces[workspaceID] = workspace
+	}
+	return nil
+}
+
 func (r *MemoryRepository) ListDesignVersions(ctx context.Context, workspaceID string, designID string) ([]domain.DesignVersion, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -330,6 +387,138 @@ func (r *MemoryRepository) ListDesignVersions(ctx context.Context, workspaceID s
 		return versions[i].VersionNumber > versions[j].VersionNumber
 	})
 	return versions, nil
+}
+
+func (r *MemoryRepository) ListDesignDocs(ctx context.Context, workspaceID string, designID string) ([]domain.DesignDoc, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if workspaceID == "" || designID == "" {
+		return nil, errors.New("workspace id and design id are required")
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if design, ok := r.designs[designID]; !ok || design.WorkspaceID != workspaceID {
+		return nil, errors.New("design not found")
+	}
+	docs := make([]domain.DesignDoc, 0, len(r.docs))
+	for _, doc := range r.docs {
+		if doc.WorkspaceID == workspaceID && doc.DesignID == designID {
+			docs = append(docs, doc)
+		}
+	}
+	sort.Slice(docs, func(i, j int) bool {
+		return docs[i].UpdatedAt.After(docs[j].UpdatedAt)
+	})
+	return docs, nil
+}
+
+func (r *MemoryRepository) GetDesignDoc(ctx context.Context, workspaceID string, designID string, docID string) (domain.DesignDoc, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.DesignDoc{}, err
+	}
+	if workspaceID == "" || designID == "" || docID == "" {
+		return domain.DesignDoc{}, errors.New("workspace id, design id, and doc id are required")
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	doc, ok := r.docs[docID]
+	if !ok || doc.WorkspaceID != workspaceID || doc.DesignID != designID {
+		return domain.DesignDoc{}, errors.New("design doc not found")
+	}
+	return doc, nil
+}
+
+func (r *MemoryRepository) CreateDesignDoc(ctx context.Context, workspaceID string, designID string, title string, body string, format string) (domain.DesignDoc, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.DesignDoc{}, err
+	}
+	if workspaceID == "" || designID == "" {
+		return domain.DesignDoc{}, errors.New("workspace id and design id are required")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if design, ok := r.designs[designID]; !ok || design.WorkspaceID != workspaceID {
+		return domain.DesignDoc{}, errors.New("design not found")
+	}
+	now := r.clock().UTC()
+	doc := domain.DesignDoc{
+		ID:          fmt.Sprintf("doc_%d", now.UnixNano()),
+		WorkspaceID: workspaceID,
+		DesignID:    designID,
+		Title:       normalizedDocTitle(title),
+		Body:        body,
+		Format:      normalizedDocFormat(format),
+		CreatedBy:   domain.GuestUserID,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	r.docs[doc.ID] = doc
+	return doc, nil
+}
+
+func (r *MemoryRepository) UpdateDesignDoc(ctx context.Context, workspaceID string, designID string, docID string, title string, body string, format string) (domain.DesignDoc, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.DesignDoc{}, err
+	}
+	if workspaceID == "" || designID == "" || docID == "" {
+		return domain.DesignDoc{}, errors.New("workspace id, design id, and doc id are required")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	doc, ok := r.docs[docID]
+	if !ok || doc.WorkspaceID != workspaceID || doc.DesignID != designID {
+		return domain.DesignDoc{}, errors.New("design doc not found")
+	}
+	doc.Title = normalizedDocTitle(title)
+	doc.Body = body
+	doc.Format = normalizedDocFormat(format)
+	doc.UpdatedAt = r.clock().UTC()
+	r.docs[doc.ID] = doc
+	return doc, nil
+}
+
+func (r *MemoryRepository) DeleteDesignDoc(ctx context.Context, workspaceID string, designID string, docID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if workspaceID == "" || designID == "" || docID == "" {
+		return errors.New("workspace id, design id, and doc id are required")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	doc, ok := r.docs[docID]
+	if !ok || doc.WorkspaceID != workspaceID || doc.DesignID != designID {
+		return errors.New("design doc not found")
+	}
+	delete(r.docs, docID)
+	return nil
+}
+
+func normalizedDocTitle(title string) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return "Untitled doc"
+	}
+	return title
+}
+
+func normalizedDocFormat(format string) string {
+	format = strings.TrimSpace(strings.ToLower(format))
+	if format == "" {
+		return "html"
+	}
+	return format
 }
 
 func initialDesignDocument(document []byte, designID string, name string, now time.Time) (json.RawMessage, error) {
@@ -361,6 +550,7 @@ func initialDesignDocument(document []byte, designID string, name string, now ti
 		},
 		"components": []any{},
 		"connectors": []any{},
+		"journeys":   []any{},
 	}
 	parsed["id"] = designID
 	parsed["title"] = name

@@ -73,6 +73,20 @@ CREATE TABLE IF NOT EXISTS design_versions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_design_versions_design_version ON design_versions(design_id, version_number DESC);
+
+CREATE TABLE IF NOT EXISTS design_docs (
+	id TEXT PRIMARY KEY,
+	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+	design_id TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+	title TEXT NOT NULL,
+	body TEXT NOT NULL,
+	format TEXT NOT NULL DEFAULT 'html',
+	created_by TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL,
+	updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_design_docs_design_updated ON design_docs(workspace_id, design_id, updated_at DESC);
 `)
 	return err
 }
@@ -155,6 +169,51 @@ VALUES ($1, $2, $3, $4)
 		return domain.Workspace{}, err
 	}
 	return workspace, nil
+}
+
+func (r *PostgresRepository) DeleteWorkspace(ctx context.Context, workspaceID string) error {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return errors.New("workspace id is required")
+	}
+	if workspaceID == domain.GuestWorkspaceID {
+		return errors.New("default workspace cannot be deleted")
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer rollback(ctx, tx)
+
+	var lockedWorkspaceID string
+	if err := tx.QueryRow(ctx, `
+SELECT id
+FROM workspaces
+WHERE id = $1
+FOR UPDATE
+`, workspaceID).Scan(&lockedWorkspaceID); errors.Is(err, pgx.ErrNoRows) {
+		return errors.New("workspace not found")
+	} else if err != nil {
+		return err
+	}
+
+	var designCount int
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM designs WHERE workspace_id = $1`, workspaceID).Scan(&designCount); err != nil {
+		return err
+	}
+	if designCount > 0 {
+		return errors.New("workspace is not empty")
+	}
+
+	tag, err := tx.Exec(ctx, `DELETE FROM workspaces WHERE id = $1`, workspaceID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errors.New("workspace not found")
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) ListDesigns(ctx context.Context, workspaceID string) ([]domain.Design, error) {
@@ -395,6 +454,30 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	return design, nil
 }
 
+func (r *PostgresRepository) DeleteDesign(ctx context.Context, workspaceID string, designID string) error {
+	if strings.TrimSpace(workspaceID) == "" || strings.TrimSpace(designID) == "" {
+		return errors.New("workspace id and design id are required")
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer rollback(ctx, tx)
+
+	tag, err := tx.Exec(ctx, `DELETE FROM designs WHERE workspace_id = $1 AND id = $2`, workspaceID, designID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errors.New("design not found")
+	}
+	if _, err := tx.Exec(ctx, `UPDATE workspaces SET updated_at = $1 WHERE id = $2`, r.clock().UTC(), workspaceID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func (r *PostgresRepository) ListDesignVersions(ctx context.Context, workspaceID string, designID string) ([]domain.DesignVersion, error) {
 	if _, err := r.GetDesign(ctx, workspaceID, designID); err != nil {
 		return nil, err
@@ -419,6 +502,118 @@ ORDER BY version_number DESC
 		versions = append(versions, version)
 	}
 	return versions, rows.Err()
+}
+
+func (r *PostgresRepository) ListDesignDocs(ctx context.Context, workspaceID string, designID string) ([]domain.DesignDoc, error) {
+	if _, err := r.GetDesign(ctx, workspaceID, designID); err != nil {
+		return nil, err
+	}
+	rows, err := r.pool.Query(ctx, `
+SELECT id, workspace_id, design_id, title, body, format, created_by, created_at, updated_at
+FROM design_docs
+WHERE workspace_id = $1 AND design_id = $2
+ORDER BY updated_at DESC
+`, workspaceID, designID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	docs := []domain.DesignDoc{}
+	for rows.Next() {
+		doc, err := scanDesignDoc(rows)
+		if err != nil {
+			return nil, err
+		}
+		docs = append(docs, doc)
+	}
+	return docs, rows.Err()
+}
+
+func (r *PostgresRepository) GetDesignDoc(ctx context.Context, workspaceID string, designID string, docID string) (domain.DesignDoc, error) {
+	if strings.TrimSpace(workspaceID) == "" || strings.TrimSpace(designID) == "" || strings.TrimSpace(docID) == "" {
+		return domain.DesignDoc{}, errors.New("workspace id, design id, and doc id are required")
+	}
+	row := r.pool.QueryRow(ctx, `
+SELECT id, workspace_id, design_id, title, body, format, created_by, created_at, updated_at
+FROM design_docs
+WHERE workspace_id = $1 AND design_id = $2 AND id = $3
+`, workspaceID, designID, docID)
+	doc, err := scanDesignDoc(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.DesignDoc{}, errors.New("design doc not found")
+	}
+	return doc, err
+}
+
+func (r *PostgresRepository) CreateDesignDoc(ctx context.Context, workspaceID string, designID string, title string, body string, format string) (domain.DesignDoc, error) {
+	if strings.TrimSpace(workspaceID) == "" || strings.TrimSpace(designID) == "" {
+		return domain.DesignDoc{}, errors.New("workspace id and design id are required")
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.DesignDoc{}, err
+	}
+	defer rollback(ctx, tx)
+
+	if err := ensureDesignExists(ctx, tx, workspaceID, designID); err != nil {
+		return domain.DesignDoc{}, err
+	}
+	now := r.clock().UTC()
+	doc := domain.DesignDoc{
+		ID:          fmt.Sprintf("doc_%d", now.UnixNano()),
+		WorkspaceID: workspaceID,
+		DesignID:    designID,
+		Title:       normalizedDocTitle(title),
+		Body:        body,
+		Format:      normalizedDocFormat(format),
+		CreatedBy:   domain.GuestUserID,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO design_docs (id, workspace_id, design_id, title, body, format, created_by, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+`, doc.ID, doc.WorkspaceID, doc.DesignID, doc.Title, doc.Body, doc.Format, doc.CreatedBy, now); err != nil {
+		return domain.DesignDoc{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.DesignDoc{}, err
+	}
+	return doc, nil
+}
+
+func (r *PostgresRepository) UpdateDesignDoc(ctx context.Context, workspaceID string, designID string, docID string, title string, body string, format string) (domain.DesignDoc, error) {
+	if strings.TrimSpace(workspaceID) == "" || strings.TrimSpace(designID) == "" || strings.TrimSpace(docID) == "" {
+		return domain.DesignDoc{}, errors.New("workspace id, design id, and doc id are required")
+	}
+	now := r.clock().UTC()
+	row := r.pool.QueryRow(ctx, `
+UPDATE design_docs
+SET title = $1, body = $2, format = $3, updated_at = $4
+WHERE workspace_id = $5 AND design_id = $6 AND id = $7
+RETURNING id, workspace_id, design_id, title, body, format, created_by, created_at, updated_at
+`, normalizedDocTitle(title), body, normalizedDocFormat(format), now, workspaceID, designID, docID)
+	doc, err := scanDesignDoc(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.DesignDoc{}, errors.New("design doc not found")
+	}
+	return doc, err
+}
+
+func (r *PostgresRepository) DeleteDesignDoc(ctx context.Context, workspaceID string, designID string, docID string) error {
+	if strings.TrimSpace(workspaceID) == "" || strings.TrimSpace(designID) == "" || strings.TrimSpace(docID) == "" {
+		return errors.New("workspace id, design id, and doc id are required")
+	}
+	tag, err := r.pool.Exec(ctx, `DELETE FROM design_docs WHERE workspace_id = $1 AND design_id = $2 AND id = $3`, workspaceID, designID, docID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errors.New("design doc not found")
+	}
+	return nil
 }
 
 type rowScanner interface {
@@ -482,6 +677,22 @@ func scanDesignVersion(row rowScanner) (domain.DesignVersion, error) {
 	return version, nil
 }
 
+func scanDesignDoc(row rowScanner) (domain.DesignDoc, error) {
+	var doc domain.DesignDoc
+	err := row.Scan(
+		&doc.ID,
+		&doc.WorkspaceID,
+		&doc.DesignID,
+		&doc.Title,
+		&doc.Body,
+		&doc.Format,
+		&doc.CreatedBy,
+		&doc.CreatedAt,
+		&doc.UpdatedAt,
+	)
+	return doc, err
+}
+
 func ensureWorkspaceExists(ctx context.Context, tx pgx.Tx, workspaceID string) error {
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM workspaces WHERE id = $1)`, workspaceID).Scan(&exists); err != nil {
@@ -501,6 +712,17 @@ WHERE workspace_id = $1 AND id = $2
 FOR UPDATE
 `, workspaceID, designID)
 	return scanDesign(row)
+}
+
+func ensureDesignExists(ctx context.Context, tx pgx.Tx, workspaceID string, designID string) error {
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM designs WHERE workspace_id = $1 AND id = $2)`, workspaceID, designID).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return errors.New("design not found")
+	}
+	return nil
 }
 
 func rollback(ctx context.Context, tx pgx.Tx) {

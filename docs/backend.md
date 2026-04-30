@@ -11,6 +11,7 @@ Production-oriented Go backend for the system design evaluator.
 - Design versions created on save.
 - WebSocket API for workspace snapshot and design upsert.
 - Postgres repository with exact structured JSON document storage.
+- Separate design-doc storage for rich written context so large docs do not travel with every canvas save.
 - Structured design analysis across requirements, topology, traffic, consistency, availability, security, and data.
 - In-memory fallback repository for tests and quick local runs.
 - Modular package boundaries for later Rust analyzers, AI workers, and collaboration services.
@@ -54,12 +55,20 @@ Production-relevant configuration:
 - `GET /api/profile`
 - `GET /api/workspaces`
 - `POST /api/workspaces`
+- `DELETE /api/workspaces/{workspaceID}` deletes only empty non-guest workspaces; non-empty workspaces return `409 Conflict`.
 - `GET /api/workspaces/{workspaceID}/designs`
+- `POST /api/workspaces/{workspaceID}/designs`
 - `GET /api/workspaces/{workspaceID}/designs/{designID}`
+- `DELETE /api/workspaces/{workspaceID}/designs/{designID}`
 - `PATCH /api/workspaces/{workspaceID}/designs/{designID}`
 - `PUT /api/workspaces/{workspaceID}/designs/{designID}/document`
 - `POST /api/workspaces/{workspaceID}/designs/{designID}/analysis`
 - `GET /api/workspaces/{workspaceID}/designs/{designID}/versions`
+- `GET /api/workspaces/{workspaceID}/designs/{designID}/docs`
+- `POST /api/workspaces/{workspaceID}/designs/{designID}/docs`
+- `GET /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}`
+- `PATCH /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}`
+- `DELETE /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}`
 
 ## Test
 

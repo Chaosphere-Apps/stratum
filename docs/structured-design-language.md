@@ -177,31 +177,56 @@ Connector `type` values:
 - `model_call`
 - `observability_signal`
 
-## 7. Flows
+## 7. Flows And Journeys
 
-Flows represent end-to-end behavior across components and connectors. They are especially useful for AI evaluation because many risks appear across paths, not individual boxes.
+Flows and journeys represent end-to-end behavior across components and connectors. They are especially useful for AI evaluation because many risks appear across paths, not individual boxes.
+
+In the UI, a journey is an ordered walkthrough for reviewers: each step can reference a component, a connector, or both. This gives Stratum a Figma-like prototype mode for request direction, user journeys, failure paths, and operational runbooks without relying on free-form canvas annotations.
 
 ```yaml
-flows:
-  - id: flow-answer-question
-    name: Answer customer question
+journeys:
+  - id: journey-answer-question
+    title: Answer customer question
+    description: Primary support request path
     useCase: usecase.answer-customer-question
-    trigger: customer sends support question
+    entryComponentId: web-app
     steps:
-      - component: web-app
-      - connector: web-to-support-api
-      - component: support-api
-      - connector: support-api-to-pii-filter
-      - component: pii-filter
-      - connector: pii-filter-to-llm
-      - component: support-llm
-      - connector: support-api-to-human-queue
-        condition: low confidence or model unavailable
-    latencyBudgetMs: 3000
-    failureBehavior: route to human review queue
+      - id: step-web-app
+        componentId: web-app
+        title: Customer opens support
+        description: The user starts in the web application.
+      - id: step-api
+        connectorId: web-to-support-api
+        componentId: support-api
+        title: Submit question
+        description: The web app sends a synchronous request to the support API.
 ```
 
-## 8. Boundaries
+## 8. Attached Text Documents
+
+Some design context should remain textual: decisions, rollout notes, API contracts, migration plans, threat-model notes, or links to external docs. Attached design documents are stored as their own backend resource so large docs do not inflate every structured design save.
+
+```yaml
+designDoc:
+  id: doc-rollout-plan
+  workspaceId: workspace-payments
+  designId: design-fep-cloud
+  title: Rollout plan
+  body: <p>Start with one region, monitor queue depth, then expand after soak testing.</p>
+  format: html
+  createdAt: 2026-04-30T10:00:00Z
+  updatedAt: 2026-04-30T10:00:00Z
+```
+
+Primary endpoints:
+
+- `GET /api/workspaces/{workspaceID}/designs/{designID}/docs`
+- `POST /api/workspaces/{workspaceID}/designs/{designID}/docs`
+- `GET /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}`
+- `PATCH /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}`
+- `DELETE /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}`
+
+## 9. Boundaries
 
 Boundaries make security, ownership, and deployment evaluation easier.
 
@@ -291,4 +316,3 @@ MVP exports should include:
 - Mermaid generated from the same component and connector graph.
 
 The UI should let users inspect the structured document behind the canvas, but most users should not need to author it directly.
-

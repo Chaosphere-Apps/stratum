@@ -10,6 +10,9 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@tiptap/extension-link": "^3.22.5",
+    "@tiptap/react": "^3.22.5",
+    "@tiptap/starter-kit": "^3.22.5",
     "@vitejs/plugin-react": "^5.0.0",
     "@xyflow/react": "^12.10.2",
     "lucide-react": "^0.468.0",

@@ -19,6 +19,23 @@ interface DesignsResponse {
 interface DesignResponse {
   design: BackendDesign
 }
+export interface BackendDesignDoc {
+  id: string
+  workspaceId: string
+  designId: string
+  title: string
+  body: string
+  format: 'html' | 'markdown'
+  createdBy: string
+  createdAt: string
+  updatedAt: string
+}
+interface DesignDocsResponse {
+  docs: BackendDesignDoc[]
+}
+interface DesignDocResponse {
+  doc: BackendDesignDoc
+}
 export interface DesignAnalysisFinding {
   severity: 'low' | 'medium' | 'high'
   suite: string
@@ -73,6 +90,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`Backend request failed: ${response.status}${body ? ` - ${body}` : ''}`)
   }
 
+  if (response.status === 204) return undefined as T
   return (await response.json()) as T
 }
 
@@ -91,6 +109,12 @@ export function createWorkspace(name: string) {
   })
 }
 
+export function deleteWorkspace(workspaceId: string) {
+  return request<void>(`/api/workspaces/${encodeURIComponent(workspaceId)}`, {
+    method: 'DELETE',
+  })
+}
+
 export function fetchWorkspaceDesigns(workspaceId: string) {
   return request<DesignsResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/designs`)
 }
@@ -100,6 +124,12 @@ export function createDesign(workspaceId: string, name: string, document?: unkno
   return request<DesignResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/designs`, {
     method: 'POST',
     body: JSON.stringify(body),
+  })
+}
+
+export function deleteDesign(workspaceId: string, designId: string) {
+  return request<void>(`/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}`, {
+    method: 'DELETE',
   })
 }
 
@@ -139,6 +169,50 @@ export function analyzeDesign(workspaceId: string, designId: string) {
     {
       method: 'POST',
       body: JSON.stringify({}),
+    },
+  )
+}
+
+export function fetchDesignDocs(workspaceId: string, designId: string) {
+  return request<DesignDocsResponse>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/docs`,
+  )
+}
+
+export function createDesignDoc(
+  workspaceId: string,
+  designId: string,
+  input: { title: string; body?: string; format?: 'html' | 'markdown' },
+) {
+  return request<DesignDocResponse>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/docs`,
+    {
+      method: 'POST',
+      body: JSON.stringify(input),
+    },
+  )
+}
+
+export function updateDesignDoc(
+  workspaceId: string,
+  designId: string,
+  docId: string,
+  input: { title?: string; body?: string; format?: 'html' | 'markdown' },
+) {
+  return request<DesignDocResponse>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/docs/${encodeURIComponent(docId)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    },
+  )
+}
+
+export function deleteDesignDoc(workspaceId: string, designId: string, docId: string) {
+  return request<void>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/docs/${encodeURIComponent(docId)}`,
+    {
+      method: 'DELETE',
     },
   )
 }

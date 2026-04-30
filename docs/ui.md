@@ -41,6 +41,8 @@ The image uses a multi-stage build: Node builds the Vite app, then an unprivileg
 - Redis-specific metadata for cluster mode, replication, persistence, eviction, consistency, failover, backup, QPS, memory, and hot key risk.
 - Typed connector creation between semantic components.
 - React Flow connector handles with smooth arrows that stay attached when components move.
+- Traversal journeys that can be generated from the component graph, edited as ordered steps, and highlighted on the canvas.
+- Attached design docs for written context such as assumptions, decisions, links, rollout notes, and review narrative, saved through separate backend doc endpoints.
 - Sticky Note as a visible canvas component.
 - Component notes with neutral, risk, decision, and question tones.
 - Focus mode for a larger canvas.

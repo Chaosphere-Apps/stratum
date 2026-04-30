@@ -40,6 +40,18 @@ type DesignVersion struct {
 	CreatedAt      time.Time       `json:"createdAt"`
 }
 
+type DesignDoc struct {
+	ID          string    `json:"id"`
+	WorkspaceID string    `json:"workspaceId"`
+	DesignID    string    `json:"designId"`
+	Title       string    `json:"title"`
+	Body        string    `json:"body"`
+	Format      string    `json:"format"`
+	CreatedBy   string    `json:"createdBy"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
 type WorkspaceSnapshot struct {
 	Workspace Workspace `json:"workspace"`
 	Designs   []Design  `json:"designs"`
