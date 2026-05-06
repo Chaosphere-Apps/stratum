@@ -35,6 +35,7 @@ export function createComponent(input: {
   type: ComponentType
   name: string
 }): DesignComponent {
+  const metadata = input.type === 'data.redis' ? { redis: defaultRedisMetadata() } : {}
   return {
     id: `cmp_${crypto.randomUUID()}`,
     shapeId: input.shapeId,
@@ -43,7 +44,7 @@ export function createComponent(input: {
     purpose: '',
     owner: '',
     criticality: 'medium',
-    metadata: input.type === 'data.redis' ? { redis: defaultRedisMetadata() } : {},
+    metadata,
     notes: [],
   }
 }

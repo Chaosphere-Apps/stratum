@@ -10,6 +10,7 @@ export type ComponentType =
   | 'external.api'
   | 'observability.telemetry'
   | 'security.control'
+  | 'design.link'
   | 'note.sticky'
   | 'frame.cloud'
 
@@ -53,6 +54,14 @@ export interface RedisMetadata {
   hotKeyRisk: Unknownable<'low' | 'medium' | 'high'>
 }
 
+export interface LinkedDesignMetadata {
+  workspaceId: string
+  designId: string
+  title: string
+  access: 'private' | 'workspace' | 'public'
+  updatedAt: string
+}
+
 export type ComponentMetadata = {
   expectedQps?: number | null
   latencyBudgetMs?: number | null
@@ -67,6 +76,7 @@ export type ComponentMetadata = {
   }
   notes?: string
   redis?: RedisMetadata
+  linkedDesign?: LinkedDesignMetadata
 }
 
 export interface DesignComponent {

@@ -87,6 +87,13 @@ export const componentCatalog: CatalogItem[] = [
     color: '#be123c',
   },
   {
+    type: 'design.link',
+    label: 'Linked Design',
+    shortLabel: 'Link',
+    description: 'Reference another design in this workspace.',
+    color: '#4f46e5',
+  },
+  {
     type: 'frame.cloud',
     label: 'Cloud Frame',
     shortLabel: 'Cloud',

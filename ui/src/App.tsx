@@ -21,6 +21,7 @@ import {
   Database,
   Download,
   FolderPlus,
+  Image as ImageIcon,
   LayoutDashboard,
   MessageSquarePlus,
   Monitor,
@@ -33,6 +34,7 @@ import {
   SkipBack,
   SkipForward,
   Trash2,
+  Upload,
 } from 'lucide-react'
 import { componentCatalog, getCatalogItem } from './catalog'
 import {
@@ -273,7 +275,6 @@ export function App() {
   const [showExport, setShowExport] = useState(false)
   const [pendingConnector, setPendingConnector] = useState<PendingConnector | null>(null)
   const [focusMode, setFocusMode] = useState(false)
-  const [designsOpen, setDesignsOpen] = useState(false)
   const [requirementsOpen, setRequirementsOpen] = useState(false)
   const [canvasMode, setCanvasMode] = useState<CanvasMode>('design')
   const [activeJourneyId, setActiveJourneyId] = useState<string | null>(null)
@@ -291,6 +292,7 @@ export function App() {
   const [aiConnection, setAIConnection] = useState<AIConnectionMetadata | null>(() => loadAIConnection())
   const [aiSettingsOpen, setAISettingsOpen] = useState(false)
   const [copilotOpen, setCopilotOpen] = useState(false)
+  const [visionOpen, setVisionOpen] = useState(false)
   const canvasHostRef = useRef<HTMLDivElement | null>(null)
   const designRef = useRef(design)
   const designNameRef = useRef(designName)
@@ -1237,41 +1239,6 @@ export function App() {
           </div>
 
           <section className="panel-section">
-            <div className="section-title collapsible-title">
-              <button type="button" onClick={() => setDesignsOpen((value) => !value)}>
-                {designsOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
-                Designs
-              </button>
-            </div>
-            {designsOpen ? (
-              <div className="design-list compact-design-list">
-                {workspaceDesigns.map((backendDesign) => (
-                  <div className="compact-design-row" key={backendDesign.id}>
-                    <button
-                      className={`design-list-item ${backendDesign.document.id === design.id ? 'active' : ''}`}
-                      onClick={() => selectBackendDesign(backendDesign)}
-                    >
-                      <strong>{backendDesign.name || backendDesign.document.title || 'Untitled design'}</strong>
-                      <small>{new Date(backendDesign.updatedAt).toLocaleString()}</small>
-                    </button>
-                    <button
-                      className="icon-danger-button"
-                      type="button"
-                      aria-label={`Delete ${backendDesign.name || backendDesign.document.title || 'design'}`}
-                      onClick={() => requestDeleteDesign(backendDesign)}
-                    >
-                      <Trash2 size={15} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-            <button className="command" type="button" disabled={homeAction === 'design'} onClick={openNewDesignBrief}>
-              <FilePlus2 size={16} /> {homeAction === 'design' ? 'Creating...' : 'New design'}
-            </button>
-          </section>
-
-          <section className="panel-section">
             <div className="section-title">Components</div>
             <div className="catalog-list">
               {componentCatalog.map((item) => (
@@ -1347,16 +1314,21 @@ export function App() {
             <button className="command compact" onClick={saveDraft}>
               <Save size={16} /> {saveState === 'saving' ? 'Saving' : saveState === 'saved' ? 'Saved' : 'Save'}
             </button>
-            <button
-              className="command compact primary-compact"
-              onClick={() => openAnalysisModal({ run: analysisState !== 'running' })}
-              disabled={!selectedDesignId}
-            >
-              <Sparkles size={16} /> {analysisState === 'running' ? 'Analysing' : 'Analyse'}
-            </button>
-            <button className="command compact" onClick={() => setCopilotOpen(true)} disabled={!aiConnection}>
-              <Sparkles size={16} /> Copilot
-            </button>
+            <div className="ai-tool-suite" aria-label="AI tools">
+              <button
+                className="command compact primary-compact"
+                onClick={() => openAnalysisModal({ run: analysisState !== 'running' })}
+                disabled={!selectedDesignId}
+              >
+                <Sparkles size={16} /> {analysisState === 'running' ? 'Analysing' : 'Analyse'}
+              </button>
+              <button className="command compact" onClick={() => setVisionOpen(true)} disabled={!selectedDesignId}>
+                <ImageIcon size={16} /> Vision
+              </button>
+              <button className="command compact" onClick={() => setCopilotOpen(true)} disabled={!aiConnection}>
+                <Sparkles size={16} /> Draft
+              </button>
+            </div>
             <button className="command compact" onClick={() => setDocsModalOpen(true)}>
               <BookOpen size={16} /> Docs
             </button>
@@ -1369,7 +1341,6 @@ export function App() {
             {analysisState === 'error' ? (
               <span className="save-error">Analysis failed</span>
             ) : null}
-            <span className={`sync-pill ${backendSync.status}`}>{backendSync.status}</span>
             <button className="command compact" onClick={() => setShowExport((value) => !value)}>
               <Braces size={16} /> Structured view
             </button>
@@ -1432,8 +1403,11 @@ export function App() {
           ) : !isCanvasReadOnly && selectedComponent ? (
             <ComponentInspector
               component={selectedComponent}
+              currentDesignId={selectedDesignId ?? design.id}
+              workspaceDesigns={workspaceDesigns}
               onChange={updateComponentFromInspector}
               onDelete={() => deleteComponents([selectedComponent.id])}
+              onOpenLinkedDesign={selectBackendDesign}
             />
           ) : (
             <AnalysisWorkspace
@@ -1528,6 +1502,12 @@ export function App() {
           onClose={() => setCopilotOpen(false)}
         />
       ) : null}
+      {visionOpen ? (
+        <VisionImportModal
+          aiConnection={aiConnection}
+          onClose={() => setVisionOpen(false)}
+        />
+      ) : null}
     </div>
   )
 }
@@ -1597,7 +1577,7 @@ function AppNavbar({
 
       <button className="profile-chip" type="button" onClick={onOpenAISettings} title="Configure AI provider">
         <span>{profile?.displayName ?? 'Guest Designer'}</span>
-        <strong>{aiConnection ? `${aiConnection.provider} connected` : 'AI not connected'}</strong>
+        <strong>{aiConnection ? `${aiConnection.provider} ready` : 'Configure AI'}</strong>
       </button>
     </header>
   )
@@ -1754,6 +1734,89 @@ function CopilotDraftModal({
           </button>
           <button className="primary-action" type="button" disabled>
             Generate draft
+          </button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function VisionImportModal({
+  aiConnection,
+  onClose,
+}: {
+  aiConnection: AIConnectionMetadata | null
+  onClose: () => void
+}) {
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const canGenerate = Boolean(aiConnection && selectedFile)
+
+  useEffect(() => {
+    if (!selectedFile) {
+      setPreviewUrl(null)
+      return
+    }
+    const objectUrl = URL.createObjectURL(selectedFile)
+    setPreviewUrl(objectUrl)
+    return () => URL.revokeObjectURL(objectUrl)
+  }, [selectedFile])
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="vision-import-modal" role="dialog" aria-modal="true" aria-labelledby="vision-import-title">
+        <div className="modal-heading">
+          <div>
+            <p className="eyebrow">AI Vision</p>
+            <h2 id="vision-import-title">Import a whiteboard sketch</h2>
+            <span>
+              Upload a whiteboard image so Stratum can later extract components, flows, and assumptions into a structured design.
+            </span>
+          </div>
+        </div>
+
+        <label className={`vision-dropzone ${previewUrl ? 'has-preview' : ''}`}>
+          <input
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
+          />
+          {previewUrl ? (
+            <img src={previewUrl} alt={selectedFile?.name ?? 'Selected whiteboard'} />
+          ) : (
+            <div>
+              <Upload size={24} />
+              <strong>Choose whiteboard image</strong>
+              <span>PNG, JPG, WebP, or GIF</span>
+            </div>
+          )}
+        </label>
+
+        {selectedFile ? (
+          <div className="vision-file-summary">
+            <ImageIcon size={18} />
+            <div>
+              <strong>{selectedFile.name}</strong>
+              <span>{Math.max(1, Math.round(selectedFile.size / 1024))} KB</span>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="analysis-empty">
+          <strong>{aiConnection ? 'Vision pipeline placeholder' : 'AI provider required'}</strong>
+          <span>
+            {aiConnection
+              ? 'Next backend step: send this image to the configured vision model and return structured components and connectors for review.'
+              : 'Configure an AI provider before generating architecture from images.'}
+          </span>
+        </div>
+
+        <div className="modal-actions">
+          <button className="secondary-action" type="button" onClick={onClose}>
+            Close
+          </button>
+          <button className="primary-action" type="button" disabled={!canGenerate}>
+            Generate architecture
           </button>
         </div>
       </section>
@@ -2644,12 +2707,18 @@ function HomeScreen({
 
 function ComponentInspector({
   component,
+  currentDesignId,
+  workspaceDesigns,
   onChange,
   onDelete,
+  onOpenLinkedDesign,
 }: {
   component: DesignComponent
+  currentDesignId: string
+  workspaceDesigns: BackendDesign[]
   onChange: (component: DesignComponent) => void
   onDelete: () => void
+  onOpenLinkedDesign: (design: BackendDesign) => void
 }) {
   return (
     <div className="inspector">
@@ -2757,6 +2826,137 @@ function ComponentInspector({
       </div>
 
       {component.type === 'data.redis' && <RedisInspector component={component} onChange={onChange} />}
+      {component.type === 'design.link' ? (
+        <LinkedDesignInspector
+          component={component}
+          currentDesignId={currentDesignId}
+          workspaceDesigns={workspaceDesigns}
+          onChange={onChange}
+          onOpenLinkedDesign={onOpenLinkedDesign}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+function LinkedDesignInspector({
+  component,
+  currentDesignId,
+  workspaceDesigns,
+  onChange,
+  onOpenLinkedDesign,
+}: {
+  component: DesignComponent
+  currentDesignId: string
+  workspaceDesigns: BackendDesign[]
+  onChange: (component: DesignComponent) => void
+  onOpenLinkedDesign: (design: BackendDesign) => void
+}) {
+  const linkableDesigns = workspaceDesigns.filter((design) => design.id !== currentDesignId)
+  const linkedDesign = component.metadata.linkedDesign
+  const linkedBackendDesign = linkedDesign
+    ? workspaceDesigns.find((design) => design.id === linkedDesign.designId && design.workspaceId === linkedDesign.workspaceId)
+    : null
+  const currentLinkedTitle = linkedBackendDesign
+    ? linkedBackendDesign.name || linkedBackendDesign.document.title || 'Untitled design'
+    : linkedDesign?.title
+
+  useEffect(() => {
+    if (!linkedDesign || !linkedBackendDesign) return
+    const title = linkedBackendDesign.name || linkedBackendDesign.document.title || 'Untitled design'
+    if (
+      linkedDesign.title === title &&
+      linkedDesign.access === linkedBackendDesign.access &&
+      linkedDesign.updatedAt === linkedBackendDesign.updatedAt
+    ) {
+      return
+    }
+    onChange({
+      ...component,
+      metadata: {
+        ...component.metadata,
+        linkedDesign: {
+          workspaceId: linkedBackendDesign.workspaceId,
+          designId: linkedBackendDesign.id,
+          title,
+          access: linkedBackendDesign.access,
+          updatedAt: linkedBackendDesign.updatedAt,
+        },
+      },
+    })
+  }, [component, linkedBackendDesign, linkedDesign, onChange])
+
+  function updateLinkedDesign(designId: string) {
+    if (!designId) {
+      const metadata = { ...component.metadata }
+      delete metadata.linkedDesign
+      onChange({ ...component, metadata })
+      return
+    }
+    const target = workspaceDesigns.find((design) => design.id === designId)
+    if (!target) return
+    const title = target.name || target.document.title || 'Untitled design'
+    onChange({
+      ...component,
+      name: component.name === 'Linked Design' || component.name.trim() === '' ? title : component.name,
+      metadata: {
+        ...component.metadata,
+        linkedDesign: {
+          workspaceId: target.workspaceId,
+          designId: target.id,
+          title,
+          access: target.access,
+          updatedAt: target.updatedAt,
+        },
+      },
+    })
+  }
+
+  return (
+    <div className="inspector-group linked-design-inspector">
+      <div className="section-title">Linked design</div>
+      <label className="field">
+        <span>Target design</span>
+        <select value={linkedDesign?.designId ?? ''} onChange={(event) => updateLinkedDesign(event.target.value)}>
+          <option value="">Choose a design...</option>
+          {linkableDesigns.map((design) => (
+            <option key={design.id} value={design.id}>
+              {design.name || design.document.title || 'Untitled design'}
+            </option>
+          ))}
+        </select>
+      </label>
+      {linkedDesign ? (
+        <>
+          <Field label="Target ID" value={linkedDesign.designId} onChange={() => undefined} disabled />
+          <Field label="Title" value={currentLinkedTitle ?? 'Unavailable design'} onChange={() => undefined} disabled />
+          <Field
+            label="Access"
+            value={linkedBackendDesign?.access ?? `${linkedDesign.access} (not visible)`}
+            onChange={() => undefined}
+            disabled
+          />
+          <Field
+            label="Last synced"
+            value={new Date(linkedBackendDesign?.updatedAt ?? linkedDesign.updatedAt).toLocaleString()}
+            onChange={() => undefined}
+            disabled
+          />
+          <button
+            className="command"
+            type="button"
+            disabled={!linkedBackendDesign}
+            onClick={() => linkedBackendDesign && onOpenLinkedDesign(linkedBackendDesign)}
+          >
+            <LayoutDashboard size={16} /> Open linked design
+          </button>
+        </>
+      ) : (
+        <div className="analysis-empty compact-empty">
+          <strong>No target selected</strong>
+          <span>Links are limited to designs visible in this workspace.</span>
+        </div>
+      )}
     </div>
   )
 }
@@ -2912,11 +3112,21 @@ function StructuredView({ design }: { design: DesignDocument }) {
   )
 }
 
-function Field({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+function Field({
+  label,
+  value,
+  onChange,
+  disabled = false,
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+  disabled?: boolean
+}) {
   return (
     <label className="field">
       <span>{label}</span>
-      <input value={value} onChange={(event) => onChange(event.target.value)} />
+      <input value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
     </label>
   )
 }

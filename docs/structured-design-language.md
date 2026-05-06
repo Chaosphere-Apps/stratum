@@ -132,9 +132,27 @@ Component `type` should use dot notation:
 - `messaging.queue`
 - `ai.llm`
 - `ai.agent`
+- `design.link`
 - `security.policy_filter`
 - `observability.metrics`
 - `external.partner_api`
+
+Linked design components reference another design that the current user can already see. The link stores enough metadata for evaluation and display, but the target design should still be fetched through the normal design APIs when opened.
+
+```yaml
+components:
+  - id: payments-subsystem-link
+    type: design.link
+    name: Payments Subsystem
+    purpose: Points reviewers to the lower-level payment architecture.
+    metadata:
+      linkedDesign:
+        workspaceId: workspace-payments
+        designId: design-payments-subsystem
+        title: Payments Subsystem
+        access: workspace
+        updatedAt: 2026-04-30T10:00:00Z
+```
 
 ## 6. Connector Objects
 

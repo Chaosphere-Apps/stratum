@@ -38,6 +38,7 @@ The image uses a multi-stage build: Node builds the Vite app, then an unprivileg
 - Small architecture component catalog.
 - Click or drag-and-drop components from the catalog.
 - Component inspector with basic and evaluation fields.
+- Linked Design component for referencing another visible design in the same workspace.
 - Redis-specific metadata for cluster mode, replication, persistence, eviction, consistency, failover, backup, QPS, memory, and hot key risk.
 - Typed connector creation between semantic components.
 - React Flow connector handles with smooth arrows that stay attached when components move.

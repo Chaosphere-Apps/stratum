@@ -138,7 +138,11 @@ function ArchitectureNode({ data, id }: NodeProps<Node<ArchitectureNodeData>>) {
       <ComponentGlyph type={data.component.type} label={item.shortLabel} />
       <div className="rf-node-copy">
         <strong>{data.component.name || item.label}</strong>
-        <span>{data.component.type}</span>
+        <span>
+          {data.component.type === 'design.link' && data.component.metadata.linkedDesign
+            ? `${data.component.metadata.linkedDesign.title} · ${data.component.metadata.linkedDesign.access}`
+            : data.component.type}
+        </span>
       </div>
       <Handle id="source-right" className="rf-handle source" type="source" position={Position.Right} />
       <Handle id="source-bottom" className="rf-handle source bottom" type="source" position={Position.Bottom} />
@@ -198,6 +202,7 @@ const componentIcons: Partial<Record<DesignComponent['type'], LucideIcon>> = {
   'external.api': Cloud,
   'observability.telemetry': RadioTower,
   'security.control': Shield,
+  'design.link': FileText,
   'frame.cloud': Cloud,
   'note.sticky': FileText,
 }
