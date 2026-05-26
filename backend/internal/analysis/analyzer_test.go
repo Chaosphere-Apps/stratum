@@ -2,6 +2,7 @@ package analysis
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -85,6 +86,51 @@ func TestAnalyzeFindsSyncCycleAndSecurityBoundary(t *testing.T) {
 	if report.Signals["synchronousConnectors"] != 3 {
 		t.Fatalf("synchronousConnectors = %v, want 3", report.Signals["synchronousConnectors"])
 	}
+}
+
+func TestAIReviewContractIsStructured(t *testing.T) {
+	report, err := New().Analyze(json.RawMessage(`{
+		"schemaVersion": "sde-ui/v0.1",
+		"id": "design_1",
+		"title": "Notification system",
+		"requirementBrief": {"useCase": "Send transactional notifications"},
+		"components": [],
+		"connectors": []
+	}`))
+	if err != nil {
+		t.Fatalf("Analyze returned error: %v", err)
+	}
+	prompt := BuildSystemPrompt()
+	if !strings.Contains(prompt, `"executiveReview"`) || !strings.Contains(prompt, `"recommendations"`) {
+		t.Fatalf("system prompt does not include required JSON shape: %s", prompt)
+	}
+	updated := AttachAIReview(report, AIReview{
+		Status:          "completed",
+		Provider:        "openai",
+		Model:           "gpt-4.1",
+		ExecutiveReview: "The design needs durability and delivery semantics before production review.",
+		Recommendations: []AIReviewPoint{{Severity: "medium", Suite: "data", Title: "Define message retention", Detail: "Retention is not modeled.", Impact: "Retries may be unsafe.", Recommendation: "Add queue retention and dead-letter policy."}},
+	})
+	if updated.Summary != "The design needs durability and delivery semantics before production review." {
+		t.Fatalf("summary = %q, want AI executive review", updated.Summary)
+	}
+	if updated.AIReview == nil || updated.AIReview.PromptVersion != PromptVersion {
+		t.Fatalf("AI review prompt version was not attached")
+	}
+	assertWorkflowStatus(t, updated, "ai", "completed")
+}
+
+func assertWorkflowStatus(t *testing.T, report Report, id string, status string) {
+	t.Helper()
+	for _, step := range report.Workflow {
+		if step.ID == id {
+			if step.Status != status {
+				t.Fatalf("workflow %q status = %q, want %q", id, step.Status, status)
+			}
+			return
+		}
+	}
+	t.Fatalf("workflow step %q missing in %#v", id, report.Workflow)
 }
 
 func assertFinding(t *testing.T, report Report, suite string, title string) {

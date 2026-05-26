@@ -12,6 +12,7 @@ dist/
 
 # Go
 .gocache/
+backend/.cache/
 coverage.out
 backend/server
 

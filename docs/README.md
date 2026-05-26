@@ -25,3 +25,8 @@ Public product and technical documentation for Stratum.
 
 - [Backend Service](backend.md)
 - [Backend Production Readiness](backend-production-readiness.md)
+- [All-in-One Image](all-in-one-image.md)
+
+## Administration
+
+- [Administration and SSO](admin-and-sso.md)

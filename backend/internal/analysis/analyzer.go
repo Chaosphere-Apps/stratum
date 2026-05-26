@@ -16,6 +16,8 @@ type Report struct {
 	Findings []Finding          `json:"findings"`
 	Signals  map[string]float64 `json:"signals"`
 	Suites   []SuiteReport      `json:"suites,omitempty"`
+	Workflow []WorkflowStep     `json:"workflow,omitempty"`
+	AIReview *AIReview          `json:"aiReview,omitempty"`
 }
 
 type Finding struct {
@@ -23,9 +25,19 @@ type Finding struct {
 	Suite          string `json:"suite"`
 	Title          string `json:"title"`
 	Detail         string `json:"detail"`
+	Impact         string `json:"impact,omitempty"`
+	Evidence       string `json:"evidence,omitempty"`
 	ComponentID    string `json:"componentId,omitempty"`
 	ConnectorID    string `json:"connectorId,omitempty"`
 	Recommendation string `json:"recommendation,omitempty"`
+	Confidence     string `json:"confidence,omitempty"`
+}
+
+type WorkflowStep struct {
+	ID     string `json:"id"`
+	Label  string `json:"label"`
+	Status string `json:"status"`
+	Detail string `json:"detail"`
 }
 
 type SuiteReport struct {
@@ -373,9 +385,12 @@ func (ctx *analysisContext) add(severity, suite, title, detail, componentID, con
 		Suite:          suite,
 		Title:          title,
 		Detail:         detail,
+		Impact:         impactForSeverity(severity),
+		Evidence:       evidenceLabel(componentID, connectorID),
 		ComponentID:    componentID,
 		ConnectorID:    connectorID,
 		Recommendation: recommendation,
+		Confidence:     "deterministic",
 	})
 	score, ok := ctx.suites[suite]
 	if !ok {
@@ -411,7 +426,7 @@ func (ctx *analysisContext) report() Report {
 	sort.SliceStable(ctx.findings, func(i, j int) bool {
 		return severityPenalty(ctx.findings[i].Severity) > severityPenalty(ctx.findings[j].Severity)
 	})
-	return Report{Summary: summary, Score: score, Findings: ctx.findings, Signals: ctx.signals, Suites: suites}
+	return Report{Summary: summary, Score: score, Findings: ctx.findings, Signals: ctx.signals, Suites: suites, Workflow: deterministicWorkflow()}
 }
 
 func (ctx *analysisContext) realComponents() []component {
@@ -527,6 +542,37 @@ func severityPenalty(severity string) int {
 		return 4
 	default:
 		return 6
+	}
+}
+
+func impactForSeverity(severity string) string {
+	switch severity {
+	case "high":
+		return "Likely to cause reliability, security, or correctness issues unless addressed before production."
+	case "medium":
+		return "May become a production risk as traffic, team ownership, or failure modes grow."
+	case "low":
+		return "Improves clarity and evaluation confidence."
+	default:
+		return "Review recommended."
+	}
+}
+
+func evidenceLabel(componentID string, connectorID string) string {
+	if componentID != "" {
+		return "component:" + componentID
+	}
+	if connectorID != "" {
+		return "connector:" + connectorID
+	}
+	return "design"
+}
+
+func deterministicWorkflow() []WorkflowStep {
+	return []WorkflowStep{
+		{ID: "parse", Label: "Parse structured design", Status: "completed", Detail: "Validated design JSON and extracted requirements, components, connectors, metadata, and notes."},
+		{ID: "math", Label: "Run deterministic suites", Status: "completed", Detail: "Evaluated topology, traffic, consistency, availability, security, data, and integrity signals."},
+		{ID: "ai", Label: "AI synthesis", Status: "skipped", Detail: "Configure an enterprise AI provider in Admin to add model-assisted tradeoff review."},
 	}
 }
 

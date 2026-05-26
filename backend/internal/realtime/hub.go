@@ -102,7 +102,7 @@ func (h *Hub) UpsertDesign(ctx context.Context, workspaceID string, payload Upse
 		WorkspaceID: workspaceID,
 		Title:       document.Title,
 		Document:    payload.Design,
-		CreatedBy:   domain.GuestUserID,
+		CreatedBy:   "",
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}

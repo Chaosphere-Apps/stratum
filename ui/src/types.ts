@@ -62,6 +62,15 @@ export interface LinkedDesignMetadata {
   updatedAt: string
 }
 
+export interface EnterpriseAssetRefMetadata {
+  assetId: string
+  name: string
+  type: string
+  owner: string
+  criticality: string
+  linkedAt: string
+}
+
 export type ComponentMetadata = {
   expectedQps?: number | null
   latencyBudgetMs?: number | null
@@ -77,6 +86,7 @@ export type ComponentMetadata = {
   notes?: string
   redis?: RedisMetadata
   linkedDesign?: LinkedDesignMetadata
+  enterpriseAsset?: EnterpriseAssetRefMetadata
 }
 
 export interface DesignComponent {

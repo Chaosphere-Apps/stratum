@@ -2,8 +2,8 @@ import {
   Component,
   lazy,
   Suspense,
-  type DragEvent,
   type ErrorInfo,
+  type CSSProperties,
   type ReactNode,
   useEffect,
   useMemo,
@@ -11,51 +11,100 @@ import {
   useState,
 } from 'react'
 import {
+  Activity,
   BookOpen,
   Boxes,
   Braces,
+  Bell,
+  BadgeCheck,
+  CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   ChevronsLeftRight,
+  Cloud,
   FilePlus2,
   Database,
   Download,
+  Eye,
   FolderPlus,
+  Globe2,
   Image as ImageIcon,
+  KeyRound,
   LayoutDashboard,
+  LockKeyhole,
+  LogOut,
+  MessageSquare,
   MessageSquarePlus,
   Monitor,
+  Pencil,
   Plus,
   RotateCcw,
   Route,
   Save,
+  Search,
   Server,
+  Settings,
+  Send,
+  ShieldCheck,
   Sparkles,
   SkipBack,
   SkipForward,
   Trash2,
   Upload,
+  UserCheck,
+  UserPlus,
 } from 'lucide-react'
 import { componentCatalog, getCatalogItem } from './catalog'
 import {
   analyzeDesign,
+  createCatalogAsset,
   createDesign,
+  createDesignComment,
   createDesignDoc,
+  createAdminUser,
+  createFirstAdmin,
   createWorkspace,
+  deleteAdminUser,
+  deleteCatalogAsset,
   deleteDesign as deleteDesignFromBackend,
   deleteDesignDoc as deleteDesignDocFromBackend,
   deleteWorkspace as deleteWorkspaceFromBackend,
+  fetchDesignComments,
   fetchDesignDocs,
+  fetchDesignReviews,
+  fetchNotifications,
   fetchProfile,
+  fetchAIProviderConfig,
+  fetchCatalogAssets,
+  fetchSetupStatus,
+  fetchSignInConfig,
+  fetchUsers,
   fetchWorkspaceDesign,
   fetchWorkspaceDesigns,
   fetchWorkspaces,
+  login,
+  logout,
+  markNotificationRead,
+  requestDesignReview,
   saveDesignDocument as saveDesignDocumentToBackend,
+  setInitialAdminPassword,
+  updateDesignReview,
   updateDesignDoc,
   updateDesignMetadata,
-  verifyAIProvider,
+  updateAdminUser,
+  updateAIProviderConfig,
+  updateCatalogAsset,
+  updateSignInConfig,
+  type BackendAIProviderConfig,
+  type BackendCatalogAsset,
+  type BackendDesignComment,
   type BackendDesignDoc,
+  type BackendDesignReviewRequest,
+  type BackendNotification,
   type BackendProfile,
+  type BackendSignInConfig,
+  type BackendUser,
   type DesignAnalysisReport,
 } from './backendApi'
 import { useBackendDesignSync, type BackendWorkspace } from './backendSync'
@@ -76,10 +125,12 @@ import type { BackendDesign } from './backendSync'
 
 type AppRoute =
   | { screen: 'home' }
+  | { screen: 'admin' }
   | { screen: 'workspace'; workspaceId: string }
   | { screen: 'design'; workspaceId: string; designId: string }
 
-type CanvasMode = 'design' | 'journey'
+type CanvasMode = 'design' | 'view' | 'comment' | 'journey'
+type ContextPanel = 'inspector' | 'requirements' | 'journey' | 'review'
 
 const defaultWorkspace: BackendWorkspace = {
   id: 'guest-workspace',
@@ -90,12 +141,7 @@ const RichTextDocEditor = lazy(() =>
   import('./components/RichTextDocEditor').then((module) => ({ default: module.RichTextDocEditor })),
 )
 
-interface AIConnectionMetadata {
-  provider: string
-  model: string
-  baseUrl: string
-  verifiedAt: string
-}
+type AIConnectionMetadata = BackendAIProviderConfig
 
 type DeleteTarget =
   | { kind: 'workspace'; workspace: BackendWorkspace }
@@ -116,21 +162,6 @@ const connectorTypeOptions: Array<{ value: ConnectorType; label: string; descrip
   { value: 'observability_signal', label: 'Observability signal', description: 'Metrics, logs, traces, or audit signals.' },
 ]
 
-const AI_CONNECTION_KEY = 'stratum.ai.connection'
-
-function loadAIConnection(): AIConnectionMetadata | null {
-  try {
-    const raw = window.localStorage.getItem(AI_CONNECTION_KEY)
-    return raw ? (JSON.parse(raw) as AIConnectionMetadata) : null
-  } catch {
-    return null
-  }
-}
-
-function saveAIConnection(connection: AIConnectionMetadata) {
-  window.localStorage.setItem(AI_CONNECTION_KEY, JSON.stringify(connection))
-}
-
 function parseRoute(pathname: string): AppRoute {
   const segments = pathname.split('/').filter(Boolean).map(decodeURIComponent)
   if (segments[0] === 'workspaces' && segments[1] && segments[2] === 'designs' && segments[3]) {
@@ -139,10 +170,14 @@ function parseRoute(pathname: string): AppRoute {
   if (segments[0] === 'workspaces' && segments[1]) {
     return { screen: 'workspace', workspaceId: segments[1] }
   }
+  if (segments[0] === 'admin') {
+    return { screen: 'admin' }
+  }
   return { screen: 'home' }
 }
 
 function routePath(route: AppRoute) {
+  if (route.screen === 'admin') return '/admin'
   if (route.screen === 'workspace') return `/workspaces/${encodeURIComponent(route.workspaceId)}`
   if (route.screen === 'design') {
     return `/workspaces/${encodeURIComponent(route.workspaceId)}/designs/${encodeURIComponent(route.designId)}`
@@ -246,17 +281,76 @@ function stripHtml(value: string) {
     .trim()
 }
 
+function isBackendOfflineMessage(message: string) {
+  const normalized = message.toLowerCase()
+  return normalized.includes('backend unavailable') || normalized.includes('load failed') || normalized.includes('failed to fetch')
+}
+
+function normalizedCatalogLabel(value: string) {
+  return value.trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
+function isPotentialCatalogMatch(left: string, right: string) {
+  const normalizedLeft = normalizedCatalogLabel(left)
+  const normalizedRight = normalizedCatalogLabel(right)
+  return Boolean(
+    normalizedLeft &&
+      normalizedRight &&
+      (normalizedLeft === normalizedRight || normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft)),
+  )
+}
+
+function CatalogGlyph({ type }: { type: ComponentType }) {
+  if (type === 'client.web') return <Monitor size={17} />
+  if (type === 'edge.api_gateway') return <Route size={17} />
+  if (type === 'data.sql_database' || type === 'data.redis' || type === 'data.object_store') return <Database size={17} />
+  if (type === 'messaging.queue') return <ChevronsLeftRight size={17} />
+  if (type === 'ai.llm') return <Sparkles size={17} />
+  if (type === 'external.api') return <Globe2 size={17} />
+  if (type === 'observability.telemetry') return <Activity size={17} />
+  if (type === 'security.control') return <ShieldCheck size={17} />
+  if (type === 'design.link') return <FilePlus2 size={17} />
+  if (type === 'frame.cloud') return <Cloud size={17} />
+  if (type === 'note.sticky') return <MessageSquare size={17} />
+  return <Server size={17} />
+}
+
+function isCatalogComponentType(type: string): type is ComponentType {
+  return componentCatalog.some((item) => item.type === type)
+}
+
+function catalogAssetUsageLabel(count: number) {
+  return `${count} design${count === 1 ? '' : 's'}`
+}
+
 export function App() {
   const initialRoute = parseRoute(window.location.pathname)
   const [route, setRoute] = useState<AppRoute>(initialRoute)
-  const [view, setView] = useState<'home' | 'canvas'>(initialRoute.screen === 'design' ? 'canvas' : 'home')
+  const [view, setView] = useState<'home' | 'canvas' | 'admin'>(initialRoute.screen === 'design' ? 'canvas' : initialRoute.screen === 'admin' ? 'admin' : 'home')
   const [activeWorkspaceId, setActiveWorkspaceId] = useState(
-    initialRoute.screen === 'home' ? 'guest-workspace' : initialRoute.workspaceId,
+    initialRoute.screen === 'workspace' || initialRoute.screen === 'design' ? initialRoute.workspaceId : 'guest-workspace',
   )
   const [selectedDesignId, setSelectedDesignId] = useState(
     initialRoute.screen === 'design' ? initialRoute.designId : null,
   )
   const [homeProfile, setHomeProfile] = useState<BackendProfile | null>(null)
+  const [users, setUsers] = useState<BackendUser[]>([])
+  const [activeUserId, setActiveUserId] = useState('')
+  const [authenticated, setAuthenticated] = useState(false)
+  const [authChecked, setAuthChecked] = useState(false)
+  const [setupRequired, setSetupRequired] = useState(false)
+  const [passwordSetupRequired, setPasswordSetupRequired] = useState(false)
+  const [setupAction, setSetupAction] = useState<'idle' | 'saving' | 'error'>('idle')
+  const [authAction, setAuthAction] = useState<'idle' | 'saving' | 'error'>('idle')
+  const [authError, setAuthError] = useState<string | null>(null)
+  const [adminError, setAdminError] = useState<string | null>(null)
+  const [signInConfig, setSignInConfig] = useState<BackendSignInConfig | null>(null)
+  const [catalogAssets, setCatalogAssets] = useState<BackendCatalogAsset[]>([])
+  const [catalogRailMode, setCatalogRailMode] = useState<'blocks' | 'catalog'>('blocks')
+  const [catalogSearch, setCatalogSearch] = useState('')
+  const [catalogTypeFilter, setCatalogTypeFilter] = useState('all')
+  const [notifications, setNotifications] = useState<BackendNotification[]>([])
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [homeWorkspaces, setHomeWorkspaces] = useState<BackendWorkspace[]>([defaultWorkspace])
   const [homeDesigns, setHomeDesigns] = useState<BackendDesign[]>([])
   const [newWorkspaceName, setNewWorkspaceName] = useState('')
@@ -272,10 +366,10 @@ export function App() {
   const [designName, setDesignName] = useState(() => loadDesignDocument()?.title ?? 'Untitled system design')
   const [selectedComponentId, setSelectedComponentId] = useState<string | null>(null)
   const [selectedConnectorId, setSelectedConnectorId] = useState<string | null>(null)
-  const [showExport, setShowExport] = useState(false)
   const [pendingConnector, setPendingConnector] = useState<PendingConnector | null>(null)
-  const [focusMode, setFocusMode] = useState(false)
-  const [requirementsOpen, setRequirementsOpen] = useState(false)
+  const [rightRailOpen, setRightRailOpen] = useState(true)
+  const [contextPanel, setContextPanel] = useState<ContextPanel>('requirements')
+  const [toolbarExpanded, setToolbarExpanded] = useState(false)
   const [canvasMode, setCanvasMode] = useState<CanvasMode>('design')
   const [activeJourneyId, setActiveJourneyId] = useState<string | null>(null)
   const [activeJourneyStepIndex, setActiveJourneyStepIndex] = useState(0)
@@ -289,11 +383,17 @@ export function App() {
   const [analysisError, setAnalysisError] = useState<string | null>(null)
   const [analysisModalOpen, setAnalysisModalOpen] = useState(false)
   const [docsModalOpen, setDocsModalOpen] = useState(false)
-  const [aiConnection, setAIConnection] = useState<AIConnectionMetadata | null>(() => loadAIConnection())
-  const [aiSettingsOpen, setAISettingsOpen] = useState(false)
+  const [comments, setComments] = useState<BackendDesignComment[]>([])
+  const [reviews, setReviews] = useState<BackendDesignReviewRequest[]>([])
+  const [commentDraft, setCommentDraft] = useState('')
+  const [reviewSummaryDrafts, setReviewSummaryDrafts] = useState<Record<string, string>>({})
+  const [requestReviewOpen, setRequestReviewOpen] = useState(false)
+  const [collaborationState, setCollaborationState] = useState<'idle' | 'loading' | 'saving' | 'error'>('idle')
+  const [collaborationError, setCollaborationError] = useState<string | null>(null)
+  const [collaborationOffline, setCollaborationOffline] = useState(false)
+  const [aiConnection, setAIConnection] = useState<AIConnectionMetadata | null>(null)
   const [copilotOpen, setCopilotOpen] = useState(false)
   const [visionOpen, setVisionOpen] = useState(false)
-  const canvasHostRef = useRef<HTMLDivElement | null>(null)
   const designRef = useRef(design)
   const designNameRef = useRef(designName)
   const autosaveTimer = useRef<number | null>(null)
@@ -310,6 +410,28 @@ export function App() {
     () => design.journeys?.find((journey) => journey.id === activeJourneyId) ?? null,
     [activeJourneyId, design.journeys],
   )
+  const filteredCatalogAssets = useMemo(() => {
+    const query = normalizedCatalogLabel(catalogSearch)
+    return catalogAssets
+      .filter((asset) => isCatalogComponentType(asset.type))
+      .filter((asset) => catalogTypeFilter === 'all' || asset.type === catalogTypeFilter)
+      .filter((asset) => {
+        if (!query) return true
+        return [asset.name, asset.normalizedName, asset.type, asset.owner, asset.description, asset.tags.join(' ')]
+          .some((value) => normalizedCatalogLabel(value).includes(query))
+      })
+      .sort((left, right) => {
+        if (right.usedInDesignCount !== left.usedInDesignCount) return right.usedInDesignCount - left.usedInDesignCount
+        return left.name.localeCompare(right.name)
+      })
+  }, [catalogAssets, catalogSearch, catalogTypeFilter])
+  const catalogTypeOptions = useMemo(
+    () =>
+      componentCatalog.filter((item) =>
+        catalogAssets.some((asset) => asset.type === item.type),
+      ),
+    [catalogAssets],
+  )
   const traversalFocus = useMemo(() => {
     if (!activeJourney || canvasMode !== 'journey') return null
     const componentIds = activeJourney.steps.flatMap((step) => (step.componentId ? [step.componentId] : []))
@@ -322,7 +444,7 @@ export function App() {
       activeConnectorId: activeStep?.connectorId ?? null,
     }
   }, [activeJourney, activeJourneyStepIndex, canvasMode])
-  const isCanvasReadOnly = canvasMode === 'journey'
+  const isCanvasReadOnly = canvasMode !== 'design'
 
   useEffect(() => {
     designRef.current = design
@@ -348,6 +470,59 @@ export function App() {
     if (activeTextDocumentId && designDocs.some((document) => document.id === activeTextDocumentId)) return
     setActiveTextDocumentId(designDocs[0]?.id ?? null)
   }, [activeTextDocumentId, designDocs])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadIdentity() {
+      try {
+        const setup = await fetchSetupStatus()
+        if (cancelled) return
+        setSetupRequired(setup.requiresSetup)
+        setPasswordSetupRequired(setup.requiresPasswordSetup)
+        if (setup.requiresSetup || setup.requiresPasswordSetup) {
+          setUsers([])
+          setHomeProfile(null)
+          setNotifications([])
+          setAuthenticated(false)
+          return
+        }
+        const [profile, userResponse, notificationResponse, catalogResponse] = await Promise.all([
+          fetchProfile(),
+          fetchUsers(),
+          fetchNotifications(),
+          fetchCatalogAssets(),
+        ])
+        if (cancelled) return
+        setHomeProfile(profile)
+        setActiveUserId(profile.id)
+        setAuthenticated(true)
+        setUsers(userResponse.users)
+        setNotifications(notificationResponse.notifications)
+        setCatalogAssets(catalogResponse.assets)
+      } catch (error) {
+        if (!cancelled) {
+          setAuthenticated(false)
+          console.warn('Could not load collaboration identity', error)
+        }
+      } finally {
+        if (!cancelled) setAuthChecked(true)
+      }
+    }
+
+    void loadIdentity()
+    return () => {
+      cancelled = true
+    }
+  }, [authenticated])
+
+  useEffect(() => {
+    void refreshCollaboration()
+  }, [activeWorkspaceId, selectedDesignId])
+
+  useEffect(() => {
+    if (view === 'admin' && !setupRequired) void refreshAdmin()
+  }, [view, setupRequired, authenticated])
 
   useEffect(() => {
     let cancelled = false
@@ -517,6 +692,9 @@ export function App() {
     if (nextRoute.screen === 'home') {
       setView('home')
       setSelectedDesignId(null)
+    } else if (nextRoute.screen === 'admin') {
+      setView('admin')
+      setSelectedDesignId(null)
     } else if (nextRoute.screen === 'workspace') {
       setActiveWorkspaceId(nextRoute.workspaceId)
       setSelectedDesignId(null)
@@ -671,6 +849,293 @@ export function App() {
     }
   }
 
+  async function completeFirstAdmin(input: { displayName: string; email: string; password: string }) {
+    setSetupAction('saving')
+    setHomeError(null)
+    try {
+      const response = await createFirstAdmin(input)
+      setAuthenticated(true)
+      setActiveUserId(response.user.id)
+      setUsers([response.user])
+      setHomeProfile(response.user)
+      setSetupRequired(false)
+      setPasswordSetupRequired(false)
+      setSetupAction('idle')
+      await refreshHome(activeWorkspaceId)
+    } catch (error) {
+      setSetupAction('error')
+      setHomeError(error instanceof Error ? error.message : 'Could not create admin user')
+    }
+  }
+
+  async function completePasswordSetup(input: { email: string; password: string }) {
+    setAuthAction('saving')
+    setAuthError(null)
+    try {
+      const response = await setInitialAdminPassword(input)
+      setAuthenticated(true)
+      setActiveUserId(response.user.id)
+      setHomeProfile(response.user)
+      setPasswordSetupRequired(false)
+      setAuthAction('idle')
+      await refreshHome(activeWorkspaceId)
+    } catch (error) {
+      setAuthAction('error')
+      setAuthError(error instanceof Error ? error.message : 'Could not set admin password')
+    }
+  }
+
+  async function signIn(input: { email: string; password: string }) {
+    setAuthAction('saving')
+    setAuthError(null)
+    try {
+      const response = await login(input)
+      setAuthenticated(true)
+      setActiveUserId(response.user.id)
+      setHomeProfile(response.user)
+      setAuthAction('idle')
+      await refreshHome(activeWorkspaceId)
+    } catch (error) {
+      setAuthAction('error')
+      setAuthError(error instanceof Error ? error.message : 'Could not sign in')
+    }
+  }
+
+  async function signOut() {
+    await logout().catch(() => undefined)
+    setAuthenticated(false)
+    setActiveUserId('')
+    setHomeProfile(null)
+    setUsers([])
+    applyRoute({ screen: 'home' })
+  }
+
+  async function refreshAdmin() {
+    setAdminError(null)
+    try {
+      const [userResponse, signInResponse, aiProviderResponse, catalogResponse] = await Promise.all([
+        fetchUsers(),
+        fetchSignInConfig(),
+        fetchAIProviderConfig(),
+        fetchCatalogAssets(),
+      ])
+      setUsers(userResponse.users)
+      setSignInConfig(signInResponse.signIn)
+      setAIConnection(aiProviderResponse.aiProvider)
+      setCatalogAssets(catalogResponse.assets)
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : 'Could not load admin console')
+    }
+  }
+
+  async function addCatalogAsset(input: {
+    name: string
+    type: string
+    owner?: string
+    description?: string
+    criticality?: string
+    tags?: string[]
+  }) {
+    setAdminError(null)
+    try {
+      const response = await createCatalogAsset(input)
+      setCatalogAssets((current) => [response.asset, ...current.filter((asset) => asset.id !== response.asset.id)])
+      return response.asset
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : 'Could not add catalog asset')
+      throw error
+    }
+  }
+
+  async function saveCatalogAsset(asset: BackendCatalogAsset) {
+    setAdminError(null)
+    try {
+      const response = await updateCatalogAsset(asset.id, asset)
+      setCatalogAssets((current) => current.map((item) => (item.id === response.asset.id ? response.asset : item)))
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : 'Could not save catalog asset')
+      throw error
+    }
+  }
+
+  async function removeCatalogAsset(assetId: string) {
+    setAdminError(null)
+    try {
+      await deleteCatalogAsset(assetId)
+      setCatalogAssets((current) => current.filter((asset) => asset.id !== assetId))
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : 'Could not delete catalog asset')
+      throw error
+    }
+  }
+
+  async function addAdminUser(input: { displayName: string; email: string; role: string; password?: string }) {
+    setAdminError(null)
+    try {
+      const response = await createAdminUser(input)
+      setUsers((current) => [...current, response.user])
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : 'Could not add user')
+    }
+  }
+
+  async function saveAdminUser(user: BackendUser & { password?: string }) {
+    setAdminError(null)
+    try {
+      const response = await updateAdminUser(user.id, {
+        displayName: user.displayName,
+        email: user.email,
+        role: user.role,
+        status: user.status,
+        password: user.password?.trim() || undefined,
+      })
+      setUsers((current) => current.map((item) => (item.id === response.user.id ? response.user : item)))
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : 'Could not save user')
+    }
+  }
+
+  async function removeAdminUser(userId: string) {
+    setAdminError(null)
+    try {
+      await deleteAdminUser(userId)
+      setUsers((current) => current.filter((user) => user.id !== userId))
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : 'Could not delete user')
+    }
+  }
+
+  async function saveSignIn(nextConfig: BackendSignInConfig & { clientSecret?: string }) {
+    setAdminError(null)
+    try {
+      const response = await updateSignInConfig(nextConfig)
+      setSignInConfig(response.signIn)
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : 'Could not save sign-in settings')
+    }
+  }
+
+  async function saveAIProvider(nextConfig: Partial<BackendAIProviderConfig> & { apiKey?: string }) {
+    setAdminError(null)
+    try {
+      const response = await updateAIProviderConfig(nextConfig)
+      setAIConnection(response.aiProvider)
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : 'Could not save AI provider settings')
+    }
+  }
+
+  async function refreshNotifications() {
+    try {
+      const response = await fetchNotifications()
+      setNotifications(response.notifications)
+    } catch (error) {
+      console.warn('Could not load notifications', error)
+    }
+  }
+
+  async function refreshCollaboration() {
+    if (!selectedDesignId) {
+      setComments([])
+      setReviews([])
+      setCollaborationState('idle')
+      return
+    }
+    setCollaborationState('loading')
+      setCollaborationError(null)
+      setCollaborationOffline(false)
+    try {
+      const [commentResponse, reviewResponse] = await Promise.all([
+        fetchDesignComments(activeWorkspaceId, selectedDesignId),
+        fetchDesignReviews(activeWorkspaceId, selectedDesignId),
+      ])
+      setComments(commentResponse.comments)
+      setReviews(reviewResponse.reviews)
+      setCollaborationState('idle')
+    } catch (error) {
+      setComments([])
+      setReviews([])
+      const message = error instanceof Error ? error.message : 'Could not load design review activity'
+      const offline = isBackendOfflineMessage(message)
+      setCollaborationOffline(offline)
+      setCollaborationError(offline ? null : message)
+      setCollaborationState(offline ? 'idle' : 'error')
+    }
+  }
+
+  async function submitDesignComment() {
+    const body = commentDraft.trim()
+    if (!selectedDesignId || !body) return
+      setCollaborationState('saving')
+      setCollaborationError(null)
+      setCollaborationOffline(false)
+    try {
+      const response = await createDesignComment(activeWorkspaceId, selectedDesignId, {
+        body,
+        componentId: selectedComponentId ?? undefined,
+        connectorId: selectedConnectorId ?? undefined,
+      })
+      setComments((current) => [response.comment, ...current])
+      setCommentDraft('')
+      setCollaborationState('idle')
+      await refreshNotifications()
+    } catch (error) {
+      setCollaborationError(error instanceof Error ? error.message : 'Could not add comment')
+      setCollaborationOffline(error instanceof Error && isBackendOfflineMessage(error.message))
+      setCollaborationState('error')
+    }
+  }
+
+  async function submitReviewRequest(reviewerId: string, message: string) {
+    if (!selectedDesignId) return
+    setCollaborationState('saving')
+    setCollaborationError(null)
+    setCollaborationOffline(false)
+    try {
+      const response = await requestDesignReview(activeWorkspaceId, selectedDesignId, { reviewerId, message })
+      setReviews((current) => [response.review, ...current])
+      setRequestReviewOpen(false)
+      setCollaborationState('idle')
+      await refreshNotifications()
+    } catch (error) {
+      setCollaborationError(error instanceof Error ? error.message : 'Could not request review')
+      setCollaborationOffline(error instanceof Error && isBackendOfflineMessage(error.message))
+      setCollaborationState('error')
+    }
+  }
+
+  async function completeReview(reviewId: string, status: BackendDesignReviewRequest['status']) {
+    if (!selectedDesignId) return
+    setCollaborationState('saving')
+    setCollaborationError(null)
+    setCollaborationOffline(false)
+    try {
+      const response = await updateDesignReview(activeWorkspaceId, selectedDesignId, reviewId, {
+        status,
+        summary: reviewSummaryDrafts[reviewId] ?? '',
+      })
+      setReviews((current) => current.map((review) => (review.id === response.review.id ? response.review : review)))
+      setReviewSummaryDrafts((current) => ({ ...current, [reviewId]: response.review.summary }))
+      setCollaborationState('idle')
+      await refreshNotifications()
+    } catch (error) {
+      setCollaborationError(error instanceof Error ? error.message : 'Could not update review')
+      setCollaborationOffline(error instanceof Error && isBackendOfflineMessage(error.message))
+      setCollaborationState('error')
+    }
+  }
+
+  async function markNotificationAsRead(notificationId: string) {
+    try {
+      await markNotificationRead(notificationId)
+      setNotifications((current) =>
+        current.map((notification) => (notification.id === notificationId ? { ...notification, read: true } : notification)),
+      )
+    } catch (error) {
+      console.warn('Could not mark notification read', error)
+    }
+  }
+
   async function handleCreateWorkspace() {
     const name = newWorkspaceName.trim()
     if (!name) {
@@ -764,24 +1229,9 @@ export function App() {
     createReactFlowComponent(type, nextReactFlowPosition())
   }
 
-  function getDraggedComponentType(event: DragEvent) {
-    return (
-      event.dataTransfer.getData('application/x-sde-component-type') ||
-      event.dataTransfer.getData('text/plain')
-    ) as ComponentType
-  }
-
-  function handleCanvasDrop(event: DragEvent<HTMLDivElement>) {
-    event.preventDefault()
-    event.stopPropagation()
+  function addCatalogAssetToCanvas(asset: BackendCatalogAsset) {
     if (isCanvasReadOnly) return
-    const type = getDraggedComponentType(event)
-    if (!type || !componentCatalog.some((item) => item.type === type)) return
-    const bounds = canvasHostRef.current?.getBoundingClientRect()
-    createReactFlowComponent(type, {
-      x: Math.max(80, event.clientX - (bounds?.left ?? 0) - 110),
-      y: Math.max(80, event.clientY - (bounds?.top ?? 0) - 50),
-    })
+    createReactFlowCatalogAsset(asset, nextReactFlowPosition())
   }
 
   function nextReactFlowPosition() {
@@ -816,6 +1266,43 @@ export function App() {
     }))
     setSelectedComponentId(component.id)
     setSelectedConnectorId(null)
+  }
+
+  function createReactFlowCatalogAsset(asset: BackendCatalogAsset, position: { x: number; y: number }) {
+    if (!isCatalogComponentType(asset.type)) return
+    const shapeId = `rf:${crypto.randomUUID()}`
+    const baseComponent = createComponent({ shapeId, type: asset.type, name: asset.name })
+    const parentFrame = findContainingFrame(position)
+    const storedPosition = parentFrame?.metadata.position
+      ? { x: position.x - parentFrame.metadata.position.x, y: position.y - parentFrame.metadata.position.y }
+      : position
+    const component: DesignComponent = {
+      ...baseComponent,
+      owner: asset.owner,
+      purpose: asset.description,
+      criticality: (asset.criticality || 'medium') as DesignComponent['criticality'],
+      metadata: {
+        ...baseComponent.metadata,
+        position: storedPosition,
+        ...(parentFrame ? { parentFrameId: parentFrame.id } : {}),
+        enterpriseAsset: {
+          assetId: asset.id,
+          name: asset.name,
+          type: asset.type,
+          owner: asset.owner,
+          criticality: asset.criticality,
+          linkedAt: new Date().toISOString(),
+        },
+      },
+    }
+    updateDesign((current) => ({
+      ...current,
+      components: [...current.components, component],
+    }))
+    setSelectedComponentId(component.id)
+    setSelectedConnectorId(null)
+    setContextPanel('inspector')
+    setRightRailOpen(true)
   }
 
   function findContainingFrame(position: { x: number; y: number }) {
@@ -1158,6 +1645,118 @@ export function App() {
     URL.revokeObjectURL(url)
   }
 
+  if (setupRequired) {
+    return (
+      <div className="screen-shell">
+        <FirstAdminOnboarding
+          error={homeError}
+          isSaving={setupAction === 'saving'}
+          onCreate={(input) => void completeFirstAdmin(input)}
+        />
+      </div>
+    )
+  }
+
+  if (!authChecked) {
+    return (
+      <div className="screen-shell">
+        <section className="onboarding-card">
+          <div className="home-logo">S</div>
+          <p className="eyebrow">Secure session</p>
+          <h1>Checking access</h1>
+          <p>Verifying your Stratum session.</p>
+        </section>
+      </div>
+    )
+  }
+
+  if (passwordSetupRequired || !authenticated) {
+    return (
+      <div className="screen-shell">
+        <LoginScreen
+          requiresPasswordSetup={passwordSetupRequired}
+          error={authError}
+          isSaving={authAction === 'saving'}
+          onLogin={(input) => void signIn(input)}
+          onSetInitialPassword={(input) => void completePasswordSetup(input)}
+        />
+      </div>
+    )
+  }
+
+  if (view === 'admin') {
+    if (homeProfile?.role !== 'admin') {
+      return (
+        <div className="screen-shell">
+          <AppNavbar
+            profile={homeProfile}
+            route={route}
+            workspaceName={homeWorkspaces.find((workspace) => workspace.id === activeWorkspaceId)?.name}
+            designTitle={designName}
+            designs={homeDesigns}
+            selectedDesignId={selectedDesignId}
+            aiConnection={aiConnection}
+            currentUser={homeProfile}
+            notifications={notifications}
+            onHome={() => applyRoute({ screen: 'home' })}
+            onWorkspace={() => applyRoute({ screen: 'workspace', workspaceId: activeWorkspaceId })}
+            onSelectDesign={selectBackendDesign}
+            onAdmin={() => applyRoute({ screen: 'admin' })}
+            onOpenNotifications={() => setNotificationsOpen(true)}
+            onLogout={() => void signOut()}
+          />
+          <main className="admin-shell">
+            <section className="onboarding-card">
+              <p className="eyebrow">Access control</p>
+              <h1>Admin access required</h1>
+              <p>Your current account does not have permission to manage users, sign-in, or provider settings.</p>
+              <button className="primary-action full-width" type="button" onClick={() => applyRoute({ screen: 'home' })}>
+                Go home
+              </button>
+            </section>
+          </main>
+        </div>
+      )
+    }
+    return (
+      <div className="screen-shell">
+        <AppNavbar
+          profile={homeProfile}
+          route={route}
+          workspaceName={homeWorkspaces.find((workspace) => workspace.id === activeWorkspaceId)?.name}
+          designTitle={designName}
+          designs={homeDesigns}
+          selectedDesignId={selectedDesignId}
+          aiConnection={aiConnection}
+          currentUser={homeProfile}
+          notifications={notifications}
+          onHome={() => applyRoute({ screen: 'home' })}
+          onWorkspace={() => applyRoute({ screen: 'workspace', workspaceId: activeWorkspaceId })}
+          onSelectDesign={selectBackendDesign}
+          onAdmin={() => applyRoute({ screen: 'admin' })}
+          onOpenNotifications={() => setNotificationsOpen(true)}
+          onLogout={() => void signOut()}
+        />
+        <AdminConsole
+          users={users}
+          activeUserId={activeUserId}
+          signInConfig={signInConfig}
+          aiProviderConfig={aiConnection}
+          catalogAssets={catalogAssets}
+          error={adminError}
+          onAddUser={addAdminUser}
+          onSaveUser={saveAdminUser}
+          onDeleteUser={(userId) => void removeAdminUser(userId)}
+          onSaveSignIn={(config) => void saveSignIn(config)}
+          onSaveAIProvider={(config) => void saveAIProvider(config)}
+          onAddCatalogAsset={addCatalogAsset}
+          onSaveCatalogAsset={saveCatalogAsset}
+          onDeleteCatalogAsset={removeCatalogAsset}
+        />
+      </div>
+    )
+  }
+
   if (view === 'home') {
     return (
       <div className="screen-shell">
@@ -1169,10 +1768,14 @@ export function App() {
           designs={homeDesigns}
           selectedDesignId={selectedDesignId}
           aiConnection={aiConnection}
+          currentUser={homeProfile}
+          notifications={notifications}
           onHome={() => applyRoute({ screen: 'home' })}
           onWorkspace={() => applyRoute({ screen: 'workspace', workspaceId: activeWorkspaceId })}
           onSelectDesign={selectBackendDesign}
-          onOpenAISettings={() => setAISettingsOpen(true)}
+          onAdmin={() => applyRoute({ screen: 'admin' })}
+          onOpenNotifications={() => setNotificationsOpen(true)}
+          onLogout={() => void signOut()}
         />
         <HomeScreen
           workspaces={homeWorkspaces}
@@ -1209,6 +1812,14 @@ export function App() {
             onConfirm={() => void confirmDeleteTarget()}
           />
         ) : null}
+        {notificationsOpen ? (
+          <NotificationsModal
+            notifications={notifications}
+            users={users}
+            onMarkRead={(notificationId) => void markNotificationAsRead(notificationId)}
+            onClose={() => setNotificationsOpen(false)}
+          />
+        ) : null}
       </div>
     )
   }
@@ -1223,12 +1834,16 @@ export function App() {
         designs={workspaceDesigns}
         selectedDesignId={selectedDesignId}
         aiConnection={aiConnection}
+        currentUser={homeProfile}
+        notifications={notifications}
         onHome={() => applyRoute({ screen: 'home' })}
         onWorkspace={() => applyRoute({ screen: 'workspace', workspaceId: activeWorkspaceId })}
         onSelectDesign={selectBackendDesign}
-        onOpenAISettings={() => setAISettingsOpen(true)}
+        onAdmin={() => applyRoute({ screen: 'admin' })}
+        onOpenNotifications={() => setNotificationsOpen(true)}
+        onLogout={() => void signOut()}
       />
-      <main className={`app-shell ${focusMode ? 'focus-mode' : ''}`}>
+      <main className={`app-shell ${rightRailOpen ? '' : 'right-rail-collapsed'}`}>
         <aside className="left-rail">
           <div className="brand">
             <Boxes size={20} />
@@ -1239,35 +1854,110 @@ export function App() {
           </div>
 
           <section className="panel-section">
-            <div className="section-title">Components</div>
-            <div className="catalog-list">
-              {componentCatalog.map((item) => (
-                <button
-                  className="catalog-item"
-                  key={item.type}
-                  draggable={!isCanvasReadOnly}
-                  disabled={isCanvasReadOnly}
-                  onDragStart={(event) => {
-                    if (isCanvasReadOnly) return
-                    event.dataTransfer.setData('application/x-sde-component-type', item.type)
-                    event.dataTransfer.setData('text/plain', item.type)
-                    event.dataTransfer.effectAllowed = 'copy'
-                  }}
-                  onClick={() => addComponent(item.type)}
-                  title={isCanvasReadOnly ? 'Switch to edit mode to add components' : item.description}
-                >
-                  <span className="swatch" style={{ background: item.color }} />
-                  <span>
-                    <strong>{item.label}</strong>
-                    <small>{item.description}</small>
-                  </span>
-                  <Plus size={16} />
-                </button>
-              ))}
+            <div className="section-title catalog-heading">
+              <span>{catalogRailMode === 'blocks' ? 'Components' : 'Enterprise Catalog'}</span>
+              <small>{catalogRailMode === 'blocks' ? `${componentCatalog.length} blocks` : `${catalogAssets.length} assets`}</small>
             </div>
+            <div className="rail-mode-switch" role="group" aria-label="Component source">
+              <button className={catalogRailMode === 'blocks' ? 'active' : ''} type="button" onClick={() => setCatalogRailMode('blocks')}>
+                Blocks
+              </button>
+              <button className={catalogRailMode === 'catalog' ? 'active' : ''} type="button" onClick={() => setCatalogRailMode('catalog')}>
+                Catalog
+              </button>
+            </div>
+            {catalogRailMode === 'blocks' ? (
+              <div className="catalog-list">
+                {componentCatalog.map((item) => (
+                  <button
+                    className="catalog-item"
+                    key={item.type}
+                    draggable={!isCanvasReadOnly}
+                    disabled={isCanvasReadOnly}
+                    onDragStart={(event) => {
+                      if (isCanvasReadOnly) return
+                      event.dataTransfer.setData('application/x-sde-component-type', item.type)
+                      event.dataTransfer.setData('text/plain', item.type)
+                      event.dataTransfer.effectAllowed = 'copy'
+                    }}
+                    onClick={() => addComponent(item.type)}
+                    title={isCanvasReadOnly ? 'Switch to edit mode to add components' : item.description}
+                  >
+                    <span className="catalog-icon-chip" style={{ '--component-color': item.color } as CSSProperties}>
+                      <CatalogGlyph type={item.type} />
+                    </span>
+                    <span>
+                      <strong>{item.label}</strong>
+                      <small>{item.description}</small>
+                    </span>
+                    <span className="catalog-add-icon">
+                      <Plus size={15} />
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="enterprise-catalog-browser">
+                <label className="rail-search">
+                  <Search size={14} />
+                  <input
+                    value={catalogSearch}
+                    onChange={(event) => setCatalogSearch(event.target.value)}
+                    placeholder="Search shared services..."
+                  />
+                </label>
+                <select
+                  className="rail-select compact"
+                  value={catalogTypeFilter}
+                  onChange={(event) => setCatalogTypeFilter(event.target.value)}
+                  aria-label="Catalog type filter"
+                >
+                  <option value="all">All asset types</option>
+                  {catalogTypeOptions.map((item) => (
+                    <option key={item.type} value={item.type}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+                <div className="enterprise-catalog-list">
+                  {filteredCatalogAssets.length ? filteredCatalogAssets.map((asset) => {
+                    const item = getCatalogItem(asset.type as ComponentType)
+                    return (
+                      <button
+                        className="enterprise-catalog-item"
+                        key={asset.id}
+                        draggable={!isCanvasReadOnly}
+                        disabled={isCanvasReadOnly}
+                        onDragStart={(event) => {
+                          if (isCanvasReadOnly) return
+                          event.dataTransfer.setData('application/x-stratum-catalog-asset-id', asset.id)
+                          event.dataTransfer.effectAllowed = 'copy'
+                        }}
+                        onClick={() => addCatalogAssetToCanvas(asset)}
+                        title={isCanvasReadOnly ? 'Switch to edit mode to add catalog assets' : `Add ${asset.name} as a shared component`}
+                      >
+                        <span className="catalog-icon-chip" style={{ '--component-color': item.color } as CSSProperties}>
+                          <CatalogGlyph type={item.type} />
+                        </span>
+                        <span>
+                          <strong>{asset.name}</strong>
+                          <small>{item.label} • {asset.owner || 'No owner'}</small>
+                        </span>
+                        <em>{catalogAssetUsageLabel(asset.usedInDesignCount)}</em>
+                      </button>
+                    )
+                  }) : (
+                    <div className="enterprise-catalog-empty">
+                      <strong>No matching assets</strong>
+                      <span>Try a broader search or ask an admin to add the service.</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </section>
 
-          <section className="panel-section">
+          <section className="panel-section draft-actions">
             <div className="section-title">Draft</div>
             <button className="command" onClick={saveDraft}>
               <Save size={16} /> Save design
@@ -1289,79 +1979,110 @@ export function App() {
               disabled={isCanvasReadOnly}
               onChange={(event) => renameDesign(event.target.value)}
             />
-          <div className="top-actions">
+            <div className="top-bar-status">
+              {saveState === 'error' ? <span className="save-error">Save failed</span> : null}
+              {analysisState === 'ready' && analysisReport ? (
+                <button className="analysis-pill button-pill" type="button" onClick={() => openAnalysisModal()}>
+                  Score {analysisReport.score}
+                </button>
+              ) : null}
+              {analysisState === 'error' ? <span className="save-error">Analysis failed</span> : null}
+            </div>
+          </header>
+        <div className="canvas-host">
+          <div className={`floating-canvas-toolbar ${toolbarExpanded ? 'expanded' : 'collapsed'}`} role="toolbar" aria-label="Canvas actions">
+            {!toolbarExpanded ? (
+              <button className="toolbar-expander" type="button" onClick={() => setToolbarExpanded(true)} title="Open canvas tools">
+                <ChevronLeft size={16} />
+                <span>Tools</span>
+                <strong>{canvasMode === 'design' ? 'Edit' : canvasMode === 'comment' ? 'Comment' : canvasMode === 'journey' ? 'Journey' : 'View'}</strong>
+              </button>
+            ) : (
+              <>
+            <button className="toolbar-collapse" type="button" onClick={() => setToolbarExpanded(false)} title="Collapse canvas tools">
+              <ChevronRight size={16} />
+            </button>
             <div className="mode-switch" role="group" aria-label="Canvas mode">
               <button
                 className={canvasMode === 'design' ? 'active' : ''}
                 type="button"
-                onClick={() => setCanvasMode('design')}
+                onClick={() => {
+                  setCanvasMode('design')
+                  setContextPanel('inspector')
+                }}
+                title="Edit design"
               >
-                Edit design
+                <Pencil size={14} /> <span>Edit</span>
+              </button>
+              <button
+                className={canvasMode === 'view' ? 'active' : ''}
+                type="button"
+                onClick={() => {
+                  setCanvasMode('view')
+                  setContextPanel('review')
+                  setRightRailOpen(true)
+                  setSelectedComponentId(null)
+                  setSelectedConnectorId(null)
+                }}
+                title="View design"
+              >
+                <Eye size={14} /> <span>View</span>
+              </button>
+              <button
+                className={canvasMode === 'comment' ? 'active' : ''}
+                type="button"
+                onClick={() => {
+                  setCanvasMode('comment')
+                  setContextPanel('review')
+                  setRightRailOpen(true)
+                }}
+                title="Comment and review"
+              >
+                <MessageSquare size={14} /> <span>Comment</span>
               </button>
               <button
                 className={canvasMode === 'journey' ? 'active' : ''}
                 type="button"
-                disabled={!activeJourney}
                 onClick={() => {
                   setCanvasMode('journey')
+                  setContextPanel('journey')
+                  setRightRailOpen(true)
                   setSelectedComponentId(null)
                   setSelectedConnectorId(null)
                 }}
+                title="Journey mode"
               >
-                Journey view
+                <Route size={14} /> <span>Journey</span>
               </button>
             </div>
-            <button className="command compact" onClick={saveDraft}>
-              <Save size={16} /> {saveState === 'saving' ? 'Saving' : saveState === 'saved' ? 'Saved' : 'Save'}
+            <button className="command compact" onClick={saveDraft} title="Save design">
+              <Save size={16} /> <span>{saveState === 'saving' ? 'Saving' : saveState === 'saved' ? 'Saved' : 'Save'}</span>
             </button>
-            <div className="ai-tool-suite" aria-label="AI tools">
-              <button
-                className="command compact primary-compact"
-                onClick={() => openAnalysisModal({ run: analysisState !== 'running' })}
-                disabled={!selectedDesignId}
-              >
-                <Sparkles size={16} /> {analysisState === 'running' ? 'Analysing' : 'Analyse'}
-              </button>
-              <button className="command compact" onClick={() => setVisionOpen(true)} disabled={!selectedDesignId}>
-                <ImageIcon size={16} /> Vision
-              </button>
-              <button className="command compact" onClick={() => setCopilotOpen(true)} disabled={!aiConnection}>
-                <Sparkles size={16} /> Draft
-              </button>
-            </div>
-            <button className="command compact" onClick={() => setDocsModalOpen(true)}>
-              <BookOpen size={16} /> Docs
+            <button
+              className="command compact primary-compact"
+              onClick={() => openAnalysisModal({ run: analysisState !== 'running' })}
+              disabled={!selectedDesignId}
+              title="Analyse design"
+            >
+              <Sparkles size={16} /> <span>{analysisState === 'running' ? 'Analysing' : 'Analyse'}</span>
             </button>
-            {saveState === 'error' ? <span className="save-error">Save failed</span> : null}
-            {analysisState === 'ready' && analysisReport ? (
-              <button className="analysis-pill button-pill" type="button" onClick={() => openAnalysisModal()}>
-                Score {analysisReport.score}
-              </button>
-            ) : null}
-            {analysisState === 'error' ? (
-              <span className="save-error">Analysis failed</span>
-            ) : null}
-            <button className="command compact" onClick={() => setShowExport((value) => !value)}>
-              <Braces size={16} /> Structured view
+            <button className="command compact" onClick={() => setVisionOpen(true)} disabled={!selectedDesignId} title="Import from image">
+              <ImageIcon size={16} /> <span>Vision</span>
             </button>
-            <button className="icon-command" onClick={() => setFocusMode((value) => !value)} title="Toggle focus mode">
-              <ChevronsLeftRight size={17} />
+            <button className="command compact" onClick={() => setDocsModalOpen(true)} title="Design docs">
+              <BookOpen size={16} /> <span>Docs</span>
             </button>
+              </>
+            )}
           </div>
-        </header>
-        <div
-          className="canvas-host"
-          ref={canvasHostRef}
-          onDragEnterCapture={(event) => {
-            event.preventDefault()
-            event.dataTransfer.dropEffect = 'copy'
-          }}
-          onDragOverCapture={(event) => {
-            event.preventDefault()
-            event.dataTransfer.dropEffect = 'copy'
-          }}
-          onDropCapture={handleCanvasDrop}
-        >
+          <button
+            className={`context-rail-toggle ${rightRailOpen ? 'open' : 'closed'}`}
+            type="button"
+            onClick={() => setRightRailOpen((value) => !value)}
+            title={rightRailOpen ? 'Collapse context panel' : 'Open context panel'}
+          >
+            {rightRailOpen ? <ChevronRight size={17} /> : <ChevronLeft size={17} />}
+          </button>
           <StratumCanvasBoundary
             onResetCanvas={() => resetDraft()}
           >
@@ -1374,15 +2095,28 @@ export function App() {
               onSelectComponent={(componentId) => {
                 setSelectedComponentId(componentId || null)
                 if (componentId) setSelectedConnectorId(null)
+                if (componentId) {
+                  setContextPanel('inspector')
+                  setRightRailOpen(true)
+                }
               }}
               onSelectConnector={(connectorId) => {
                 setSelectedConnectorId(connectorId || null)
                 if (connectorId) setSelectedComponentId(null)
+                if (connectorId) {
+                  setContextPanel('inspector')
+                  setRightRailOpen(true)
+                }
               }}
               onMoveComponent={moveReactFlowComponent}
               onResizeComponent={resizeReactFlowComponent}
               onConnectComponents={(fromComponentId, toComponentId) => setPendingConnector({ fromComponentId, toComponentId })}
               onReconnectConnector={reconnectConnector}
+              onDropComponent={createReactFlowComponent}
+              onDropCatalogAsset={(assetId, position) => {
+                const asset = catalogAssets.find((item) => item.id === assetId)
+                if (asset) createReactFlowCatalogAsset(asset, position)
+              }}
               onDuplicateComponent={duplicateReactFlowComponent}
               onDeleteComponents={deleteComponents}
               onDeleteConnectors={deleteConnectors}
@@ -1392,32 +2126,100 @@ export function App() {
       </section>
 
         <aside className="right-rail">
-          {showExport ? (
-            <StructuredView design={design} />
-          ) : !isCanvasReadOnly && selectedConnector ? (
-            <ConnectorInspector
-              connector={selectedConnector}
-              onChange={updateConnectorFromInspector}
-              onDelete={() => deleteConnectors([selectedConnector.id])}
+          <div className="context-drawer-header">
+            <div>
+              <strong>Workspace context</strong>
+              <span>Inspect, explain, and review this system</span>
+            </div>
+            <button className="icon-command" type="button" onClick={() => setRightRailOpen(false)} title="Collapse context drawer">
+              <ChevronRight size={16} />
+            </button>
+          </div>
+          <div className="context-tabs" role="tablist" aria-label="Canvas context">
+            <button className={contextPanel === 'inspector' ? 'active' : ''} type="button" onClick={() => setContextPanel('inspector')}>
+              Inspector
+            </button>
+            <button className={contextPanel === 'requirements' ? 'active' : ''} type="button" onClick={() => setContextPanel('requirements')}>
+              Requirements
+            </button>
+            <button className={contextPanel === 'journey' ? 'active' : ''} type="button" onClick={() => setContextPanel('journey')}>
+              Journey
+            </button>
+            <button className={contextPanel === 'review' ? 'active' : ''} type="button" onClick={() => setContextPanel('review')}>
+              Review
+            </button>
+          </div>
+          {contextPanel === 'review' ? (
+            <ReviewWorkspace
+              mode={canvasMode === 'comment' ? 'comment' : 'view'}
+              users={users}
+              activeUserId={activeUserId}
+              comments={comments}
+              reviews={reviews}
+              selectedComponent={selectedComponent}
+              selectedConnector={selectedConnector}
+              commentDraft={commentDraft}
+              reviewSummaryDrafts={reviewSummaryDrafts}
+              isSaving={collaborationState === 'saving'}
+              error={collaborationError}
+              offline={collaborationOffline}
+              onCommentDraftChange={setCommentDraft}
+              onSubmitComment={() => void submitDesignComment()}
+              onRequestReview={() => setRequestReviewOpen(true)}
+              onReviewSummaryChange={(reviewId, summary) =>
+                setReviewSummaryDrafts((current) => ({ ...current, [reviewId]: summary }))
+              }
+              onCompleteReview={(reviewId, status) => void completeReview(reviewId, status)}
+              onRefresh={() => void refreshCollaboration()}
             />
-          ) : !isCanvasReadOnly && selectedComponent ? (
-            <ComponentInspector
-              component={selectedComponent}
-              currentDesignId={selectedDesignId ?? design.id}
-              workspaceDesigns={workspaceDesigns}
-              onChange={updateComponentFromInspector}
-              onDelete={() => deleteComponents([selectedComponent.id])}
-              onOpenLinkedDesign={selectBackendDesign}
-            />
+          ) : contextPanel === 'inspector' ? (
+            !isCanvasReadOnly && selectedConnector ? (
+              <ConnectorInspector
+                connector={selectedConnector}
+                onChange={updateConnectorFromInspector}
+                onDelete={() => deleteConnectors([selectedConnector.id])}
+              />
+            ) : !isCanvasReadOnly && selectedComponent ? (
+              <ComponentInspector
+                component={selectedComponent}
+                currentDesignId={selectedDesignId ?? design.id}
+                workspaceDesigns={workspaceDesigns}
+                catalogAssets={catalogAssets}
+                onChange={updateComponentFromInspector}
+                onDelete={() => deleteComponents([selectedComponent.id])}
+                onOpenLinkedDesign={selectBackendDesign}
+                onCreateCatalogAsset={async (input) => {
+                  const asset = await addCatalogAsset(input)
+                  return asset
+                }}
+              />
+            ) : (
+              <div className="context-empty">
+                <Monitor size={24} />
+                <strong>Select a component</strong>
+                <span>Pick a node or connector to edit details. Use Requirements, Journey, or Review when you need design context.</span>
+              </div>
+            )
+          ) : contextPanel === 'requirements' ? (
+            <section className="analysis-result-panel">
+              <div className="inspector-heading">
+                <Monitor size={18} />
+                <div>
+                  <strong>Requirement Brief</strong>
+                  <span>Use case, scale, consistency, and SLA context</span>
+                </div>
+              </div>
+              <RequirementPanel design={design} onChange={updateDesign} compact />
+            </section>
           ) : (
-            <AnalysisWorkspace
+            <JourneyPanel
               design={design}
-              requirementsOpen={requirementsOpen}
               activeJourneyId={activeJourneyId}
-              activeJourneyStepIndex={activeJourneyStepIndex}
-              onToggleRequirements={() => setRequirementsOpen((value) => !value)}
-              onChangeRequirements={updateDesign}
-              onCreatePrimaryJourney={createPrimaryJourney}
+              activeStepIndex={activeJourneyStepIndex}
+              onCreatePrimaryJourney={() => {
+                createPrimaryJourney()
+                setCanvasMode('journey')
+              }}
               onSelectJourney={(journeyId) => {
                 setActiveJourneyId(journeyId)
                 setActiveJourneyStepIndex(0)
@@ -1427,7 +2229,7 @@ export function App() {
               }}
               onChangeJourney={updateJourney}
               onDeleteJourney={deleteJourney}
-              onSetJourneyStep={setActiveJourneyStepIndex}
+              onSetStep={setActiveJourneyStepIndex}
             />
           )}
         </aside>
@@ -1485,27 +2287,33 @@ export function App() {
           onClose={() => setDocsModalOpen(false)}
         />
       ) : null}
-      {aiSettingsOpen ? (
-        <AISettingsModal
-          connection={aiConnection}
-          onClose={() => setAISettingsOpen(false)}
-          onVerified={(connection) => {
-            saveAIConnection(connection)
-            setAIConnection(connection)
-            setAISettingsOpen(false)
-          }}
-        />
-      ) : null}
       {copilotOpen ? (
         <CopilotDraftModal
-          aiConnection={aiConnection}
+          aiConnection={aiConnection?.enabled && aiConnection.apiKeySet ? aiConnection : null}
           onClose={() => setCopilotOpen(false)}
         />
       ) : null}
       {visionOpen ? (
         <VisionImportModal
-          aiConnection={aiConnection}
+          aiConnection={aiConnection?.enabled && aiConnection.apiKeySet ? aiConnection : null}
           onClose={() => setVisionOpen(false)}
+        />
+      ) : null}
+      {requestReviewOpen ? (
+        <RequestReviewModal
+          users={users}
+          activeUserId={activeUserId}
+          isSaving={collaborationState === 'saving'}
+          onCancel={() => setRequestReviewOpen(false)}
+          onRequest={(reviewerId, message) => void submitReviewRequest(reviewerId, message)}
+        />
+      ) : null}
+      {notificationsOpen ? (
+        <NotificationsModal
+          notifications={notifications}
+          users={users}
+          onMarkRead={(notificationId) => void markNotificationAsRead(notificationId)}
+          onClose={() => setNotificationsOpen(false)}
         />
       ) : null}
     </div>
@@ -1520,10 +2328,14 @@ function AppNavbar({
   designs = [],
   selectedDesignId,
   aiConnection,
+  currentUser,
+  notifications,
   onHome,
   onWorkspace,
   onSelectDesign,
-  onOpenAISettings,
+  onAdmin,
+  onOpenNotifications,
+  onLogout,
 }: {
   profile: BackendProfile | null
   route: AppRoute
@@ -1532,11 +2344,17 @@ function AppNavbar({
   designs?: BackendDesign[]
   selectedDesignId?: string | null
   aiConnection?: AIConnectionMetadata | null
+  currentUser: BackendProfile | null
+  notifications: BackendNotification[]
   onHome: () => void
   onWorkspace: () => void
   onSelectDesign?: (design: BackendDesign) => void
-  onOpenAISettings: () => void
+  onAdmin: () => void
+  onOpenNotifications: () => void
+  onLogout: () => void
 }) {
+  const unreadCount = notifications.filter((notification) => !notification.read).length
+  const activeUser = currentUser ?? profile
   return (
     <header className="app-navbar">
       <button className="app-brand" onClick={onHome} title="Go to Stratum home">
@@ -1551,11 +2369,12 @@ function AppNavbar({
         <button className={route.screen === 'home' ? 'active' : ''} onClick={onHome}>
           <LayoutDashboard size={16} /> Home
         </button>
-        {route.screen !== 'home' ? (
+        {route.screen !== 'home' && route.screen !== 'admin' ? (
           <button className={route.screen === 'workspace' ? 'active' : ''} onClick={onWorkspace}>
             {workspaceName ?? 'Workspace'}
           </button>
         ) : null}
+        {route.screen === 'admin' ? <span>Admin</span> : null}
         {route.screen === 'design' ? (
           <select
             className="breadcrumb-design-select"
@@ -1575,10 +2394,42 @@ function AppNavbar({
         ) : null}
       </nav>
 
-      <button className="profile-chip" type="button" onClick={onOpenAISettings} title="Configure AI provider">
-        <span>{profile?.displayName ?? 'Guest Designer'}</span>
-        <strong>{aiConnection ? `${aiConnection.provider} ready` : 'Configure AI'}</strong>
-      </button>
+      <div className="navbar-actions">
+        <button className="notification-button" type="button" onClick={onOpenNotifications} title="Notifications">
+          <Bell size={18} />
+          {unreadCount ? <span>{unreadCount}</span> : null}
+        </button>
+        <details className="user-menu">
+          <summary title={activeUser?.email ?? 'Signed in'}>
+            <span className="user-avatar" aria-hidden="true">{initialsFor(activeUser?.displayName || activeUser?.email || 'User')}</span>
+            <span className="user-menu-label">
+              <strong>{activeUser?.displayName ?? 'Signed in'}</strong>
+              <small>{roleLabel(activeUser?.role ?? 'member')}</small>
+            </span>
+            <ChevronDown size={15} />
+          </summary>
+          <div className="user-menu-popover">
+            <div className="user-menu-card">
+              <span className="user-avatar large" aria-hidden="true">{initialsFor(activeUser?.displayName || activeUser?.email || 'User')}</span>
+              <div>
+                <strong>{activeUser?.displayName ?? 'Signed in'}</strong>
+                <small>{activeUser?.email ?? roleLabel(activeUser?.role ?? 'member')}</small>
+              </div>
+            </div>
+            <button type="button" disabled title="Profile editing is coming next">
+              <UserCheck size={16} /> Edit profile
+            </button>
+            {activeUser?.role === 'admin' ? (
+              <button type="button" onClick={onAdmin}>
+                <Settings size={16} /> Admin console
+              </button>
+            ) : null}
+            <button type="button" onClick={onLogout}>
+              <LogOut size={16} /> Sign out
+            </button>
+          </div>
+        </details>
+      </div>
     </header>
   )
 }
@@ -1622,79 +2473,971 @@ class StratumCanvasBoundary extends Component<
   }
 }
 
-function AISettingsModal({
-  connection,
-  onClose,
-  onVerified,
-}: {
-  connection: AIConnectionMetadata | null
-  onClose: () => void
-  onVerified: (connection: AIConnectionMetadata) => void
-}) {
-  const [provider, setProvider] = useState(connection?.provider ?? 'openai')
-  const [model, setModel] = useState(connection?.model ?? 'gpt-5.1')
-  const [baseUrl, setBaseUrl] = useState(connection?.baseUrl ?? '')
-  const [apiKey, setApiKey] = useState('')
-  const [status, setStatus] = useState<'idle' | 'verifying' | 'error'>('idle')
-  const [message, setMessage] = useState<string | null>(null)
+function userDisplayName(users: BackendUser[], userId: string) {
+  return users.find((user) => user.id === userId)?.displayName ?? userId.replaceAll('-', ' ')
+}
 
-  async function verify() {
-    setStatus('verifying')
-    setMessage(null)
+function initialsFor(value: string) {
+  const words = value.trim().split(/[\s@._-]+/).filter(Boolean)
+  return words
+    .slice(0, 2)
+    .map((word) => word[0]?.toUpperCase())
+    .join('') || 'U'
+}
+
+function formatCompactDateTime(value?: string) {
+  if (!value) return 'Never'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Never'
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
+function roleLabel(role: string) {
+  if (role === 'admin') return 'Admin'
+  if (role === 'architect') return 'Architect'
+  if (role === 'reviewer') return 'Reviewer'
+  return 'Member'
+}
+
+function FirstAdminOnboarding({
+  error,
+  isSaving,
+  onCreate,
+}: {
+  error: string | null
+  isSaving: boolean
+  onCreate: (input: { displayName: string; email: string; password: string }) => void
+}) {
+  const [displayName, setDisplayName] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  return (
+    <main className="onboarding-shell">
+      <section className="onboarding-card">
+        <div className="home-logo">S</div>
+        <p className="eyebrow">First run setup</p>
+        <h1>Create the first admin</h1>
+        <p>Stratum has no users yet. The first account becomes the organization admin and can configure SSO and user access.</p>
+        {error ? <div className="home-error inline-error"><span>{error}</span></div> : null}
+        <Field label="Name" value={displayName} onChange={setDisplayName} />
+        <Field label="Work email" value={email} onChange={setEmail} />
+        <Field label="Password" type="password" value={password} onChange={setPassword} />
+        <button
+          className="primary-action full-width"
+          type="button"
+          disabled={isSaving || !displayName.trim() || !email.trim() || password.length < 8}
+          onClick={() => onCreate({ displayName, email, password })}
+        >
+          <ShieldCheck size={17} /> {isSaving ? 'Creating admin...' : 'Create admin'}
+        </button>
+      </section>
+    </main>
+  )
+}
+
+function LoginScreen({
+  requiresPasswordSetup,
+  error,
+  isSaving,
+  onLogin,
+  onSetInitialPassword,
+}: {
+  requiresPasswordSetup: boolean
+  error: string | null
+  isSaving: boolean
+  onLogin: (input: { email: string; password: string }) => void
+  onSetInitialPassword: (input: { email: string; password: string }) => void
+}) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const title = requiresPasswordSetup ? 'Set admin password' : 'Sign in to Stratum'
+  const description = requiresPasswordSetup
+    ? 'Existing users were created before local passwords existed. Set the first admin password to continue.'
+    : 'Use your workspace account to access designs, reviews, and admin settings.'
+  return (
+    <main className="onboarding-shell">
+      <section className="onboarding-card">
+        <div className="home-logo">S</div>
+        <p className="eyebrow">Enterprise access</p>
+        <h1>{title}</h1>
+        <p>{description}</p>
+        {error ? <div className="home-error inline-error"><span>{error}</span></div> : null}
+        <Field label="Work email" value={email} onChange={setEmail} />
+        <Field label="Password" type="password" value={password} onChange={setPassword} />
+        <button
+          className="primary-action full-width"
+          type="button"
+          disabled={isSaving || !email.trim() || password.length < 8}
+          onClick={() => (requiresPasswordSetup ? onSetInitialPassword({ email, password }) : onLogin({ email, password }))}
+        >
+          <ShieldCheck size={17} /> {isSaving ? 'Checking...' : requiresPasswordSetup ? 'Set password and continue' : 'Sign in'}
+        </button>
+      </section>
+    </main>
+  )
+}
+
+function AdminConsole({
+  users,
+  activeUserId,
+  signInConfig,
+  aiProviderConfig,
+  catalogAssets,
+  error,
+  onAddUser,
+  onSaveUser,
+  onDeleteUser,
+  onSaveSignIn,
+  onSaveAIProvider,
+  onAddCatalogAsset,
+  onSaveCatalogAsset,
+  onDeleteCatalogAsset,
+}: {
+  users: BackendUser[]
+  activeUserId: string
+  signInConfig: BackendSignInConfig | null
+  aiProviderConfig: BackendAIProviderConfig | null
+  catalogAssets: BackendCatalogAsset[]
+  error: string | null
+  onAddUser: (input: { displayName: string; email: string; role: string; password?: string }) => Promise<void>
+  onSaveUser: (user: BackendUser & { password?: string }) => Promise<void>
+  onDeleteUser: (userId: string) => void
+  onSaveSignIn: (config: BackendSignInConfig & { clientSecret?: string }) => void
+  onSaveAIProvider: (config: Partial<BackendAIProviderConfig> & { apiKey?: string }) => void
+  onAddCatalogAsset: (input: { name: string; type: string; owner?: string; description?: string; criticality?: string; tags?: string[] }) => Promise<BackendCatalogAsset>
+  onSaveCatalogAsset: (asset: BackendCatalogAsset) => Promise<void>
+  onDeleteCatalogAsset: (assetId: string) => Promise<void>
+}) {
+  const [newUser, setNewUser] = useState({ displayName: '', email: '', role: 'member', password: '' })
+  const [newAsset, setNewAsset] = useState({ name: '', type: 'compute.service', owner: '', description: '', criticality: 'medium' })
+  const [draftUsers, setDraftUsers] = useState<Array<BackendUser & { password?: string }>>(users)
+  const [draftAssets, setDraftAssets] = useState<BackendCatalogAsset[]>(catalogAssets)
+  const [editingUserId, setEditingUserId] = useState<string | null>(null)
+  const [editingAssetId, setEditingAssetId] = useState<string | null>(null)
+  const [userError, setUserError] = useState<string | null>(null)
+  const [assetError, setAssetError] = useState<string | null>(null)
+  const [signInDraft, setSignInDraft] = useState<(BackendSignInConfig & { clientSecret?: string }) | null>(signInConfig)
+  const [aiDraft, setAIDraft] = useState<(BackendAIProviderConfig & { apiKey?: string }) | null>(aiProviderConfig)
+
+  useEffect(() => setDraftUsers(users), [users])
+  useEffect(() => setDraftAssets(catalogAssets), [catalogAssets])
+  useEffect(() => setSignInDraft(signInConfig), [signInConfig])
+  useEffect(() => setAIDraft(aiProviderConfig), [aiProviderConfig])
+
+  const activeUsers = users.filter((user) => user.status !== 'disabled').length
+  const adminUsers = users.filter((user) => user.role === 'admin' && user.status !== 'disabled').length
+  const ssoMode = signInDraft?.ssoEnabled ? 'SSO ready' : 'Local only'
+  const providerLabel = signInDraft?.provider?.trim() || 'Okta'
+  const hasOktaCore = Boolean(signInDraft?.issuer?.trim() && signInDraft?.clientId?.trim())
+  const aiStatus = aiDraft?.enabled && aiDraft.apiKeySet ? 'AI analysis enabled' : 'AI analysis off'
+  const aiVerifiedAt = aiDraft?.verifiedAt && !aiDraft.verifiedAt.startsWith('0001-') ? aiDraft.verifiedAt : ''
+  const duplicateNewAsset = catalogAssets.find((asset) => normalizedCatalogLabel(asset.name) === normalizedCatalogLabel(newAsset.name))
+  const newAssetSuggestions = catalogAssets.filter((asset) => isPotentialCatalogMatch(newAsset.name, asset.name))
+
+  function updateDraftUser(user: BackendUser, patch: Partial<BackendUser & { password?: string }>) {
+    setDraftUsers((current) => current.map((item) => (item.id === user.id ? { ...item, ...patch } : item)))
+  }
+
+  function updateDraftAsset(asset: BackendCatalogAsset, patch: Partial<BackendCatalogAsset>) {
+    setDraftAssets((current) => current.map((item) => (item.id === asset.id ? { ...item, ...patch } : item)))
+  }
+
+  async function submitNewUser() {
+    const email = newUser.email.trim().toLowerCase()
+    if (users.some((user) => user.email.toLowerCase() === email)) {
+      setUserError('A user with this email already exists.')
+      return
+    }
+    setUserError(null)
+    await onAddUser({ ...newUser, email, password: newUser.password.trim() || undefined })
+    setNewUser({ displayName: '', email: '', role: 'member', password: '' })
+  }
+
+  async function submitUserSave(user: BackendUser & { password?: string }) {
+    const email = user.email.trim().toLowerCase()
+    if (draftUsers.some((item) => item.id !== user.id && item.email.trim().toLowerCase() === email)) {
+      setUserError('A user with this email already exists.')
+      return
+    }
+    setUserError(null)
+    await onSaveUser({ ...user, email, password: user.password?.trim() || undefined })
+    setEditingUserId(null)
+  }
+
+  async function submitNewAsset() {
+    if (duplicateNewAsset) {
+      setAssetError(`"${duplicateNewAsset.name}" already exists in the catalog.`)
+      return
+    }
+    setAssetError(null)
     try {
-      const response = await verifyAIProvider({ provider, model, baseUrl, apiKey })
-      if (!response.ok) {
-        setStatus('error')
-        setMessage(response.message)
-        return
-      }
-      onVerified({
-        provider,
-        model,
-        baseUrl,
-        verifiedAt: response.verifiedAt ?? new Date().toISOString(),
-      })
+      await onAddCatalogAsset(newAsset)
+      setNewAsset({ name: '', type: 'compute.service', owner: '', description: '', criticality: 'medium' })
     } catch (error) {
-      setStatus('error')
-      setMessage(error instanceof Error ? error.message : 'Could not verify provider')
+      setAssetError(error instanceof Error ? error.message : 'Could not add catalog asset.')
+    }
+  }
+
+  async function submitAssetSave(asset: BackendCatalogAsset) {
+    const duplicate = draftAssets.find(
+      (item) => item.id !== asset.id && normalizedCatalogLabel(item.name) === normalizedCatalogLabel(asset.name),
+    )
+    if (duplicate) {
+      setAssetError(`"${duplicate.name}" already exists in the catalog.`)
+      return
+    }
+    setAssetError(null)
+    try {
+      await onSaveCatalogAsset(asset)
+      setEditingAssetId(null)
+    } catch (error) {
+      setAssetError(error instanceof Error ? error.message : 'Could not save catalog asset.')
     }
   }
 
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="ai-settings-modal" role="dialog" aria-modal="true" aria-labelledby="ai-settings-title">
-        <div className="modal-heading">
-          <div>
-            <p className="eyebrow">AI Provider</p>
-            <h2 id="ai-settings-title">Connect analysis intelligence</h2>
-            <span>Keys are sent to the backend for verification and are not stored in browser local storage.</span>
+    <main className="admin-shell">
+      <section className="admin-hero">
+        <div>
+          <p className="eyebrow">Enterprise administration</p>
+          <h1>Admin console</h1>
+          <p>Manage users, roles, and sign-in methods for a deployment-ready Stratum workspace.</p>
+        </div>
+        <div className="admin-hero-actions" aria-label="Administration status">
+          <span><BadgeCheck size={16} /> {ssoMode}</span>
+          <span><ShieldCheck size={16} /> {adminUsers} admin{adminUsers === 1 ? '' : 's'}</span>
+        </div>
+      </section>
+      {error ? <div className="home-error"><span>{error}</span></div> : null}
+
+      <section className="admin-metrics" aria-label="Administration overview">
+        <article>
+          <span>Total users</span>
+          <strong>{users.length}</strong>
+          <small>{activeUsers} active</small>
+        </article>
+        <article>
+          <span>Identity provider</span>
+          <strong>{providerLabel}</strong>
+          <small>{hasOktaCore ? 'Core settings present' : 'Configuration incomplete'}</small>
+        </article>
+        <article>
+          <span>Provisioning</span>
+          <strong>{signInDraft?.jitProvisioning ? 'JIT' : 'Manual'}</strong>
+          <small>{signInDraft?.jitProvisioning ? 'Users created on first login' : 'Admins add users manually'}</small>
+        </article>
+        <article>
+          <span>Analysis AI</span>
+          <strong>{aiDraft?.enabled ? 'Enabled' : 'Disabled'}</strong>
+          <small>{aiDraft?.provider ? `${aiDraft.provider} ${aiDraft.model}` : 'Central provider not configured'}</small>
+        </article>
+      </section>
+
+      <section className="admin-grid">
+        <div className="admin-panel">
+          <div className="admin-panel-heading">
+            <span><UserCheck size={18} /></span>
+            <div>
+              <strong>User management</strong>
+              <p>Add people, assign roles, and control account status.</p>
+            </div>
+          </div>
+          <div className="admin-add-user">
+            <Field label="Name" value={newUser.displayName} onChange={(displayName) => setNewUser((current) => ({ ...current, displayName }))} />
+            <Field label="Email" value={newUser.email} onChange={(email) => setNewUser((current) => ({ ...current, email }))} />
+            <Field label="Temporary password" type="password" value={newUser.password} onChange={(password) => setNewUser((current) => ({ ...current, password }))} />
+            <label className="field">
+              <span>Role</span>
+              <select value={newUser.role} onChange={(event) => setNewUser((current) => ({ ...current, role: event.target.value }))}>
+                <option value="member">Member</option>
+                <option value="reviewer">Reviewer</option>
+                <option value="architect">Architect</option>
+                <option value="admin">Admin</option>
+              </select>
+            </label>
+            <button
+              className="primary-action"
+              type="button"
+              onClick={() => void submitNewUser()}
+              disabled={!newUser.displayName.trim() || !newUser.email.trim()}
+            >
+              <UserPlus size={16} /> Add user
+            </button>
+          </div>
+          {userError ? <div className="admin-inline-error">{userError}</div> : null}
+
+          <div className="admin-role-strip" aria-label="Role model">
+            <span>Admin <small>platform control</small></span>
+            <span>Architect <small>create and evolve</small></span>
+            <span>Reviewer <small>review and comment</small></span>
+            <span>Member <small>view workspace</small></span>
+          </div>
+
+          <div className="admin-user-list">
+            {draftUsers.map((user) => (
+              editingUserId === user.id ? (
+                <article className="admin-user-row editing" key={user.id}>
+                  <div className="admin-user-identity">
+                    <span>{initialsFor(user.displayName || user.email)}</span>
+                    <div>
+                      <Field label="Name" value={user.displayName} onChange={(displayName) => updateDraftUser(user, { displayName })} />
+                      <Field label="Email" value={user.email} onChange={(email) => updateDraftUser(user, { email })} />
+                      <Field label={user.passwordSet ? 'Reset password' : 'Set password'} type="password" value={user.password ?? ''} onChange={(password) => updateDraftUser(user, { password })} />
+                    </div>
+                  </div>
+                  <div className="admin-user-controls">
+                    <label className="field">
+                      <span>Role</span>
+                      <select value={user.role} onChange={(event) => updateDraftUser(user, { role: event.target.value })}>
+                        <option value="member">Member</option>
+                        <option value="reviewer">Reviewer</option>
+                        <option value="architect">Architect</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                    </label>
+                    <label className="field">
+                      <span>Status</span>
+                      <select value={user.status} onChange={(event) => updateDraftUser(user, { status: event.target.value })}>
+                        <option value="active">Active</option>
+                        <option value="disabled">Disabled</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="admin-row-actions">
+                    <button className="secondary-action compact-action" type="button" onClick={() => void submitUserSave(user)}>
+                      Save
+                    </button>
+                    <button
+                      className="text-button"
+                      type="button"
+                      onClick={() => {
+                        setDraftUsers(users)
+                        setEditingUserId(null)
+                        setUserError(null)
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </article>
+              ) : (
+                <article className="admin-user-row" key={user.id}>
+                  <div className="admin-user-identity">
+                    <span>{initialsFor(user.displayName || user.email)}</span>
+                    <div>
+                      <strong>{user.displayName}</strong>
+                      <small>{user.email}</small>
+                    </div>
+                  </div>
+                  <div className="admin-user-meta">
+                    <span className={`admin-status-pill ${user.status}`}>{user.status}</span>
+                    <span>{roleLabel(user.role)}</span>
+                    <small>{user.passwordSet ? 'Password set' : 'Password not set'}</small>
+                    <small>Last seen {formatCompactDateTime(user.lastSeenAt || user.updatedAt)}</small>
+                  </div>
+                  <div className="admin-user-meta secondary">
+                    <span>Joined {formatCompactDateTime(user.createdAt)}</span>
+                    <small>Updated {formatCompactDateTime(user.updatedAt)}</small>
+                  </div>
+                  <div className="admin-row-actions">
+                    <button className="secondary-action compact-action" type="button" onClick={() => setEditingUserId(user.id)}>
+                      Edit
+                    </button>
+                    <button className="text-button danger" type="button" disabled={user.id === activeUserId} onClick={() => onDeleteUser(user.id)}>
+                      Delete
+                    </button>
+                  </div>
+                </article>
+              )
+            ))}
           </div>
         </div>
-        <div className="brief-form-grid">
-          <label className="field">
-            <span>Provider</span>
-            <select value={provider} onChange={(event) => setProvider(event.target.value)}>
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="openrouter">OpenRouter</option>
-              <option value="custom">OpenAI-compatible</option>
-            </select>
-          </label>
-          <Field label="Model" value={model} onChange={setModel} />
-          <Field label="Base URL" value={baseUrl} onChange={setBaseUrl} />
-          <label className="field">
-            <span>API key</span>
-            <input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} />
-          </label>
+
+        <div className="admin-panel catalog-admin-panel">
+          <div className="admin-panel-heading">
+            <span><Boxes size={18} /></span>
+            <div>
+              <strong>Enterprise Catalog</strong>
+              <p>Canonical services and infrastructure shared across architecture designs.</p>
+            </div>
+          </div>
+
+          <div className="admin-add-user catalog-add-asset">
+            <Field label="Asset name" value={newAsset.name} onChange={(name) => setNewAsset((current) => ({ ...current, name }))} />
+            <label className="field">
+              <span>Type</span>
+              <select value={newAsset.type} onChange={(event) => setNewAsset((current) => ({ ...current, type: event.target.value }))}>
+                {componentCatalog.filter((item) => item.type !== 'note.sticky' && item.type !== 'frame.cloud' && item.type !== 'design.link').map((item) => (
+                  <option key={item.type} value={item.type}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <Field label="Owner" value={newAsset.owner} onChange={(owner) => setNewAsset((current) => ({ ...current, owner }))} />
+            <label className="field">
+              <span>Criticality</span>
+              <select value={newAsset.criticality} onChange={(event) => setNewAsset((current) => ({ ...current, criticality: event.target.value }))}>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="critical">Critical</option>
+              </select>
+            </label>
+            <button className="primary-action" type="button" disabled={!newAsset.name.trim() || Boolean(duplicateNewAsset)} onClick={() => void submitNewAsset()}>
+              <FilePlus2 size={16} /> Add asset
+            </button>
+          </div>
+          <TextareaField
+            label="Description"
+            value={newAsset.description}
+            onChange={(description) => setNewAsset((current) => ({ ...current, description }))}
+          />
+          {duplicateNewAsset ? (
+            <div className="catalog-duplicate-warning">
+              Possible duplicate: <strong>{duplicateNewAsset.name}</strong>. Link existing assets instead of creating duplicates.
+            </div>
+          ) : null}
+          {!duplicateNewAsset && newAssetSuggestions.length ? (
+            <div className="catalog-suggestions">
+              <strong>Similar catalog assets</strong>
+              {newAssetSuggestions.slice(0, 4).map((asset) => (
+                <span className="catalog-suggestion readonly" key={asset.id}>
+                  <span>{asset.name}</span>
+                  <small>{asset.type} • normalized as {asset.normalizedName}</small>
+                </span>
+              ))}
+            </div>
+          ) : null}
+          {assetError ? <div className="admin-inline-error">{assetError}</div> : null}
+
+          <div className="catalog-admin-list">
+            {draftAssets.length ? draftAssets.map((asset) => (
+              editingAssetId === asset.id ? (
+                <article className="catalog-admin-row editing" key={asset.id}>
+                  <Field label="Name" value={asset.name} onChange={(name) => updateDraftAsset(asset, { name })} />
+                  <label className="field">
+                    <span>Type</span>
+                    <select value={asset.type} onChange={(event) => updateDraftAsset(asset, { type: event.target.value })}>
+                      {componentCatalog.filter((item) => item.type !== 'note.sticky' && item.type !== 'frame.cloud' && item.type !== 'design.link').map((item) => (
+                        <option key={item.type} value={item.type}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <Field label="Owner" value={asset.owner} onChange={(owner) => updateDraftAsset(asset, { owner })} />
+                  <label className="field">
+                    <span>Criticality</span>
+                    <select value={asset.criticality} onChange={(event) => updateDraftAsset(asset, { criticality: event.target.value })}>
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                      <option value="critical">Critical</option>
+                    </select>
+                  </label>
+                  <TextareaField label="Description" value={asset.description} onChange={(description) => updateDraftAsset(asset, { description })} />
+                  <div className="admin-row-actions">
+                    <button className="secondary-action compact-action" type="button" onClick={() => void submitAssetSave(asset)}>
+                      Save
+                    </button>
+                    <button
+                      className="text-button"
+                      type="button"
+                      onClick={() => {
+                        setDraftAssets(catalogAssets)
+                        setEditingAssetId(null)
+                        setAssetError(null)
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </article>
+              ) : (
+                <article className="catalog-admin-row" key={asset.id}>
+                  <div>
+                    <strong>{asset.name}</strong>
+                    <small>{asset.type} • {asset.owner || 'No owner'}</small>
+                  </div>
+                  <span className={`admin-status-pill ${asset.criticality}`}>{asset.criticality}</span>
+                  <span>{asset.usedInDesignCount} design{asset.usedInDesignCount === 1 ? '' : 's'}</span>
+                  <div className="admin-row-actions">
+                    <button className="secondary-action compact-action" type="button" onClick={() => setEditingAssetId(asset.id)}>
+                      Edit
+                    </button>
+                    <button className="text-button danger" type="button" disabled={asset.usedInDesignCount > 0} onClick={() => void onDeleteCatalogAsset(asset.id)}>
+                      Delete
+                    </button>
+                  </div>
+                </article>
+              )
+            )) : (
+              <div className="analysis-empty">
+                <strong>No catalog assets yet</strong>
+                <span>Users can promote design components, and admins can curate them here.</span>
+              </div>
+            )}
+          </div>
         </div>
-        {message ? <div className="analysis-error">{message}</div> : null}
+
+        <div className="admin-panel">
+          <div className="admin-panel-heading">
+            <span><LockKeyhole size={18} /></span>
+            <div>
+              <strong>Sign-in options</strong>
+              <p>Configure local access, Okta OIDC, and group-based role mapping.</p>
+            </div>
+          </div>
+          {signInDraft ? (
+            <div className="signin-form">
+              <div className="auth-mode-grid">
+                <label className={signInDraft.localPasswordEnabled ? 'auth-mode-card active' : 'auth-mode-card'}>
+                  <input
+                    type="checkbox"
+                    checked={signInDraft.localPasswordEnabled}
+                    onChange={(event) => setSignInDraft({ ...signInDraft, localPasswordEnabled: event.target.checked })}
+                  />
+                  <KeyRound size={18} />
+                  <strong>Local password</strong>
+                  <span>Keep direct sign-in available for controlled deployments.</span>
+                </label>
+                <label className={signInDraft.ssoEnabled ? 'auth-mode-card active' : 'auth-mode-card'}>
+                  <input
+                    type="checkbox"
+                    checked={signInDraft.ssoEnabled}
+                    onChange={(event) => setSignInDraft({ ...signInDraft, ssoEnabled: event.target.checked })}
+                  />
+                  <Globe2 size={18} />
+                  <strong>Okta SSO</strong>
+                  <span>Route users through enterprise identity and group claims.</span>
+                </label>
+              </div>
+
+              <div className="admin-form-section">
+                <div className="admin-section-title">
+                  <span>Provider</span>
+                  <small>OIDC web application</small>
+                </div>
+                <div className="admin-field-grid two">
+                  <Field label="Okta domain" value={signInDraft.oktaDomain} onChange={(oktaDomain) => setSignInDraft({ ...signInDraft, oktaDomain })} />
+                  <Field label="Issuer" value={signInDraft.issuer} onChange={(issuer) => setSignInDraft({ ...signInDraft, issuer })} />
+                </div>
+                <div className="admin-field-grid two">
+                  <Field label="Client ID" value={signInDraft.clientId} onChange={(clientId) => setSignInDraft({ ...signInDraft, clientId })} />
+                  <Field label={signInDraft.clientSecretSet ? 'Client secret (set)' : 'Client secret'} value={signInDraft.clientSecret ?? ''} onChange={(clientSecret) => setSignInDraft({ ...signInDraft, clientSecret })} />
+                </div>
+              </div>
+
+              <div className="admin-form-section">
+                <div className="admin-section-title">
+                  <span>Redirects</span>
+                  <small>Must match Okta exactly</small>
+                </div>
+                <Field label="Sign-in redirect URI" value={signInDraft.redirectUri} onChange={(redirectUri) => setSignInDraft({ ...signInDraft, redirectUri })} />
+                <Field label="Sign-out redirect URI" value={signInDraft.postLogoutRedirectUri} onChange={(postLogoutRedirectUri) => setSignInDraft({ ...signInDraft, postLogoutRedirectUri })} />
+              </div>
+
+              <div className="admin-form-section">
+                <div className="admin-section-title">
+                  <span>Claims and role mapping</span>
+                  <small>Used for enterprise access control</small>
+                </div>
+                <div className="admin-field-grid two">
+                  <Field label="Scopes" value={signInDraft.scopes} onChange={(scopes) => setSignInDraft({ ...signInDraft, scopes })} />
+                  <Field label="Groups claim" value={signInDraft.groupsClaim} onChange={(groupsClaim) => setSignInDraft({ ...signInDraft, groupsClaim })} />
+                </div>
+                <div className="admin-field-grid two">
+                  <Field label="Admin group" value={signInDraft.adminGroup} onChange={(adminGroup) => setSignInDraft({ ...signInDraft, adminGroup })} />
+                  <Field label="Reviewer group" value={signInDraft.reviewerGroup} onChange={(reviewerGroup) => setSignInDraft({ ...signInDraft, reviewerGroup })} />
+                </div>
+                <label className="toggle-row enterprise-toggle">
+                  <input
+                    type="checkbox"
+                    checked={signInDraft.jitProvisioning}
+                    onChange={(event) => setSignInDraft({ ...signInDraft, jitProvisioning: event.target.checked })}
+                  />
+                  <span>
+                    <strong>Just-in-time provisioning</strong>
+                    <small>Create allowed users when they first authenticate with SSO.</small>
+                  </span>
+                </label>
+              </div>
+
+              <div className="okta-guidance">
+                <strong>Okta setup notes</strong>
+                <span>Create an OIDC Web Application in Okta, use Authorization Code flow, register exact sign-in/sign-out redirect URIs, then copy Client ID, Client Secret, and issuer. Include openid profile email; add groups when group-based role mapping is configured.</span>
+              </div>
+              <button className="primary-action full-width" type="button" onClick={() => onSaveSignIn(signInDraft)}>
+                Save sign-in settings
+              </button>
+            </div>
+          ) : (
+            <div className="analysis-empty">
+              <strong>Loading sign-in settings</strong>
+              <span>Admin settings will appear once the backend responds.</span>
+            </div>
+          )}
+        </div>
+
+        <div className="admin-panel ai-admin-panel">
+          <div className="admin-panel-heading">
+            <span><Sparkles size={18} /></span>
+            <div>
+              <strong>AI analysis provider</strong>
+              <p>Manage the centrally approved model used for design review synthesis.</p>
+            </div>
+          </div>
+          {aiDraft ? (
+            <div className="signin-form">
+              <div className="admin-ai-status">
+                <span className={aiDraft.enabled && aiDraft.apiKeySet ? 'admin-status-pill active' : 'admin-status-pill disabled'}>
+                  {aiStatus}
+                </span>
+                <small>
+                  {aiVerifiedAt
+                    ? `Verified ${formatCompactDateTime(aiVerifiedAt)}`
+                    : aiDraft.apiKeySet
+                      ? 'Key stored, verification pending'
+                      : 'No provider key stored'}
+                </small>
+              </div>
+
+              <label className="toggle-row enterprise-toggle">
+                <input
+                  type="checkbox"
+                  checked={aiDraft.enabled}
+                  onChange={(event) => setAIDraft({ ...aiDraft, enabled: event.target.checked })}
+                />
+                <span>
+                  <strong>Use AI for analysis synthesis</strong>
+                  <small>Deterministic math always runs first; AI adds judgement, risks, and recommendations.</small>
+                </span>
+              </label>
+
+              <div className="admin-form-section">
+                <div className="admin-section-title">
+                  <span>Provider</span>
+                  <small>Stored in backend configuration, never browser local storage</small>
+                </div>
+                <div className="admin-field-grid two">
+                  <label className="field">
+                    <span>Provider</span>
+                    <select
+                      value={aiDraft.provider}
+                      onChange={(event) => {
+                        const provider = event.target.value
+                        const defaultModel =
+                          provider === 'anthropic' ? 'claude-3-5-sonnet-latest' : provider === 'openai' ? 'gpt-4.1' : aiDraft.model
+                        setAIDraft({ ...aiDraft, provider, model: defaultModel })
+                      }}
+                    >
+                      <option value="openai">OpenAI</option>
+                      <option value="anthropic">Anthropic</option>
+                      <option value="openrouter">OpenRouter</option>
+                      <option value="custom">OpenAI-compatible</option>
+                    </select>
+                  </label>
+                  <Field label="Model" value={aiDraft.model} onChange={(model) => setAIDraft({ ...aiDraft, model })} />
+                </div>
+                <Field label="Base URL" value={aiDraft.baseUrl} onChange={(baseUrl) => setAIDraft({ ...aiDraft, baseUrl })} />
+                <Field
+                  label={aiDraft.apiKeySet ? 'API key (stored)' : 'API key'}
+                  type="password"
+                  value={aiDraft.apiKey ?? ''}
+                  onChange={(apiKey) => setAIDraft({ ...aiDraft, apiKey })}
+                />
+              </div>
+
+              <div className="okta-guidance">
+                <strong>Analysis workflow</strong>
+                <span>
+                  Stratum first scores requirements, topology, traffic, consistency, availability, and security with deterministic checks.
+                  The configured model then receives that evidence plus the structured design and must return UI-safe JSON.
+                </span>
+              </div>
+
+              <button className="primary-action full-width" type="button" onClick={() => onSaveAIProvider(aiDraft)}>
+                Save and verify AI provider
+              </button>
+            </div>
+          ) : (
+            <div className="analysis-empty">
+              <strong>Loading AI provider</strong>
+              <span>Central analysis settings will appear once the backend responds.</span>
+            </div>
+          )}
+        </div>
+      </section>
+    </main>
+  )
+}
+
+function reviewStatusLabel(status: BackendDesignReviewRequest['status']) {
+  if (status === 'changes_requested') return 'Changes requested'
+  if (status === 'approved') return 'Approved'
+  return 'Requested'
+}
+
+function ReviewWorkspace({
+  mode,
+  users,
+  activeUserId,
+  comments,
+  reviews,
+  selectedComponent,
+  selectedConnector,
+  commentDraft,
+  reviewSummaryDrafts,
+  isSaving,
+  error,
+  offline,
+  onCommentDraftChange,
+  onSubmitComment,
+  onRequestReview,
+  onReviewSummaryChange,
+  onCompleteReview,
+  onRefresh,
+}: {
+  mode: 'view' | 'comment'
+  users: BackendUser[]
+  activeUserId: string
+  comments: BackendDesignComment[]
+  reviews: BackendDesignReviewRequest[]
+  selectedComponent: DesignComponent | null
+  selectedConnector: DesignConnector | null
+  commentDraft: string
+  reviewSummaryDrafts: Record<string, string>
+  isSaving: boolean
+  error: string | null
+  offline: boolean
+  onCommentDraftChange: (value: string) => void
+  onSubmitComment: () => void
+  onRequestReview: () => void
+  onReviewSummaryChange: (reviewId: string, summary: string) => void
+  onCompleteReview: (reviewId: string, status: BackendDesignReviewRequest['status']) => void
+  onRefresh: () => void
+}) {
+  const selectedTarget = selectedComponent?.name || (selectedConnector ? 'selected connection' : 'whole design')
+
+  return (
+    <div className="review-workspace">
+      <div className="inspector-heading">
+        {mode === 'comment' ? <MessageSquare size={18} /> : <Eye size={18} />}
+        <div>
+          <strong>{mode === 'comment' ? 'Comment mode' : 'View mode'}</strong>
+          <span>Canvas is locked while reviews are captured</span>
+        </div>
+      </div>
+
+      {offline ? (
+        <div className="offline-notice">
+          <strong>Collaboration backend offline</strong>
+          <span>View mode still works. Start the backend to load or capture comments and review requests.</span>
+        </div>
+      ) : null}
+      {error ? <div className="analysis-error">{error}</div> : null}
+
+      <div className="review-actions">
+        <button className="primary-action full-width" type="button" onClick={onRequestReview} disabled={isSaving || offline}>
+          <UserPlus size={16} /> Request review
+        </button>
+        <button className="secondary-action compact-action" type="button" onClick={onRefresh} disabled={isSaving}>
+          Refresh
+        </button>
+      </div>
+
+      {mode === 'comment' ? (
+        <section className="review-card">
+          <div className="section-title">Add comment</div>
+          <span className="comment-target">Target: {selectedTarget}</span>
+          <textarea
+            value={commentDraft}
+            rows={4}
+            placeholder="Capture a question, decision, or review note..."
+            onChange={(event) => onCommentDraftChange(event.target.value)}
+          />
+          <button className="primary-action full-width" type="button" onClick={onSubmitComment} disabled={isSaving || offline || !commentDraft.trim()}>
+            <Send size={16} /> Add comment
+          </button>
+        </section>
+      ) : null}
+
+      <section className="review-card">
+        <div className="section-title">Review history</div>
+        {reviews.length ? (
+          <div className="activity-list">
+            {reviews.map((review) => {
+              const isAssignedToActiveUser = review.reviewerId === activeUserId && review.status === 'requested'
+              return (
+                <article className="activity-item" key={review.id}>
+                  <div>
+                    <strong>{userDisplayName(users, review.reviewerId)}</strong>
+                    <span className={`status-pill ${review.status}`}>{reviewStatusLabel(review.status)}</span>
+                  </div>
+                  {review.message ? <p>{review.message}</p> : null}
+                  {review.summary ? <p>{review.summary}</p> : null}
+                  <small>
+                    Requested by {userDisplayName(users, review.requestedBy)} · {new Date(review.updatedAt).toLocaleString()}
+                  </small>
+                  {isAssignedToActiveUser ? (
+                    <div className="review-response">
+                      <textarea
+                        rows={3}
+                        value={reviewSummaryDrafts[review.id] ?? review.summary}
+                        placeholder="Summarize your review..."
+                        onChange={(event) => onReviewSummaryChange(review.id, event.target.value)}
+                      />
+                      <div className="review-response-actions">
+                        <button className="secondary-action compact-action" type="button" onClick={() => onCompleteReview(review.id, 'changes_requested')} disabled={isSaving}>
+                          Request changes
+                        </button>
+                        <button className="primary-action" type="button" onClick={() => onCompleteReview(review.id, 'approved')} disabled={isSaving}>
+                          <CheckCircle2 size={16} /> Approve
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </article>
+              )
+            })}
+          </div>
+        ) : (
+          <div className="analysis-empty">
+            <strong>No reviews yet</strong>
+            <span>Ask a teammate to review the current design when it is ready.</span>
+          </div>
+        )}
+      </section>
+
+      <section className="review-card">
+        <div className="section-title">Comments</div>
+        {comments.length ? (
+          <div className="activity-list">
+            {comments.map((comment) => (
+              <article className="activity-item" key={comment.id}>
+                <div>
+                  <strong>{userDisplayName(users, comment.authorId)}</strong>
+                  <span>{new Date(comment.createdAt).toLocaleString()}</span>
+                </div>
+                <p>{comment.body}</p>
+                {comment.componentId ? <small>Component: {comment.componentId}</small> : null}
+                {comment.connectorId ? <small>Connector: {comment.connectorId}</small> : null}
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="analysis-empty">
+            <strong>No comments yet</strong>
+            <span>Switch to comment mode and capture feedback without changing the canvas.</span>
+          </div>
+        )}
+      </section>
+    </div>
+  )
+}
+
+function RequestReviewModal({
+  users,
+  activeUserId,
+  isSaving,
+  onCancel,
+  onRequest,
+}: {
+  users: BackendUser[]
+  activeUserId: string
+  isSaving: boolean
+  onCancel: () => void
+  onRequest: (reviewerId: string, message: string) => void
+}) {
+  const reviewers = users.filter((user) => user.id !== activeUserId)
+  const [reviewerId, setReviewerId] = useState(reviewers[0]?.id ?? '')
+  const [message, setMessage] = useState('')
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="request-review-modal" role="dialog" aria-modal="true" aria-labelledby="request-review-title">
+        <div className="modal-heading">
+          <p className="eyebrow">Request review</p>
+          <h2 id="request-review-title">Add a reviewer</h2>
+          <span>The reviewer gets a notification and can approve or request changes from view mode.</span>
+        </div>
+        <label className="field">
+          <span>Reviewer</span>
+          <select value={reviewerId} onChange={(event) => setReviewerId(event.target.value)}>
+            {reviewers.map((user) => (
+              <option key={user.id} value={user.id}>
+                {user.displayName} · {user.role}
+              </option>
+            ))}
+          </select>
+        </label>
+        <TextareaField label="Message" value={message} onChange={setMessage} />
         <div className="modal-actions">
-          <button className="secondary-action" type="button" onClick={onClose} disabled={status === 'verifying'}>
+          <button className="secondary-action" type="button" onClick={onCancel} disabled={isSaving}>
             Cancel
           </button>
-          <button className="primary-action" type="button" onClick={() => void verify()} disabled={status === 'verifying'}>
-            {status === 'verifying' ? 'Verifying...' : 'Verify connection'}
+          <button className="primary-action" type="button" onClick={() => onRequest(reviewerId, message)} disabled={isSaving || !reviewerId}>
+            <UserPlus size={16} /> Request review
           </button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function NotificationsModal({
+  notifications,
+  users,
+  onMarkRead,
+  onClose,
+}: {
+  notifications: BackendNotification[]
+  users: BackendUser[]
+  onMarkRead: (notificationId: string) => void
+  onClose: () => void
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="notifications-modal" role="dialog" aria-modal="true" aria-labelledby="notifications-title">
+        <div className="analysis-modal-header">
+          <div className="modal-heading">
+            <p className="eyebrow">Notifications</p>
+            <h2 id="notifications-title">Review activity</h2>
+            <span>Comments and review updates for the active dummy user.</span>
+          </div>
+          <button className="secondary-action" type="button" onClick={onClose}>
+            Close
+          </button>
+        </div>
+        <div className="activity-list notification-list">
+          {notifications.length ? (
+            notifications.map((notification) => (
+              <article className={`activity-item ${notification.read ? '' : 'unread'}`} key={notification.id}>
+                <div>
+                  <strong>{notification.title}</strong>
+                  <span>{new Date(notification.createdAt).toLocaleString()}</span>
+                </div>
+                <p>{notification.body}</p>
+                <small>For {userDisplayName(users, notification.userId)}</small>
+                {!notification.read ? (
+                  <button className="text-button" type="button" onClick={() => onMarkRead(notification.id)}>
+                    Mark read
+                  </button>
+                ) : null}
+              </article>
+            ))
+          ) : (
+            <div className="analysis-empty">
+              <strong>No notifications</strong>
+              <span>Review requests and comments will appear here.</span>
+            </div>
+          )}
         </div>
       </section>
     </div>
@@ -1880,6 +3623,74 @@ function AnalysisModal({
                   <span>Readiness score</span>
                 </div>
                 <p>{analysisReport.summary}</p>
+                {analysisReport.workflow?.length ? (
+                  <div className="analysis-workflow">
+                    {analysisReport.workflow.map((step) => (
+                      <article className={`workflow-step ${step.status}`} key={step.id}>
+                        <span>{step.status}</span>
+                        <strong>{step.label}</strong>
+                        <small>{step.detail}</small>
+                      </article>
+                    ))}
+                  </div>
+                ) : null}
+                {analysisReport.aiReview ? (
+                  <div className="ai-review-block">
+                    <div className="admin-section-title">
+                      <span>AI synthesis</span>
+                      <small>
+                        {analysisReport.aiReview.provider
+                          ? `${analysisReport.aiReview.provider} / ${analysisReport.aiReview.model ?? 'model'}`
+                          : analysisReport.aiReview.status}
+                      </small>
+                    </div>
+                    {analysisReport.aiReview.error ? <div className="analysis-error">{analysisReport.aiReview.error}</div> : null}
+                    {analysisReport.aiReview.strengths?.length ? (
+                      <div className="ai-review-list strengths">
+                        <strong>Strengths</strong>
+                        {analysisReport.aiReview.strengths.map((strength) => (
+                          <span key={strength}>{strength}</span>
+                        ))}
+                      </div>
+                    ) : null}
+                    {analysisReport.aiReview.risks?.length ? (
+                      <div className="analysis-finding-list">
+                        <strong>AI risks</strong>
+                        {analysisReport.aiReview.risks.map((risk) => (
+                          <article className={`analysis-finding ${risk.severity}`} key={`risk-${risk.suite}-${risk.title}`}>
+                            <span>{risk.severity} · {risk.suite}</span>
+                            <strong>{risk.title}</strong>
+                            <p>{risk.detail}</p>
+                            <small>{risk.impact}</small>
+                            <em>{risk.recommendation}</em>
+                          </article>
+                        ))}
+                      </div>
+                    ) : null}
+                    {analysisReport.aiReview.recommendations?.length ? (
+                      <div className="analysis-finding-list">
+                        <strong>AI recommendations</strong>
+                        {analysisReport.aiReview.recommendations.map((recommendation) => (
+                          <article className={`analysis-finding ${recommendation.severity}`} key={`rec-${recommendation.suite}-${recommendation.title}`}>
+                            <span>{recommendation.severity} · {recommendation.suite}</span>
+                            <strong>{recommendation.title}</strong>
+                            <p>{recommendation.detail}</p>
+                            <small>{recommendation.impact}</small>
+                            <em>{recommendation.recommendation}</em>
+                          </article>
+                        ))}
+                      </div>
+                    ) : null}
+                    {analysisReport.aiReview.openQuestions?.length ? (
+                      <div className="ai-review-list questions">
+                        <strong>Open questions</strong>
+                        {analysisReport.aiReview.openQuestions.map((question) => (
+                          <span key={question}>{question}</span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
                 <div className="analysis-finding-list">
                   {analysisReport.findings.length ? (
                     analysisReport.findings.map((finding) => (
@@ -1887,6 +3698,8 @@ function AnalysisModal({
                         <span>{finding.severity} · {finding.suite}</span>
                         <strong>{finding.title}</strong>
                         <p>{finding.detail}</p>
+                        {finding.impact ? <small>{finding.impact}</small> : null}
+                        {finding.recommendation ? <em>{finding.recommendation}</em> : null}
                       </article>
                     ))
                   ) : (
@@ -1945,59 +3758,6 @@ function ConnectorTypeModal({
           </button>
         </div>
       </section>
-    </div>
-  )
-}
-
-function AnalysisWorkspace({
-  design,
-  requirementsOpen,
-  activeJourneyId,
-  activeJourneyStepIndex,
-  onToggleRequirements,
-  onChangeRequirements,
-  onCreatePrimaryJourney,
-  onSelectJourney,
-  onChangeJourney,
-  onDeleteJourney,
-  onSetJourneyStep,
-}: {
-  design: DesignDocument
-  requirementsOpen: boolean
-  activeJourneyId: string | null
-  activeJourneyStepIndex: number
-  onToggleRequirements: () => void
-  onChangeRequirements: (updater: (current: DesignDocument) => DesignDocument) => void
-  onCreatePrimaryJourney: () => void
-  onSelectJourney: (journeyId: string) => void
-  onChangeJourney: (journey: DesignJourney) => void
-  onDeleteJourney: (journeyId: string) => void
-  onSetJourneyStep: (stepIndex: number) => void
-}) {
-  return (
-    <div className="analysis-workspace">
-      <section className="collapsible-panel">
-        <button className="collapsible-panel-trigger" type="button" onClick={onToggleRequirements}>
-          <span>
-            {requirementsOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-            <Monitor size={18} />
-            Requirement Brief
-          </span>
-          <small>{requirementsOpen ? 'Hide' : 'Edit'}</small>
-        </button>
-        {requirementsOpen ? <RequirementPanel design={design} onChange={onChangeRequirements} compact /> : null}
-      </section>
-
-      <JourneyPanel
-        design={design}
-        activeJourneyId={activeJourneyId}
-        activeStepIndex={activeJourneyStepIndex}
-        onCreatePrimaryJourney={onCreatePrimaryJourney}
-        onSelectJourney={onSelectJourney}
-        onChangeJourney={onChangeJourney}
-        onDeleteJourney={onDeleteJourney}
-        onSetStep={onSetJourneyStep}
-      />
     </div>
   )
 }
@@ -2709,17 +4469,93 @@ function ComponentInspector({
   component,
   currentDesignId,
   workspaceDesigns,
+  catalogAssets,
   onChange,
   onDelete,
   onOpenLinkedDesign,
+  onCreateCatalogAsset,
 }: {
   component: DesignComponent
   currentDesignId: string
   workspaceDesigns: BackendDesign[]
+  catalogAssets: BackendCatalogAsset[]
   onChange: (component: DesignComponent) => void
   onDelete: () => void
   onOpenLinkedDesign: (design: BackendDesign) => void
+  onCreateCatalogAsset: (input: {
+    name: string
+    type: string
+    owner?: string
+    description?: string
+    criticality?: string
+    tags?: string[]
+  }) => Promise<BackendCatalogAsset>
 }) {
+  const [catalogError, setCatalogError] = useState<string | null>(null)
+
+  if (component.type === 'design.link') {
+    return (
+      <LinkedDesignInspector
+        component={component}
+        currentDesignId={currentDesignId}
+        workspaceDesigns={workspaceDesigns}
+        onChange={onChange}
+        onDelete={onDelete}
+        onOpenLinkedDesign={onOpenLinkedDesign}
+      />
+    )
+  }
+
+  const linkedAsset = component.metadata.enterpriseAsset
+    ? catalogAssets.find((asset) => asset.id === component.metadata.enterpriseAsset?.assetId)
+    : null
+  const exactDuplicateCandidates = catalogAssets.filter(
+    (asset) => normalizedCatalogLabel(asset.name) === normalizedCatalogLabel(component.name),
+  )
+  const duplicateCandidates = catalogAssets.filter((asset) => isPotentialCatalogMatch(component.name, asset.name))
+
+  async function promoteToCatalog() {
+    setCatalogError(null)
+    try {
+      const created = await onCreateCatalogAsset({
+        name: component.name,
+        type: component.type,
+        owner: component.owner,
+        description: component.purpose,
+        criticality: component.criticality,
+      })
+      linkCatalogAsset(created)
+    } catch (error) {
+      setCatalogError(error instanceof Error ? error.message : 'Could not add component to catalog.')
+    }
+  }
+
+  function linkCatalogAsset(asset: BackendCatalogAsset) {
+    onChange({
+      ...component,
+      name: component.name.trim() ? component.name : asset.name,
+      owner: component.owner.trim() ? component.owner : asset.owner,
+      criticality: (asset.criticality || component.criticality) as DesignComponent['criticality'],
+      metadata: {
+        ...component.metadata,
+        enterpriseAsset: {
+          assetId: asset.id,
+          name: asset.name,
+          type: asset.type,
+          owner: asset.owner,
+          criticality: asset.criticality,
+          linkedAt: new Date().toISOString(),
+        },
+      },
+    })
+  }
+
+  function unlinkCatalogAsset() {
+    const metadata = { ...component.metadata }
+    delete metadata.enterpriseAsset
+    onChange({ ...component, metadata })
+  }
+
   return (
     <div className="inspector">
       <div className="inspector-heading">
@@ -2734,6 +4570,64 @@ function ComponentInspector({
       </div>
 
       <Field label="Name" value={component.name} onChange={(name) => onChange({ ...component, name })} />
+      <div className="inspector-group enterprise-link-card">
+        <div className="section-title">Enterprise Catalog</div>
+        {component.metadata.enterpriseAsset ? (
+          <div className="catalog-link-summary">
+            <span className="shared-entity-badge">Shared entity</span>
+            <strong>{linkedAsset?.name ?? component.metadata.enterpriseAsset.name}</strong>
+            <small>
+              {linkedAsset
+                ? `${linkedAsset.usedInDesignCount} linked design${linkedAsset.usedInDesignCount === 1 ? '' : 's'}`
+                : 'Catalog asset not visible or deleted'}
+            </small>
+            <button className="text-button" type="button" onClick={unlinkCatalogAsset}>
+              Unlink from catalog
+            </button>
+          </div>
+        ) : (
+          <>
+            {duplicateCandidates.length ? (
+              <div className="catalog-suggestions">
+                <strong>Possible existing asset</strong>
+                {duplicateCandidates.map((asset) => (
+                  <button className="catalog-suggestion" type="button" key={asset.id} onClick={() => linkCatalogAsset(asset)}>
+                    <span>{asset.name}</span>
+                    <small>{asset.type} • {asset.usedInDesignCount} use{asset.usedInDesignCount === 1 ? '' : 's'}</small>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <label className="field">
+              <span>Link existing asset</span>
+              <select
+                value=""
+                onChange={(event) => {
+                  const asset = catalogAssets.find((item) => item.id === event.target.value)
+                  if (asset) linkCatalogAsset(asset)
+                }}
+              >
+                <option value="">Choose from catalog...</option>
+                {catalogAssets.map((asset) => (
+                  <option key={asset.id} value={asset.id}>
+                    {asset.name} ({asset.type})
+                  </option>
+                ))}
+              </select>
+            </label>
+            {catalogError ? <div className="admin-inline-error">{catalogError}</div> : null}
+            <button
+              className="command"
+              type="button"
+              disabled={!component.name.trim() || exactDuplicateCandidates.length > 0}
+              onClick={() => void promoteToCatalog()}
+              title={exactDuplicateCandidates.length ? 'Link the existing catalog asset instead of creating a duplicate.' : 'Create catalog asset'}
+            >
+              <FilePlus2 size={16} /> Add to catalog
+            </button>
+          </>
+        )}
+      </div>
       <Field label="Owner" value={component.owner} onChange={(owner) => onChange({ ...component, owner })} />
       <TextareaField
         label="Purpose"
@@ -2826,15 +4720,6 @@ function ComponentInspector({
       </div>
 
       {component.type === 'data.redis' && <RedisInspector component={component} onChange={onChange} />}
-      {component.type === 'design.link' ? (
-        <LinkedDesignInspector
-          component={component}
-          currentDesignId={currentDesignId}
-          workspaceDesigns={workspaceDesigns}
-          onChange={onChange}
-          onOpenLinkedDesign={onOpenLinkedDesign}
-        />
-      ) : null}
     </div>
   )
 }
@@ -2844,12 +4729,14 @@ function LinkedDesignInspector({
   currentDesignId,
   workspaceDesigns,
   onChange,
+  onDelete,
   onOpenLinkedDesign,
 }: {
   component: DesignComponent
   currentDesignId: string
   workspaceDesigns: BackendDesign[]
   onChange: (component: DesignComponent) => void
+  onDelete: () => void
   onOpenLinkedDesign: (design: BackendDesign) => void
 }) {
   const linkableDesigns = workspaceDesigns.filter((design) => design.id !== currentDesignId)
@@ -2913,50 +4800,64 @@ function LinkedDesignInspector({
   }
 
   return (
-    <div className="inspector-group linked-design-inspector">
-      <div className="section-title">Linked design</div>
-      <label className="field">
-        <span>Target design</span>
-        <select value={linkedDesign?.designId ?? ''} onChange={(event) => updateLinkedDesign(event.target.value)}>
-          <option value="">Choose a design...</option>
-          {linkableDesigns.map((design) => (
-            <option key={design.id} value={design.id}>
-              {design.name || design.document.title || 'Untitled design'}
-            </option>
-          ))}
-        </select>
-      </label>
-      {linkedDesign ? (
-        <>
-          <Field label="Target ID" value={linkedDesign.designId} onChange={() => undefined} disabled />
-          <Field label="Title" value={currentLinkedTitle ?? 'Unavailable design'} onChange={() => undefined} disabled />
-          <Field
-            label="Access"
-            value={linkedBackendDesign?.access ?? `${linkedDesign.access} (not visible)`}
-            onChange={() => undefined}
-            disabled
-          />
-          <Field
-            label="Last synced"
-            value={new Date(linkedBackendDesign?.updatedAt ?? linkedDesign.updatedAt).toLocaleString()}
-            onChange={() => undefined}
-            disabled
-          />
-          <button
-            className="command"
-            type="button"
-            disabled={!linkedBackendDesign}
-            onClick={() => linkedBackendDesign && onOpenLinkedDesign(linkedBackendDesign)}
-          >
-            <LayoutDashboard size={16} /> Open linked design
-          </button>
-        </>
-      ) : (
-        <div className="analysis-empty compact-empty">
-          <strong>No target selected</strong>
-          <span>Links are limited to designs visible in this workspace.</span>
+    <div className="inspector linked-design-inspector">
+      <div className="inspector-heading">
+        <LayoutDashboard size={18} />
+        <div>
+          <strong>{component.name || 'Linked Design'}</strong>
+          <span>Reference to another design</span>
         </div>
-      )}
+        <button className="text-button danger" type="button" onClick={onDelete}>
+          Delete
+        </button>
+      </div>
+
+      <Field label="Label" value={component.name} onChange={(name) => onChange({ ...component, name })} />
+
+      <div className="inspector-group">
+        <div className="section-title">Target</div>
+        <label className="field">
+          <span>Target design</span>
+          <select value={linkedDesign?.designId ?? ''} onChange={(event) => updateLinkedDesign(event.target.value)}>
+            <option value="">Choose a design...</option>
+            {linkableDesigns.map((design) => (
+              <option key={design.id} value={design.id}>
+                {design.name || design.document.title || 'Untitled design'}
+              </option>
+            ))}
+          </select>
+        </label>
+        {linkedDesign ? (
+          <>
+            <Field label="Title" value={currentLinkedTitle ?? 'Unavailable design'} onChange={() => undefined} disabled />
+            <Field
+              label="Access"
+              value={linkedBackendDesign?.access ?? `${linkedDesign.access} (not visible)`}
+              onChange={() => undefined}
+              disabled
+            />
+            <Field
+              label="Last synced"
+              value={new Date(linkedBackendDesign?.updatedAt ?? linkedDesign.updatedAt).toLocaleString()}
+              onChange={() => undefined}
+              disabled
+            />
+            <button
+              className="command"
+              type="button"
+              disabled={!linkedBackendDesign}
+              onClick={() => linkedBackendDesign && onOpenLinkedDesign(linkedBackendDesign)}
+            >
+              <LayoutDashboard size={16} /> Open linked design
+            </button>
+          </>
+        ) : (
+          <div className="analysis-empty compact-empty">
+            <strong>No target selected</strong>
+            <span>Links are limited to designs visible in this workspace.</span>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -3117,16 +5018,18 @@ function Field({
   value,
   onChange,
   disabled = false,
+  type = 'text',
 }: {
   label: string
   value: string
   onChange: (value: string) => void
   disabled?: boolean
+  type?: string
 }) {
   return (
     <label className="field">
       <span>{label}</span>
-      <input value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
+      <input type={type} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
     </label>
   )
 }

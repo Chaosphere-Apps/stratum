@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	urlpath "path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -45,7 +49,26 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /ws", s.handleWorkspaceSocket)
+	s.mux.HandleFunc("GET /api/setup/status", s.handleSetupStatus)
+	s.mux.HandleFunc("POST /api/setup/first-admin", s.handleCreateFirstAdmin)
+	s.mux.HandleFunc("POST /api/setup/admin-password", s.handleSetInitialAdminPassword)
+	s.mux.HandleFunc("POST /api/auth/login", s.handleLogin)
+	s.mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
 	s.mux.HandleFunc("GET /api/profile", s.handleProfile)
+	s.mux.HandleFunc("GET /api/users", s.handleListUsers)
+	s.mux.HandleFunc("POST /api/admin/users", s.handleCreateUser)
+	s.mux.HandleFunc("PATCH /api/admin/users/{userID}", s.handleUpdateUser)
+	s.mux.HandleFunc("DELETE /api/admin/users/{userID}", s.handleDeleteUser)
+	s.mux.HandleFunc("GET /api/admin/sign-in", s.handleGetSignInConfig)
+	s.mux.HandleFunc("PATCH /api/admin/sign-in", s.handleUpdateSignInConfig)
+	s.mux.HandleFunc("GET /api/admin/ai-provider", s.handleGetAIProviderConfig)
+	s.mux.HandleFunc("PATCH /api/admin/ai-provider", s.handleUpdateAIProviderConfig)
+	s.mux.HandleFunc("GET /api/catalog/assets", s.handleListCatalogAssets)
+	s.mux.HandleFunc("POST /api/catalog/assets", s.handleCreateCatalogAsset)
+	s.mux.HandleFunc("PATCH /api/admin/catalog/assets/{assetID}", s.handleUpdateCatalogAsset)
+	s.mux.HandleFunc("DELETE /api/admin/catalog/assets/{assetID}", s.handleDeleteCatalogAsset)
+	s.mux.HandleFunc("GET /api/notifications", s.handleListNotifications)
+	s.mux.HandleFunc("POST /api/notifications/{notificationID}/read", s.handleMarkNotificationRead)
 	s.mux.HandleFunc("POST /api/ai/provider/verify", s.handleVerifyAIProvider)
 	s.mux.HandleFunc("GET /api/workspaces", s.handleListWorkspaces)
 	s.mux.HandleFunc("POST /api/workspaces", s.handleCreateWorkspace)
@@ -63,6 +86,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}", s.handleGetDesignDoc)
 	s.mux.HandleFunc("PATCH /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}", s.handleUpdateDesignDoc)
 	s.mux.HandleFunc("DELETE /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}", s.handleDeleteDesignDoc)
+	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/designs/{designID}/comments", s.handleListDesignComments)
+	s.mux.HandleFunc("POST /api/workspaces/{workspaceID}/designs/{designID}/comments", s.handleCreateDesignComment)
+	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/designs/{designID}/reviews", s.handleListDesignReviews)
+	s.mux.HandleFunc("POST /api/workspaces/{workspaceID}/designs/{designID}/reviews", s.handleCreateDesignReview)
+	s.mux.HandleFunc("PATCH /api/workspaces/{workspaceID}/designs/{designID}/reviews/{reviewID}", s.handleUpdateDesignReview)
+	if s.cfg.StaticAssetsDir != "" {
+		s.mux.HandleFunc("GET /", s.handleStaticAssets)
+	}
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -71,7 +102,31 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+func (s *Server) handleStaticAssets(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/ws" || r.URL.Path == "/healthz" {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	cleanPath := strings.TrimPrefix(urlpath.Clean("/"+r.URL.Path), "/")
+	if cleanPath == "" {
+		cleanPath = "index.html"
+	}
+
+	staticFile := filepath.Join(s.cfg.StaticAssetsDir, cleanPath)
+	if info, err := os.Stat(staticFile); err == nil && !info.IsDir() {
+		http.ServeFile(w, r, staticFile)
+		return
+	}
+
+	http.ServeFile(w, r, filepath.Join(s.cfg.StaticAssetsDir, "index.html"))
+}
+
 func (s *Server) handleWorkspaceSocket(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.currentUser(r); err != nil {
+		http.Error(w, "session is required", http.StatusUnauthorized)
+		return
+	}
 	workspaceID := strings.TrimSpace(r.URL.Query().Get("workspaceId"))
 	if workspaceID == "" {
 		workspaceID = domain.GuestWorkspaceID
@@ -112,15 +167,421 @@ func (s *Server) handleWorkspaceSocket(w http.ResponseWriter, r *http.Request) {
 	client.Run(ctx)
 }
 
-func (s *Server) handleProfile(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"id":          domain.GuestUserID,
-		"displayName": "Guest Designer",
-		"role":        "guest",
+func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
+	users, err := s.hub.Repository().ListUsers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	passwordSetupRequired, err := s.hub.Repository().PasswordSetupRequired(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"requiresSetup": len(users) == 0, "requiresPasswordSetup": passwordSetupRequired})
+}
+
+func (s *Server) handleCreateFirstAdmin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		DisplayName string `json:"displayName"`
+		Email       string `json:"email"`
+		Password    string `json:"password"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	user, err := s.hub.Repository().CreateFirstAdmin(r.Context(), body.DisplayName, body.Email, body.Password)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	token, err := s.hub.Repository().CreateSession(r.Context(), user.ID, s.sessionExpiresAt())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.setSessionCookie(w, r, token)
+	writeJSON(w, http.StatusCreated, map[string]any{"user": user})
+}
+
+func (s *Server) handleSetInitialAdminPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	user, err := s.hub.Repository().SetInitialAdminPassword(r.Context(), body.Email, body.Password)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	token, err := s.hub.Repository().CreateSession(r.Context(), user.ID, s.sessionExpiresAt())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.setSessionCookie(w, r, token)
+	writeJSON(w, http.StatusOK, map[string]any{"user": user})
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	user, err := s.hub.Repository().AuthenticateUser(r.Context(), body.Email, body.Password)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	token, err := s.hub.Repository().CreateSession(r.Context(), user.ID, s.sessionExpiresAt())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.setSessionCookie(w, r, token)
+	writeJSON(w, http.StatusOK, map[string]any{"user": user})
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	token := sessionToken(r)
+	if token != "" {
+		_ = s.hub.Repository().DeleteSession(r.Context(), token)
+	}
+	s.clearSessionCookie(w, r)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleProfile(w http.ResponseWriter, r *http.Request) {
+	user, err := s.currentUser(r)
+	if err != nil {
+		users, listErr := s.hub.Repository().ListUsers(r.Context())
+		if listErr != nil {
+			writeError(w, http.StatusInternalServerError, listErr.Error())
+			return
+		}
+		if len(users) > 0 {
+			writeError(w, http.StatusUnauthorized, "session is required")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"setupRequired": true})
+		return
+	}
+	writeJSON(w, http.StatusOK, user)
+}
+
+func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.currentUser(r); err != nil {
+		writeError(w, http.StatusUnauthorized, "session is required")
+		return
+	}
+	users, err := s.hub.Repository().ListUsers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": users})
+}
+
+func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	var body struct {
+		DisplayName string `json:"displayName"`
+		Email       string `json:"email"`
+		Role        string `json:"role"`
+		Password    string `json:"password"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	user, err := s.hub.Repository().CreateUser(r.Context(), body.DisplayName, body.Email, body.Role, body.Password)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"user": user})
+}
+
+func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	var body struct {
+		DisplayName string `json:"displayName"`
+		Email       string `json:"email"`
+		Role        string `json:"role"`
+		Status      string `json:"status"`
+		Password    string `json:"password"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	user, err := s.hub.Repository().UpdateUser(r.Context(), r.PathValue("userID"), body.DisplayName, body.Email, body.Role, body.Status, body.Password)
+	if err != nil {
+		writeError(w, statusForDeleteError(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": user})
+}
+
+func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if err := s.hub.Repository().DeleteUser(r.Context(), r.PathValue("userID")); err != nil {
+		writeError(w, statusForDeleteError(err), err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleGetSignInConfig(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	config, err := s.hub.Repository().GetSignInConfig(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"signIn": config})
+}
+
+func (s *Server) handleUpdateSignInConfig(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	var body struct {
+		LocalPasswordEnabled  bool   `json:"localPasswordEnabled"`
+		SSOEnabled            bool   `json:"ssoEnabled"`
+		Provider              string `json:"provider"`
+		OktaDomain            string `json:"oktaDomain"`
+		Issuer                string `json:"issuer"`
+		ClientID              string `json:"clientId"`
+		ClientSecret          string `json:"clientSecret"`
+		RedirectURI           string `json:"redirectUri"`
+		PostLogoutRedirectURI string `json:"postLogoutRedirectUri"`
+		Scopes                string `json:"scopes"`
+		GroupsClaim           string `json:"groupsClaim"`
+		AdminGroup            string `json:"adminGroup"`
+		ReviewerGroup         string `json:"reviewerGroup"`
+		JITProvisioning       bool   `json:"jitProvisioning"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	config, err := s.hub.Repository().UpdateSignInConfig(r.Context(), domain.SignInConfig{
+		LocalPasswordEnabled:  body.LocalPasswordEnabled,
+		SSOEnabled:            body.SSOEnabled,
+		Provider:              body.Provider,
+		OktaDomain:            body.OktaDomain,
+		Issuer:                body.Issuer,
+		ClientID:              body.ClientID,
+		RedirectURI:           body.RedirectURI,
+		PostLogoutRedirectURI: body.PostLogoutRedirectURI,
+		Scopes:                body.Scopes,
+		GroupsClaim:           body.GroupsClaim,
+		AdminGroup:            body.AdminGroup,
+		ReviewerGroup:         body.ReviewerGroup,
+		JITProvisioning:       body.JITProvisioning,
+	}, body.ClientSecret)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"signIn": config})
+}
+
+func (s *Server) handleGetAIProviderConfig(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	config, err := s.hub.Repository().GetAIProviderConfig(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"aiProvider": config})
+}
+
+func (s *Server) handleUpdateAIProviderConfig(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	var body struct {
+		Enabled  bool   `json:"enabled"`
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		BaseURL  string `json:"baseUrl"`
+		APIKey   string `json:"apiKey"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	verifyKey := strings.TrimSpace(body.APIKey)
+	if body.Enabled && verifyKey == "" {
+		current, err := s.hub.Repository().GetAIProviderConfigWithSecret(r.Context())
+		if err == nil {
+			verifyKey = current.APIKey
+		}
+	}
+	if body.Enabled || verifyKey != "" {
+		if err := verifyAIProvider(r.Context(), body.Provider, body.BaseURL, verifyKey, s.cfg.AllowPrivateAIProviderURLs); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	config, err := s.hub.Repository().UpdateAIProviderConfig(r.Context(), domain.AIProviderConfig{
+		Enabled:  body.Enabled,
+		Provider: body.Provider,
+		Model:    body.Model,
+		BaseURL:  body.BaseURL,
+	}, body.APIKey)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"aiProvider": config})
+}
+
+func (s *Server) handleListCatalogAssets(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.currentUser(r); err != nil {
+		writeError(w, http.StatusUnauthorized, "session is required")
+		return
+	}
+	assets, err := s.hub.Repository().ListCatalogAssets(r.Context(), r.URL.Query().Get("query"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"assets": assets})
+}
+
+func (s *Server) handleCreateCatalogAsset(w http.ResponseWriter, r *http.Request) {
+	user, err := s.currentUser(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "session is required")
+		return
+	}
+	var body struct {
+		Name        string          `json:"name"`
+		Type        string          `json:"type"`
+		Owner       string          `json:"owner"`
+		Description string          `json:"description"`
+		Criticality string          `json:"criticality"`
+		Tags        []string        `json:"tags"`
+		Metadata    json.RawMessage `json:"metadata"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	asset, err := s.hub.Repository().CreateCatalogAsset(r.Context(), domain.CatalogAsset{
+		Name:        body.Name,
+		Type:        body.Type,
+		Owner:       body.Owner,
+		Description: body.Description,
+		Criticality: body.Criticality,
+		Tags:        body.Tags,
+		Metadata:    body.Metadata,
+		CreatedBy:   user.ID,
 	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"asset": asset})
+}
+
+func (s *Server) handleUpdateCatalogAsset(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	var body struct {
+		Name        string          `json:"name"`
+		Type        string          `json:"type"`
+		Owner       string          `json:"owner"`
+		Description string          `json:"description"`
+		Criticality string          `json:"criticality"`
+		Tags        []string        `json:"tags"`
+		Metadata    json.RawMessage `json:"metadata"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	asset, err := s.hub.Repository().UpdateCatalogAsset(r.Context(), r.PathValue("assetID"), domain.CatalogAsset{
+		Name:        body.Name,
+		Type:        body.Type,
+		Owner:       body.Owner,
+		Description: body.Description,
+		Criticality: body.Criticality,
+		Tags:        body.Tags,
+		Metadata:    body.Metadata,
+	})
+	if err != nil {
+		writeError(w, statusForCatalogError(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"asset": asset})
+}
+
+func (s *Server) handleDeleteCatalogAsset(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if err := s.hub.Repository().DeleteCatalogAsset(r.Context(), r.PathValue("assetID")); err != nil {
+		writeError(w, statusForCatalogError(err), err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request) {
+	user, err := s.currentUser(r)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"notifications": []domain.Notification{}})
+		return
+	}
+	notifications, err := s.hub.Repository().ListNotifications(r.Context(), user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"notifications": notifications})
+}
+
+func (s *Server) handleMarkNotificationRead(w http.ResponseWriter, r *http.Request) {
+	user, err := s.currentUser(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "user is required")
+		return
+	}
+	if err := s.hub.Repository().MarkNotificationRead(r.Context(), user.ID, r.PathValue("notificationID")); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleVerifyAIProvider(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	var body struct {
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
@@ -198,7 +659,211 @@ func verifyAIProvider(ctx context.Context, provider string, baseURL string, apiK
 	return nil
 }
 
+func runAIAnalysis(ctx context.Context, config domain.AIProviderConfig, document json.RawMessage, report analysis.Report, allowPrivateURLs bool) (analysis.AIReview, error) {
+	endpoint, err := providerBaseURL(config.Provider, config.BaseURL)
+	if err != nil {
+		return analysis.AIReview{}, err
+	}
+	if err := validateProviderEndpoint(endpoint, allowPrivateURLs); err != nil {
+		return analysis.AIReview{}, err
+	}
+	userPrompt, err := analysis.BuildUserPrompt(document, report)
+	if err != nil {
+		return analysis.AIReview{}, err
+	}
+	if config.Provider == "anthropic" {
+		return runAnthropicAnalysis(ctx, endpoint, config, userPrompt)
+	}
+	return runOpenAICompatibleAnalysis(ctx, endpoint, config, userPrompt)
+}
+
+func runOpenAICompatibleAnalysis(ctx context.Context, endpoint string, config domain.AIProviderConfig, userPrompt string) (analysis.AIReview, error) {
+	payload := map[string]any{
+		"model":       strings.TrimSpace(config.Model),
+		"temperature": 0.1,
+		"messages": []map[string]string{
+			{"role": "system", "content": analysis.BuildSystemPrompt()},
+			{"role": "user", "content": userPrompt},
+		},
+		"response_format": map[string]string{"type": "json_object"},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return analysis.AIReview{}, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(endpoint, "/")+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return analysis.AIReview{}, errors.New("provider URL is invalid")
+	}
+	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(config.APIKey))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	client := http.Client{Timeout: 24 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		return analysis.AIReview{}, errors.New("provider could not be reached")
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return analysis.AIReview{}, errors.New("provider rejected the analysis request")
+	}
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&parsed); err != nil {
+		return analysis.AIReview{}, errors.New("provider returned invalid JSON")
+	}
+	if len(parsed.Choices) == 0 || strings.TrimSpace(parsed.Choices[0].Message.Content) == "" {
+		return analysis.AIReview{}, errors.New("provider returned an empty review")
+	}
+	return parseAIReview(parsed.Choices[0].Message.Content, config), nil
+}
+
+func runAnthropicAnalysis(ctx context.Context, endpoint string, config domain.AIProviderConfig, userPrompt string) (analysis.AIReview, error) {
+	payload := map[string]any{
+		"model":       strings.TrimSpace(config.Model),
+		"max_tokens":  2200,
+		"temperature": 0.1,
+		"system":      analysis.BuildSystemPrompt(),
+		"messages": []map[string]string{
+			{"role": "user", "content": userPrompt},
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return analysis.AIReview{}, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(endpoint, "/")+"/messages", bytes.NewReader(body))
+	if err != nil {
+		return analysis.AIReview{}, errors.New("provider URL is invalid")
+	}
+	request.Header.Set("x-api-key", strings.TrimSpace(config.APIKey))
+	request.Header.Set("anthropic-version", "2023-06-01")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	client := http.Client{Timeout: 24 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		return analysis.AIReview{}, errors.New("provider could not be reached")
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return analysis.AIReview{}, errors.New("provider rejected the analysis request")
+	}
+	var parsed struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&parsed); err != nil {
+		return analysis.AIReview{}, errors.New("provider returned invalid JSON")
+	}
+	for _, content := range parsed.Content {
+		if content.Type == "text" && strings.TrimSpace(content.Text) != "" {
+			return parseAIReview(content.Text, config), nil
+		}
+	}
+	return analysis.AIReview{}, errors.New("provider returned an empty review")
+}
+
+func parseAIReview(content string, config domain.AIProviderConfig) analysis.AIReview {
+	var envelope analysis.AIReviewEnvelope
+	if err := json.Unmarshal([]byte(strings.TrimSpace(content)), &envelope); err != nil {
+		return analysis.AIReview{
+			Status:        "failed",
+			Provider:      config.Provider,
+			Model:         config.Model,
+			PromptVersion: analysis.PromptVersion,
+			Error:         "AI response did not match the expected JSON shape",
+		}
+	}
+	return analysis.AIReview{
+		Status:          "completed",
+		Provider:        config.Provider,
+		Model:           config.Model,
+		PromptVersion:   analysis.PromptVersion,
+		ExecutiveReview: strings.TrimSpace(envelope.ExecutiveReview),
+		Strengths:       cleanReviewStrings(envelope.Strengths),
+		Risks:           cleanReviewPoints(envelope.Risks),
+		Recommendations: cleanReviewPoints(envelope.Recommendations),
+		OpenQuestions:   cleanReviewStrings(envelope.OpenQuestions),
+	}
+}
+
+func cleanReviewStrings(values []string) []string {
+	cleaned := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			cleaned = append(cleaned, value)
+		}
+	}
+	return cleaned
+}
+
+func cleanReviewPoints(points []analysis.AIReviewPoint) []analysis.AIReviewPoint {
+	cleaned := make([]analysis.AIReviewPoint, 0, len(points))
+	for _, point := range points {
+		point.Severity = normalizeAISeverity(point.Severity)
+		point.Suite = normalizeAISuite(point.Suite)
+		point.Title = strings.TrimSpace(point.Title)
+		point.Detail = strings.TrimSpace(point.Detail)
+		point.Impact = strings.TrimSpace(point.Impact)
+		point.Recommendation = strings.TrimSpace(point.Recommendation)
+		point.ComponentID = strings.TrimSpace(point.ComponentID)
+		point.ConnectorID = strings.TrimSpace(point.ConnectorID)
+		if point.Title == "" || point.Detail == "" {
+			continue
+		}
+		cleaned = append(cleaned, point)
+	}
+	return cleaned
+}
+
+func normalizeAISeverity(severity string) string {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
+	case "high", "medium", "low":
+		return strings.ToLower(strings.TrimSpace(severity))
+	default:
+		return "medium"
+	}
+}
+
+func normalizeAISuite(suite string) string {
+	switch strings.ToLower(strings.TrimSpace(suite)) {
+	case "requirements", "topology", "traffic", "consistency", "availability", "security", "data", "operability", "cost", "ai", "integrity":
+		return strings.ToLower(strings.TrimSpace(suite))
+	default:
+		return "integrity"
+	}
+}
+
+func providerBaseURL(provider string, baseURL string) (string, error) {
+	endpoint := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if endpoint != "" {
+		return endpoint, nil
+	}
+	switch strings.TrimSpace(provider) {
+	case "openai":
+		return "https://api.openai.com/v1", nil
+	case "anthropic":
+		return "https://api.anthropic.com/v1", nil
+	case "openrouter":
+		return "https://openrouter.ai/api/v1", nil
+	default:
+		return "", errors.New("base URL is required for custom providers")
+	}
+}
+
 func (s *Server) handleListWorkspaces(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
 	workspaces, err := s.hub.Repository().ListWorkspaces(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -208,6 +873,9 @@ func (s *Server) handleListWorkspaces(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
 	var body struct {
 		Name string `json:"name"`
 	}
@@ -224,6 +892,9 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteWorkspace(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
 	workspaceID := r.PathValue("workspaceID")
 	if err := s.hub.Repository().DeleteWorkspace(r.Context(), workspaceID); err != nil {
 		writeError(w, statusForDeleteError(err), err.Error())
@@ -233,6 +904,9 @@ func (s *Server) handleDeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListDesigns(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
 	workspaceID := r.PathValue("workspaceID")
 	designs, err := s.hub.Repository().ListDesigns(r.Context(), workspaceID)
 	if err != nil {
@@ -252,7 +926,12 @@ func (s *Server) handleCreateDesign(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	design, err := s.hub.Repository().CreateDesign(r.Context(), workspaceID, body.Name, body.Document)
+	user, err := s.currentUser(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "user is required")
+		return
+	}
+	design, err := s.hub.Repository().CreateDesign(r.Context(), workspaceID, body.Name, body.Document, user.ID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -261,6 +940,9 @@ func (s *Server) handleCreateDesign(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetDesign(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
 	design, err := s.hub.Repository().GetDesign(r.Context(), workspaceID, designID)
@@ -272,6 +954,9 @@ func (s *Server) handleGetDesign(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteDesign(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
 	if err := s.hub.Repository().DeleteDesign(r.Context(), workspaceID, designID); err != nil {
@@ -282,6 +967,9 @@ func (s *Server) handleDeleteDesign(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateDesignMetadata(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
 	var body struct {
@@ -301,6 +989,9 @@ func (s *Server) handleUpdateDesignMetadata(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleSaveDesignDocument(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
 	var body struct {
@@ -343,6 +1034,9 @@ func (s *Server) handleSaveDesignDocument(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleListDesignVersions(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
 	versions, err := s.hub.Repository().ListDesignVersions(r.Context(), workspaceID, designID)
@@ -354,6 +1048,9 @@ func (s *Server) handleListDesignVersions(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleAnalyzeDesign(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
 	design, err := s.hub.Repository().GetDesign(r.Context(), workspaceID, designID)
@@ -367,10 +1064,26 @@ func (s *Server) handleAnalyzeDesign(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if aiConfig, err := s.hub.Repository().GetAIProviderConfigWithSecret(r.Context()); err == nil && aiConfig.Enabled && strings.TrimSpace(aiConfig.APIKey) != "" {
+		review, err := runAIAnalysis(r.Context(), aiConfig, design.Document, report, s.cfg.AllowPrivateAIProviderURLs)
+		if err != nil {
+			review = analysis.AIReview{
+				Status:        "failed",
+				Provider:      aiConfig.Provider,
+				Model:         aiConfig.Model,
+				PromptVersion: analysis.PromptVersion,
+				Error:         "AI synthesis failed: " + err.Error(),
+			}
+		}
+		report = analysis.AttachAIReview(report, review)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"analysis": report})
 }
 
 func (s *Server) handleListDesignDocs(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
 	docs, err := s.hub.Repository().ListDesignDocs(r.Context(), workspaceID, designID)
@@ -382,6 +1095,9 @@ func (s *Server) handleListDesignDocs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetDesignDoc(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
 	docID := r.PathValue("docID")
@@ -394,6 +1110,9 @@ func (s *Server) handleGetDesignDoc(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateDesignDoc(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
 	var body struct {
@@ -414,6 +1133,9 @@ func (s *Server) handleCreateDesignDoc(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateDesignDoc(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
 	docID := r.PathValue("docID")
@@ -452,6 +1174,9 @@ func (s *Server) handleUpdateDesignDoc(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteDesignDoc(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
 	docID := r.PathValue("docID")
@@ -460,6 +1185,106 @@ func (s *Server) handleDeleteDesignDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleListDesignComments(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
+	workspaceID := r.PathValue("workspaceID")
+	designID := r.PathValue("designID")
+	comments, err := s.hub.Repository().ListDesignComments(r.Context(), workspaceID, designID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"comments": comments})
+}
+
+func (s *Server) handleCreateDesignComment(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	designID := r.PathValue("designID")
+	var body struct {
+		Body        string `json:"body"`
+		ComponentID string `json:"componentId"`
+		ConnectorID string `json:"connectorId"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	user, err := s.currentUser(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "user is required")
+		return
+	}
+	comment, err := s.hub.Repository().CreateDesignComment(r.Context(), workspaceID, designID, user.ID, body.Body, body.ComponentID, body.ConnectorID)
+	if err != nil {
+		writeError(w, statusForDeleteError(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"comment": comment})
+}
+
+func (s *Server) handleListDesignReviews(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
+	workspaceID := r.PathValue("workspaceID")
+	designID := r.PathValue("designID")
+	reviews, err := s.hub.Repository().ListDesignReviewRequests(r.Context(), workspaceID, designID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"reviews": reviews})
+}
+
+func (s *Server) handleCreateDesignReview(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	designID := r.PathValue("designID")
+	var body struct {
+		ReviewerID string `json:"reviewerId"`
+		Message    string `json:"message"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	user, err := s.currentUser(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "user is required")
+		return
+	}
+	review, err := s.hub.Repository().CreateDesignReviewRequest(r.Context(), workspaceID, designID, user.ID, body.ReviewerID, body.Message)
+	if err != nil {
+		writeError(w, statusForDeleteError(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"review": review})
+}
+
+func (s *Server) handleUpdateDesignReview(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
+	workspaceID := r.PathValue("workspaceID")
+	designID := r.PathValue("designID")
+	reviewID := r.PathValue("reviewID")
+	var body struct {
+		Status  string `json:"status"`
+		Summary string `json:"summary"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	review, err := s.hub.Repository().UpdateDesignReviewRequest(r.Context(), workspaceID, designID, reviewID, body.Status, body.Summary)
+	if err != nil {
+		writeError(w, statusForDeleteError(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"review": review})
 }
 
 func (s *Server) cors(next http.Handler) http.Handler {
@@ -533,10 +1358,21 @@ func statusForDeleteError(err error) int {
 	if strings.Contains(message, "not empty") {
 		return http.StatusConflict
 	}
-	if strings.Contains(message, "cannot be deleted") || strings.Contains(message, "required") {
+	if strings.Contains(message, "cannot be deleted") || strings.Contains(message, "required") || strings.Contains(message, "at least") {
 		return http.StatusBadRequest
 	}
 	return http.StatusInternalServerError
+}
+
+func statusForCatalogError(err error) int {
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "already exists") {
+		return http.StatusConflict
+	}
+	if strings.Contains(message, "linked to") {
+		return http.StatusConflict
+	}
+	return statusForDeleteError(err)
 }
 
 func writeCORSHeaders(w http.ResponseWriter, r *http.Request, allowedOrigins []string) {
@@ -547,11 +1383,93 @@ func writeCORSHeaders(w http.ResponseWriter, r *http.Request, allowedOrigins []s
 	if isAllowedOrigin(origin, allowedOrigins) {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Add("Vary", "Origin")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
 	}
 	w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,PUT,DELETE,OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type")
+	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type")
 	w.Header().Set("Access-Control-Allow-Private-Network", "true")
 	w.Header().Set("Access-Control-Max-Age", "600")
+}
+
+func (s *Server) currentUser(r *http.Request) (domain.User, error) {
+	return s.userFromToken(r.Context(), sessionToken(r))
+}
+
+func (s *Server) userFromToken(ctx context.Context, token string) (domain.User, error) {
+	if token == "" {
+		return domain.User{}, errors.New("session is required")
+	}
+	return s.hub.Repository().GetUserBySessionToken(ctx, token)
+}
+
+func sessionToken(r *http.Request) string {
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(cookie.Value)
+}
+
+const sessionCookieName = "stratum_session"
+
+func (s *Server) sessionExpiresAt() time.Time {
+	ttl := s.cfg.SessionTTL
+	if ttl <= 0 {
+		ttl = 12 * time.Hour
+	}
+	return time.Now().UTC().Add(ttl)
+}
+
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
+	expiresAt := s.sessionExpiresAt()
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		Expires:  expiresAt,
+		MaxAge:   int(time.Until(expiresAt).Seconds()),
+		HttpOnly: true,
+		Secure:   requestIsSecure(r),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		Expires:  time.Unix(0, 0).UTC(),
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   requestIsSecure(r),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func requestIsSecure(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	user, err := s.currentUser(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "admin user is required")
+		return false
+	}
+	if user.Role != "admin" {
+		writeError(w, http.StatusForbidden, "admin role is required")
+		return false
+	}
+	return true
+}
+
+func (s *Server) requireSession(w http.ResponseWriter, r *http.Request) bool {
+	if _, err := s.currentUser(r); err != nil {
+		writeError(w, http.StatusUnauthorized, "session is required")
+		return false
+	}
+	return true
 }
 
 func isAllowedOrigin(origin string, allowedOrigins []string) bool {

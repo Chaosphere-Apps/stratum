@@ -73,7 +73,11 @@ export function useBackendDesignSync({ workspaceId, selectedDesignId, onRemoteDe
       setDesigns([])
       setStatus('connecting')
 
-      const wsOrigin = import.meta.env.VITE_BACKEND_WS_ORIGIN || `ws://${window.location.hostname || '127.0.0.1'}:8081`
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const sameOriginWs = `${protocol}//${window.location.host}`
+      const devWs = `ws://${window.location.hostname || '127.0.0.1'}:8081`
+      const port = window.location.port
+      const wsOrigin = import.meta.env.VITE_BACKEND_WS_ORIGIN || (port.startsWith('517') || port === '4173' ? devWs : sameOriginWs)
       const wsUrl = `${wsOrigin}/ws?workspaceId=${encodeURIComponent(workspaceId)}`
       const socket = new WebSocket(wsUrl)
       socketRef.current = socket

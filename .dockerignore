@@ -1,0 +1,16 @@
+.git
+.DS_Store
+*.log
+ai-docs
+
+**/node_modules
+**/dist
+**/.gocache
+**/tmp
+**/bin
+**/coverage.out
+**/tsconfig.tsbuildinfo
+**/tsconfig.node.tsbuildinfo
+
+ui/vite.config.js
+ui/vite.config.d.ts

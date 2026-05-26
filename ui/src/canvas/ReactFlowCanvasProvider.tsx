@@ -1,10 +1,11 @@
-import { useMemo, type CSSProperties } from 'react'
+import { useMemo, useState, type CSSProperties, type DragEvent } from 'react'
 import {
   Brain,
   Cloud,
   Copy,
   Database,
   Edit3,
+  ExternalLink,
   FileText,
   Globe2,
   HardDrive,
@@ -32,6 +33,7 @@ import {
   Position,
   ReactFlow,
   ReactFlowProvider,
+  type ReactFlowInstance,
   SelectionMode,
   applyEdgeChanges,
   applyNodeChanges,
@@ -48,8 +50,8 @@ import {
   type ResizeParams,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { getCatalogItem } from '../catalog'
-import type { DesignComponent } from '../types'
+import { componentCatalog, getCatalogItem } from '../catalog'
+import type { ComponentType, DesignComponent } from '../types'
 import type { ReactFlowPreviewProps } from './types'
 
 type ArchitectureNodeData = {
@@ -110,6 +112,7 @@ function ArchitectureNode({ data, id }: NodeProps<Node<ArchitectureNodeData>>) {
       className={[
         'rf-architecture-node',
         data.selected ? 'selected' : '',
+        data.component.metadata.enterpriseAsset ? 'linked-enterprise-asset' : '',
         data.inTraversal ? 'in-traversal' : '',
         data.activeTraversal ? 'active-traversal' : '',
         data.dimmedByTraversal ? 'dimmed-by-traversal' : '',
@@ -117,7 +120,6 @@ function ArchitectureNode({ data, id }: NodeProps<Node<ArchitectureNodeData>>) {
       style={{ '--node-color': item.color } as CSSProperties}
       data-component-type={data.component.type}
     >
-      <div className="rf-node-depth" aria-hidden="true" />
       <NodeResizer
         isVisible={data.selected && !data.readOnly}
         minWidth={180}
@@ -137,12 +139,18 @@ function ArchitectureNode({ data, id }: NodeProps<Node<ArchitectureNodeData>>) {
       <Handle id="target-top" className="rf-handle target top" type="target" position={Position.Top} />
       <ComponentGlyph type={data.component.type} label={item.shortLabel} />
       <div className="rf-node-copy">
-        <strong>{data.component.name || item.label}</strong>
-        <span>
-          {data.component.type === 'design.link' && data.component.metadata.linkedDesign
-            ? `${data.component.metadata.linkedDesign.title} · ${data.component.metadata.linkedDesign.access}`
-            : data.component.type}
-        </span>
+        {data.component.type === 'design.link' ? (
+          <>
+            <span className="rf-link-kicker">Linked design</span>
+            <strong>{data.component.name || data.component.metadata.linkedDesign?.title || item.label}</strong>
+            <span>{data.component.metadata.linkedDesign ? `${data.component.metadata.linkedDesign.access} access` : 'Choose target design'}</span>
+          </>
+        ) : (
+          <>
+            <strong>{data.component.name || item.label}</strong>
+            <span>{data.component.type}</span>
+          </>
+        )}
       </div>
       <Handle id="source-right" className="rf-handle source" type="source" position={Position.Right} />
       <Handle id="source-bottom" className="rf-handle source bottom" type="source" position={Position.Bottom} />
@@ -184,7 +192,7 @@ function CanvasNodeToolbar({
 function ComponentGlyph({ type, label }: { type: DesignComponent['type']; label: string }) {
   const Icon = componentIcons[type] ?? Server
   return (
-    <div className="rf-node-icon" aria-label={label}>
+    <div className="rf-node-icon" data-component-type={type} aria-label={label}>
       <Icon size={24} strokeWidth={2.4} />
     </div>
   )
@@ -202,7 +210,7 @@ const componentIcons: Partial<Record<DesignComponent['type'], LucideIcon>> = {
   'external.api': Cloud,
   'observability.telemetry': RadioTower,
   'security.control': Shield,
-  'design.link': FileText,
+  'design.link': ExternalLink,
   'frame.cloud': Cloud,
   'note.sticky': FileText,
 }
@@ -221,6 +229,8 @@ export function ReactFlowCanvasProvider({
   onResizeComponent,
   onConnectComponents,
   onReconnectConnector,
+  onDropComponent,
+  onDropCatalogAsset,
   onDuplicateComponent,
   onDeleteComponents,
   onDeleteConnectors,
@@ -230,6 +240,7 @@ export function ReactFlowCanvasProvider({
   const traversalComponentIds = useMemo(() => new Set(traversalFocus?.componentIds ?? []), [traversalFocus?.componentIds])
   const traversalConnectorIds = useMemo(() => new Set(traversalFocus?.connectorIds ?? []), [traversalFocus?.connectorIds])
   const hasTraversalFocus = traversalComponentIds.size > 0 || traversalConnectorIds.size > 0
+  const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<Node<ArchitectureNodeData>, Edge> | null>(null)
 
   const nodes = useMemo<Node<ArchitectureNodeData>[]>(
     () =>
@@ -243,7 +254,6 @@ export function ReactFlowCanvasProvider({
           id: component.id,
           type: 'architecture',
           parentId: component.metadata.parentFrameId,
-          extent: component.metadata.parentFrameId ? 'parent' : undefined,
           position: component.metadata.position ?? {
             x: 120 + (index % 3) * 280,
             y: 120 + Math.floor(index / 3) * 170,
@@ -407,6 +417,40 @@ export function ReactFlowCanvasProvider({
     onReconnectConnector?.(oldEdge.id, nextConnection.source, nextConnection.target)
   }
 
+  function getDroppedComponentType(event: DragEvent) {
+    return (
+      event.dataTransfer.getData('application/x-sde-component-type') ||
+      event.dataTransfer.getData('text/plain')
+    ) as ComponentType
+  }
+
+  function getDroppedCatalogAssetId(event: DragEvent) {
+    return event.dataTransfer.getData('application/x-stratum-catalog-asset-id')
+  }
+
+  function handleDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (readOnly || !flowInstance) return
+    const catalogAssetId = getDroppedCatalogAssetId(event)
+    if (catalogAssetId) {
+      const cursorPosition = flowInstance.screenToFlowPosition({ x: event.clientX, y: event.clientY })
+      onDropCatalogAsset?.(catalogAssetId, {
+        x: cursorPosition.x - 230 / 2,
+        y: cursorPosition.y - 78 / 2,
+      })
+      return
+    }
+    const type = getDroppedComponentType(event)
+    if (!type || !componentCatalog.some((item) => item.type === type)) return
+    const cursorPosition = flowInstance.screenToFlowPosition({ x: event.clientX, y: event.clientY })
+    const defaultSize = type === 'frame.cloud' ? { width: 540, height: 340 } : { width: 230, height: 78 }
+    onDropComponent?.(type, {
+      x: cursorPosition.x - defaultSize.width / 2,
+      y: cursorPosition.y - defaultSize.height / 2,
+    })
+  }
+
   return (
     <ReactFlowProvider>
       <div className="react-flow-canvas">
@@ -415,6 +459,7 @@ export function ReactFlowCanvasProvider({
           edges={edges}
           nodeTypes={nodeTypes}
           fitView
+          onInit={setFlowInstance}
           fitViewOptions={{ padding: 0.25 }}
           proOptions={{ hideAttribution: true }}
           nodesDraggable={!readOnly}
@@ -437,6 +482,12 @@ export function ReactFlowCanvasProvider({
           onEdgesChange={handleEdgesChange}
           onConnect={handleConnect}
           onReconnect={handleReconnect}
+          onDragOver={(event) => {
+            if (readOnly) return
+            event.preventDefault()
+            event.dataTransfer.dropEffect = 'copy'
+          }}
+          onDrop={handleDrop}
           onNodeDragStop={handleNodeDragStop}
           onNodeClick={(_, node) => {
             onSelectConnector?.('')

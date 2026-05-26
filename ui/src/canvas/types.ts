@@ -1,4 +1,4 @@
-import type { DesignDocument } from '../types'
+import type { ComponentType, DesignDocument } from '../types'
 
 export interface ReactFlowPreviewProps {
   design: DesignDocument
@@ -17,6 +17,8 @@ export interface ReactFlowPreviewProps {
   onResizeComponent?: (componentId: string, size: { width: number; height: number }) => void
   onConnectComponents?: (fromComponentId: string, toComponentId: string) => void
   onReconnectConnector?: (connectorId: string, fromComponentId: string, toComponentId: string) => void
+  onDropComponent?: (type: ComponentType, position: { x: number; y: number }) => void
+  onDropCatalogAsset?: (assetId: string, position: { x: number; y: number }) => void
   onDuplicateComponent?: (componentId: string) => void
   onDeleteComponents?: (componentIds: string[]) => void
   onDeleteConnectors?: (connectorIds: string[]) => void

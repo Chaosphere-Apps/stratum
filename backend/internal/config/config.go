@@ -20,6 +20,8 @@ type Config struct {
 	MaxRequestBodyBytes        int64
 	WebSocketReadLimit         int64
 	AllowPrivateAIProviderURLs bool
+	StaticAssetsDir            string
+	SessionTTL                 time.Duration
 }
 
 func Load() Config {
@@ -35,6 +37,8 @@ func Load() Config {
 		MaxRequestBodyBytes:        envInt64("MAX_REQUEST_BODY_BYTES", 4<<20),
 		WebSocketReadLimit:         envInt64("WEBSOCKET_READ_LIMIT_BYTES", 2<<20),
 		AllowPrivateAIProviderURLs: envBool("ALLOW_PRIVATE_AI_PROVIDER_URLS", false),
+		StaticAssetsDir:            envString("STATIC_ASSETS_DIR", ""),
+		SessionTTL:                 envDuration("SESSION_TTL", 12*time.Hour),
 	}
 }
 

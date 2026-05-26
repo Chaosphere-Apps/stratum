@@ -21,7 +21,7 @@ services:
     environment:
       BACKEND_ADDR: :8081
       DATABASE_URL: postgres://stratum:stratum_dev_password@postgres:5432/stratum?sslmode=disable
-      ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:8080,http://127.0.0.1:8080
+      ALLOWED_ORIGINS: http://localhost:*,http://127.0.0.1:*,http://[::1]:*
     ports:
       - "8081:8081"
     depends_on:

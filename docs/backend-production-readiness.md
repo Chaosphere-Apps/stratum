@@ -12,18 +12,20 @@ This note captures the backend hardening state before publishing the repository.
 - Panic recovery returns a generic 500 while logging the server-side failure.
 - Basic security headers are emitted on HTTP responses.
 - Custom AI provider verification blocks private network targets by default to reduce SSRF risk.
+- AI provider configuration is centrally managed through admin-only endpoints and is never stored in browser local storage.
+- Analysis returns deterministic findings even when AI synthesis fails, with AI status captured in the structured report.
+- Local sign-in now uses password hashes and bearer session tokens instead of browser-side user switching.
 - Postgres-backed storage preserves exact structured design JSON and creates versions on save.
 - Deterministic analysis is isolated under `internal/analysis`.
 
 ## Known Gaps Before Real Enterprise Production
 
-- Authentication and authorization are still intentionally absent; the app assumes a guest profile.
-- Workspace and design access checks are not tenant-safe yet.
+- Authorization is role-aware for admin endpoints, but workspace membership and design-level permissions are still not tenant-safe yet.
 - Rate limiting and abuse protection are not implemented.
 - Database migrations are embedded in startup code; production should use explicit migration files and release workflow.
 - Secrets should move to deployment-managed secret storage.
 - TLS termination is expected at an ingress/proxy layer, not inside the Go process.
-- AI provider keys are not stored by the backend yet; future storage needs encryption and audit trails.
+- AI provider keys are currently stored in backend persistence; enterprise deployments should move them to KMS/secret-manager backed encryption and add audit trails.
 - WebSocket collaboration is single-process; horizontal scale will need a shared pub/sub layer.
 - Observability is basic JSON logging; metrics, tracing, and audit events should be added.
 

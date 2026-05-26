@@ -49,10 +49,16 @@ Production-relevant configuration:
 - `WEBSOCKET_READ_LIMIT_BYTES`: maximum WebSocket message size.
 - `READ_HEADER_TIMEOUT`, `READ_TIMEOUT`, `WRITE_TIMEOUT`, `IDLE_TIMEOUT`: HTTP server timeout controls.
 - `ALLOW_PRIVATE_AI_PROVIDER_URLS`: defaults to `false`; keep it disabled unless a deployment intentionally verifies private/self-hosted AI endpoints.
+- AI provider settings are managed through the Admin console and persisted server-side. The deterministic analysis path does not require AI configuration.
 
 ## REST API
 
 - `GET /api/profile`
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+- `POST /api/setup/admin-password` completes one-time password setup for pre-existing admin users created before local passwords were introduced.
+- `GET /api/admin/ai-provider`
+- `PATCH /api/admin/ai-provider`
 - `GET /api/workspaces`
 - `POST /api/workspaces`
 - `DELETE /api/workspaces/{workspaceID}` deletes only empty non-guest workspaces; non-empty workspaces return `409 Conflict`.
