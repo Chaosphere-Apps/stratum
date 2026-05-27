@@ -373,3 +373,32 @@ func TestMemoryRepositoryCatalogAssetsTrackUsageAndBlockDelete(t *testing.T) {
 		t.Fatalf("expected linked asset delete rejection, got %v", err)
 	}
 }
+
+func TestMemoryRepositoryMCPConfigPersistsAdminSettings(t *testing.T) {
+	repo := NewMemoryRepository()
+
+	initial, err := repo.GetMCPConfig(context.Background())
+	if err != nil {
+		t.Fatalf("GetMCPConfig returned error: %v", err)
+	}
+	if initial.Enabled || initial.EndpointPath != "/mcp" || !initial.RequireAdminConsent {
+		t.Fatalf("initial mcp config = %#v", initial)
+	}
+
+	updated, err := repo.UpdateMCPConfig(context.Background(), domain.MCPConfig{
+		Enabled:             true,
+		EndpointPath:        "stratum-mcp",
+		ReadCatalog:         true,
+		ReadDesigns:         true,
+		CreateDraftDesign:   false,
+		RunAnalysis:         true,
+		FetchImpactReport:   false,
+		RequireAdminConsent: true,
+	})
+	if err != nil {
+		t.Fatalf("UpdateMCPConfig returned error: %v", err)
+	}
+	if !updated.Enabled || updated.EndpointPath != "/stratum-mcp" || updated.CreateDraftDesign {
+		t.Fatalf("updated mcp config = %#v", updated)
+	}
+}

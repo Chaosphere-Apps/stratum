@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/system-design-evaluator/backend/internal/config"
+	"github.com/system-design-evaluator/backend/internal/domain"
 	"github.com/system-design-evaluator/backend/internal/realtime"
 	"github.com/system-design-evaluator/backend/internal/store"
 )
@@ -147,5 +148,71 @@ func TestProductDataRoutesRequireSession(t *testing.T) {
 		if recorder.Code != http.StatusUnauthorized {
 			t.Fatalf("%s %s status = %d, want %d", target.method, target.path, recorder.Code, http.StatusUnauthorized)
 		}
+	}
+}
+
+func TestWriteRoutesRequireExpectedRoles(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	admin, err := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
+	if err != nil {
+		t.Fatalf("CreateFirstAdmin returned error: %v", err)
+	}
+	member, err := repo.CreateUser(t.Context(), "Member", "member@example.com", "member", "password123")
+	if err != nil {
+		t.Fatalf("CreateUser member returned error: %v", err)
+	}
+	reviewer, err := repo.CreateUser(t.Context(), "Reviewer", "reviewer@example.com", "reviewer", "password123")
+	if err != nil {
+		t.Fatalf("CreateUser reviewer returned error: %v", err)
+	}
+	workspace, err := repo.GetOrCreateGuestWorkspace(t.Context())
+	if err != nil {
+		t.Fatalf("GetOrCreateGuestWorkspace returned error: %v", err)
+	}
+	design, err := repo.CreateDesign(t.Context(), workspace.ID, "Role Test", []byte(`{"id":"design_role","title":"Role Test","components":[]}`), admin.ID)
+	if err != nil {
+		t.Fatalf("CreateDesign returned error: %v", err)
+	}
+	if _, err := repo.GrantDesignAccess(t.Context(), domain.DesignAccess{
+		WorkspaceID: design.WorkspaceID,
+		DesignID:    design.ID,
+		UserID:      reviewer.ID,
+		CanRead:     true,
+		CanReview:   true,
+	}); err != nil {
+		t.Fatalf("GrantDesignAccess returned error: %v", err)
+	}
+	memberToken, err := repo.CreateSession(t.Context(), member.ID, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("CreateSession member returned error: %v", err)
+	}
+	reviewerToken, err := repo.CreateSession(t.Context(), reviewer.ID, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("CreateSession reviewer returned error: %v", err)
+	}
+	server := NewServer(config.Config{}, realtime.NewHub(repo, config.Logger()), config.Logger())
+
+	memberWrite := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/designs", strings.NewReader(`{"name":"Denied","document":{}}`))
+	memberWrite.AddCookie(&http.Cookie{Name: "stratum_session", Value: memberToken})
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, memberWrite)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("member create design status = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+
+	memberAnalyze := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/designs/"+design.ID+"/analysis", strings.NewReader(`{}`))
+	memberAnalyze.AddCookie(&http.Cookie{Name: "stratum_session", Value: memberToken})
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, memberAnalyze)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("member analyze design status = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+
+	reviewerAnalyze := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/designs/"+design.ID+"/analysis", strings.NewReader(`{}`))
+	reviewerAnalyze.AddCookie(&http.Cookie{Name: "stratum_session", Value: reviewerToken})
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, reviewerAnalyze)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("reviewer analyze design status = %d, want %d body=%q", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
 }

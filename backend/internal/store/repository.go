@@ -52,6 +52,8 @@ type CollaborationRepository interface {
 	GetAIProviderConfig(ctx context.Context) (domain.AIProviderConfig, error)
 	GetAIProviderConfigWithSecret(ctx context.Context) (domain.AIProviderConfig, error)
 	UpdateAIProviderConfig(ctx context.Context, config domain.AIProviderConfig, apiKey string) (domain.AIProviderConfig, error)
+	GetMCPConfig(ctx context.Context) (domain.MCPConfig, error)
+	UpdateMCPConfig(ctx context.Context, config domain.MCPConfig) (domain.MCPConfig, error)
 	ListDesignComments(ctx context.Context, workspaceID string, designID string) ([]domain.DesignComment, error)
 	CreateDesignComment(ctx context.Context, workspaceID string, designID string, authorID string, body string, componentID string, connectorID string) (domain.DesignComment, error)
 	ListDesignReviewRequests(ctx context.Context, workspaceID string, designID string) ([]domain.DesignReviewRequest, error)
@@ -59,6 +61,15 @@ type CollaborationRepository interface {
 	UpdateDesignReviewRequest(ctx context.Context, workspaceID string, designID string, reviewID string, status string, summary string) (domain.DesignReviewRequest, error)
 	ListNotifications(ctx context.Context, userID string) ([]domain.Notification, error)
 	MarkNotificationRead(ctx context.Context, userID string, notificationID string) error
+}
+
+type AccessRepository interface {
+	ListWorkspaceAccess(ctx context.Context, workspaceID string) ([]domain.WorkspaceAccess, error)
+	GrantWorkspaceAccess(ctx context.Context, access domain.WorkspaceAccess) (domain.WorkspaceAccess, error)
+	RevokeWorkspaceAccess(ctx context.Context, workspaceID string, userID string) error
+	ListDesignAccess(ctx context.Context, workspaceID string, designID string) ([]domain.DesignAccess, error)
+	GrantDesignAccess(ctx context.Context, access domain.DesignAccess) (domain.DesignAccess, error)
+	RevokeDesignAccess(ctx context.Context, workspaceID string, designID string, userID string) error
 }
 
 type CatalogRepository interface {
@@ -73,6 +84,7 @@ type Repository interface {
 	DesignRepository
 	DesignDocRepository
 	CollaborationRepository
+	AccessRepository
 	CatalogRepository
 }
 

@@ -49,6 +49,18 @@ type AIProviderConfig struct {
 	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
+type MCPConfig struct {
+	Enabled             bool      `json:"enabled"`
+	EndpointPath        string    `json:"endpointPath"`
+	ReadCatalog         bool      `json:"readCatalog"`
+	ReadDesigns         bool      `json:"readDesigns"`
+	CreateDraftDesign   bool      `json:"createDraftDesign"`
+	RunAnalysis         bool      `json:"runAnalysis"`
+	FetchImpactReport   bool      `json:"fetchImpactReport"`
+	RequireAdminConsent bool      `json:"requireAdminConsent"`
+	UpdatedAt           time.Time `json:"updatedAt"`
+}
+
 type CatalogAsset struct {
 	ID                string          `json:"id"`
 	Name              string          `json:"name"`
@@ -72,6 +84,16 @@ type Workspace struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+type WorkspaceAccess struct {
+	WorkspaceID     string    `json:"workspaceId"`
+	UserID          string    `json:"userId"`
+	CanRead         bool      `json:"canRead"`
+	CanCreateDesign bool      `json:"canCreateDesign"`
+	CanManage       bool      `json:"canManage"`
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
+}
+
 type Design struct {
 	ID             string          `json:"id"`
 	WorkspaceID    string          `json:"workspaceId"`
@@ -84,6 +106,19 @@ type Design struct {
 	CreatedBy      string          `json:"createdBy"`
 	CreatedAt      time.Time       `json:"createdAt"`
 	UpdatedAt      time.Time       `json:"updatedAt"`
+}
+
+type DesignAccess struct {
+	WorkspaceID string    `json:"workspaceId"`
+	DesignID    string    `json:"designId"`
+	UserID      string    `json:"userId"`
+	CanRead     bool      `json:"canRead"`
+	CanEdit     bool      `json:"canEdit"`
+	CanComment  bool      `json:"canComment"`
+	CanReview   bool      `json:"canReview"`
+	CanManage   bool      `json:"canManage"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 type DesignVersion struct {

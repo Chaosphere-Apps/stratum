@@ -21,8 +21,11 @@ type MemoryRepository struct {
 	docs          map[string]domain.DesignDoc
 	users         map[string]domain.User
 	sessions      map[string]memorySession
+	workspaceACL  map[string]domain.WorkspaceAccess
+	designACL     map[string]domain.DesignAccess
 	signInConfig  domain.SignInConfig
 	aiConfig      domain.AIProviderConfig
+	mcpConfig     domain.MCPConfig
 	catalogAssets map[string]domain.CatalogAsset
 	comments      map[string]domain.DesignComment
 	reviews       map[string]domain.DesignReviewRequest
@@ -45,8 +48,11 @@ func NewMemoryRepository() *MemoryRepository {
 		docs:          make(map[string]domain.DesignDoc),
 		users:         make(map[string]domain.User),
 		sessions:      make(map[string]memorySession),
+		workspaceACL:  make(map[string]domain.WorkspaceAccess),
+		designACL:     make(map[string]domain.DesignAccess),
 		signInConfig:  defaultSignInConfig(time.Now().UTC()),
 		aiConfig:      defaultAIProviderConfig(time.Now().UTC()),
+		mcpConfig:     defaultMCPConfig(time.Now().UTC()),
 		catalogAssets: make(map[string]domain.CatalogAsset),
 		comments:      make(map[string]domain.DesignComment),
 		reviews:       make(map[string]domain.DesignReviewRequest),
@@ -546,6 +552,122 @@ func (r *MemoryRepository) DeleteDesignDoc(ctx context.Context, workspaceID stri
 	return nil
 }
 
+func (r *MemoryRepository) ListWorkspaceAccess(ctx context.Context, workspaceID string) ([]domain.WorkspaceAccess, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return nil, errors.New("workspace id is required")
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	access := []domain.WorkspaceAccess{}
+	for _, entry := range r.workspaceACL {
+		if entry.WorkspaceID == workspaceID {
+			access = append(access, entry)
+		}
+	}
+	sort.Slice(access, func(i, j int) bool { return access[i].UserID < access[j].UserID })
+	return access, nil
+}
+
+func (r *MemoryRepository) GrantWorkspaceAccess(ctx context.Context, access domain.WorkspaceAccess) (domain.WorkspaceAccess, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.WorkspaceAccess{}, err
+	}
+	access.WorkspaceID = strings.TrimSpace(access.WorkspaceID)
+	access.UserID = strings.TrimSpace(access.UserID)
+	if access.WorkspaceID == "" || access.UserID == "" {
+		return domain.WorkspaceAccess{}, errors.New("workspace id and user id are required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.workspaces[access.WorkspaceID]; !ok {
+		return domain.WorkspaceAccess{}, errors.New("workspace not found")
+	}
+	if _, err := r.getUserLocked(access.UserID); err != nil {
+		return domain.WorkspaceAccess{}, err
+	}
+	now := r.clock().UTC()
+	key := accessKey(access.WorkspaceID, access.UserID)
+	if existing, ok := r.workspaceACL[key]; ok {
+		access.CreatedAt = existing.CreatedAt
+	} else {
+		access.CreatedAt = now
+	}
+	access.UpdatedAt = now
+	r.workspaceACL[key] = access
+	return access, nil
+}
+
+func (r *MemoryRepository) RevokeWorkspaceAccess(ctx context.Context, workspaceID string, userID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.workspaceACL, accessKey(workspaceID, userID))
+	return nil
+}
+
+func (r *MemoryRepository) ListDesignAccess(ctx context.Context, workspaceID string, designID string) ([]domain.DesignAccess, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	access := []domain.DesignAccess{}
+	for _, entry := range r.designACL {
+		if entry.WorkspaceID == workspaceID && entry.DesignID == designID {
+			access = append(access, entry)
+		}
+	}
+	sort.Slice(access, func(i, j int) bool { return access[i].UserID < access[j].UserID })
+	return access, nil
+}
+
+func (r *MemoryRepository) GrantDesignAccess(ctx context.Context, access domain.DesignAccess) (domain.DesignAccess, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.DesignAccess{}, err
+	}
+	access.WorkspaceID = strings.TrimSpace(access.WorkspaceID)
+	access.DesignID = strings.TrimSpace(access.DesignID)
+	access.UserID = strings.TrimSpace(access.UserID)
+	if access.WorkspaceID == "" || access.DesignID == "" || access.UserID == "" {
+		return domain.DesignAccess{}, errors.New("workspace id, design id, and user id are required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	design, ok := r.designs[access.DesignID]
+	if !ok || design.WorkspaceID != access.WorkspaceID {
+		return domain.DesignAccess{}, errors.New("design not found")
+	}
+	if _, err := r.getUserLocked(access.UserID); err != nil {
+		return domain.DesignAccess{}, err
+	}
+	now := r.clock().UTC()
+	key := accessKey(access.WorkspaceID, access.DesignID, access.UserID)
+	if existing, ok := r.designACL[key]; ok {
+		access.CreatedAt = existing.CreatedAt
+	} else {
+		access.CreatedAt = now
+	}
+	access.UpdatedAt = now
+	r.designACL[key] = access
+	return access, nil
+}
+
+func (r *MemoryRepository) RevokeDesignAccess(ctx context.Context, workspaceID string, designID string, userID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.designACL, accessKey(workspaceID, designID, userID))
+	return nil
+}
+
 func (r *MemoryRepository) ListUsers(ctx context.Context) ([]domain.User, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -1033,6 +1155,36 @@ func (r *MemoryRepository) UpdateAIProviderConfig(ctx context.Context, config do
 	return sanitizeAIProviderConfig(current), nil
 }
 
+func (r *MemoryRepository) GetMCPConfig(ctx context.Context) (domain.MCPConfig, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.MCPConfig{}, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.mcpConfig, nil
+}
+
+func (r *MemoryRepository) UpdateMCPConfig(ctx context.Context, config domain.MCPConfig) (domain.MCPConfig, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.MCPConfig{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	current := r.mcpConfig
+	current.Enabled = config.Enabled
+	current.EndpointPath = normalizedMCPPath(config.EndpointPath)
+	current.ReadCatalog = config.ReadCatalog
+	current.ReadDesigns = config.ReadDesigns
+	current.CreateDraftDesign = config.CreateDraftDesign
+	current.RunAnalysis = config.RunAnalysis
+	current.FetchImpactReport = config.FetchImpactReport
+	current.RequireAdminConsent = config.RequireAdminConsent
+	current.UpdatedAt = r.clock().UTC()
+	r.mcpConfig = current
+	return current, nil
+}
+
 func (r *MemoryRepository) ListDesignComments(ctx context.Context, workspaceID string, designID string) ([]domain.DesignComment, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -1407,9 +1559,42 @@ func defaultAIProviderConfig(now time.Time) domain.AIProviderConfig {
 	}
 }
 
+func defaultMCPConfig(now time.Time) domain.MCPConfig {
+	return domain.MCPConfig{
+		Enabled:             false,
+		EndpointPath:        "/mcp",
+		ReadCatalog:         true,
+		ReadDesigns:         true,
+		CreateDraftDesign:   true,
+		RunAnalysis:         true,
+		FetchImpactReport:   false,
+		RequireAdminConsent: true,
+		UpdatedAt:           now,
+	}
+}
+
 func sanitizeAIProviderConfig(config domain.AIProviderConfig) domain.AIProviderConfig {
 	config.APIKey = ""
 	return config
+}
+
+func normalizedMCPPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "/mcp"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return path
+}
+
+func accessKey(parts ...string) string {
+	cleaned := make([]string, 0, len(parts))
+	for _, part := range parts {
+		cleaned = append(cleaned, strings.TrimSpace(part))
+	}
+	return strings.Join(cleaned, "\x00")
 }
 
 func normalizedAIProvider(provider string) string {

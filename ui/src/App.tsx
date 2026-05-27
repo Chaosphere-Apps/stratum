@@ -76,17 +76,24 @@ import {
   fetchNotifications,
   fetchProfile,
   fetchAIProviderConfig,
+  fetchMCPConfig,
   fetchCatalogAssets,
+  fetchDesignAccess,
   fetchSetupStatus,
   fetchSignInConfig,
   fetchUsers,
+  fetchWorkspaceAccess,
   fetchWorkspaceDesign,
   fetchWorkspaceDesigns,
   fetchWorkspaces,
+  grantDesignAccess,
+  grantWorkspaceAccess,
   login,
   logout,
   markNotificationRead,
   requestDesignReview,
+  revokeDesignAccess,
+  revokeWorkspaceAccess,
   saveDesignDocument as saveDesignDocumentToBackend,
   setInitialAdminPassword,
   updateDesignReview,
@@ -95,16 +102,20 @@ import {
   updateAdminUser,
   updateAIProviderConfig,
   updateCatalogAsset,
+  updateMCPConfig,
   updateSignInConfig,
   type BackendAIProviderConfig,
   type BackendCatalogAsset,
+  type BackendDesignAccess,
   type BackendDesignComment,
   type BackendDesignDoc,
   type BackendDesignReviewRequest,
+  type BackendMCPConfig,
   type BackendNotification,
   type BackendProfile,
   type BackendSignInConfig,
   type BackendUser,
+  type BackendWorkspaceAccess,
   type DesignAnalysisReport,
 } from './backendApi'
 import { useBackendDesignSync, type BackendWorkspace } from './backendSync'
@@ -125,12 +136,89 @@ import type { BackendDesign } from './backendSync'
 
 type AppRoute =
   | { screen: 'home' }
-  | { screen: 'admin' }
+  | { screen: 'admin'; section?: AdminSection }
   | { screen: 'workspace'; workspaceId: string }
   | { screen: 'design'; workspaceId: string; designId: string }
 
+type AdminSection =
+  | 'overview'
+  | 'users'
+  | 'access'
+  | 'workspaces'
+  | 'catalog'
+  | 'identity'
+  | 'ai'
+  | 'integrations'
+  | 'security'
+  | 'settings'
 type CanvasMode = 'design' | 'view' | 'comment' | 'journey'
 type ContextPanel = 'inspector' | 'requirements' | 'journey' | 'review'
+
+const adminSectionOrder: AdminSection[] = [
+  'overview',
+  'users',
+  'access',
+  'workspaces',
+  'catalog',
+  'identity',
+  'ai',
+  'integrations',
+  'security',
+  'settings',
+]
+
+const adminSectionCopy: Record<AdminSection, { label: string; description: string; group: string }> = {
+  overview: {
+    label: 'Dashboard',
+    description: 'Deployment health, configuration state, and setup shortcuts.',
+    group: 'Command',
+  },
+  users: {
+    label: 'Users and roles',
+    description: 'Manage people, passwords, roles, and account state.',
+    group: 'Identity',
+  },
+  access: {
+    label: 'Access center',
+    description: 'Workspace and design ACL policy surface.',
+    group: 'Identity',
+  },
+  workspaces: {
+    label: 'Workspaces',
+    description: 'Govern workspace ownership, deletion, and design creation.',
+    group: 'Content',
+  },
+  catalog: {
+    label: 'Enterprise catalog',
+    description: 'Canonical services and infrastructure reused across designs.',
+    group: 'Content',
+  },
+  identity: {
+    label: 'Sign-in and SSO',
+    description: 'Local sign-in, Okta OIDC, claims, and provisioning.',
+    group: 'Security',
+  },
+  ai: {
+    label: 'AI suite',
+    description: 'Central provider for analysis, vision, and future copilots.',
+    group: 'Intelligence',
+  },
+  integrations: {
+    label: 'Integrations',
+    description: 'MCP readiness and future enterprise integration endpoints.',
+    group: 'Platform',
+  },
+  security: {
+    label: 'Security and audit',
+    description: 'Policy posture, audit readiness, and security controls.',
+    group: 'Security',
+  },
+  settings: {
+    label: 'System settings',
+    description: 'Deployment defaults and platform-level configuration.',
+    group: 'Platform',
+  },
+}
 
 const defaultWorkspace: BackendWorkspace = {
   id: 'guest-workspace',
@@ -171,18 +259,35 @@ function parseRoute(pathname: string): AppRoute {
     return { screen: 'workspace', workspaceId: segments[1] }
   }
   if (segments[0] === 'admin') {
-    return { screen: 'admin' }
+    return { screen: 'admin', section: parseAdminSection(segments[1]) }
   }
   return { screen: 'home' }
 }
 
 function routePath(route: AppRoute) {
-  if (route.screen === 'admin') return '/admin'
+  if (route.screen === 'admin') return route.section && route.section !== 'overview' ? `/admin/${route.section}` : '/admin'
   if (route.screen === 'workspace') return `/workspaces/${encodeURIComponent(route.workspaceId)}`
   if (route.screen === 'design') {
     return `/workspaces/${encodeURIComponent(route.workspaceId)}/designs/${encodeURIComponent(route.designId)}`
   }
   return '/'
+}
+
+function parseAdminSection(value: string | undefined): AdminSection {
+  if (
+    value === 'users' ||
+    value === 'access' ||
+    value === 'workspaces' ||
+    value === 'catalog' ||
+    value === 'identity' ||
+    value === 'ai' ||
+    value === 'integrations' ||
+    value === 'security' ||
+    value === 'settings'
+  ) {
+    return value
+  }
+  return 'overview'
 }
 
 function isJourneyComponent(component: DesignComponent) {
@@ -345,6 +450,7 @@ export function App() {
   const [authError, setAuthError] = useState<string | null>(null)
   const [adminError, setAdminError] = useState<string | null>(null)
   const [signInConfig, setSignInConfig] = useState<BackendSignInConfig | null>(null)
+  const [mcpConfig, setMCPConfig] = useState<BackendMCPConfig | null>(null)
   const [catalogAssets, setCatalogAssets] = useState<BackendCatalogAsset[]>([])
   const [catalogRailMode, setCatalogRailMode] = useState<'blocks' | 'catalog'>('blocks')
   const [catalogSearch, setCatalogSearch] = useState('')
@@ -912,20 +1018,22 @@ export function App() {
 
   async function refreshAdmin() {
     setAdminError(null)
-    try {
-      const [userResponse, signInResponse, aiProviderResponse, catalogResponse] = await Promise.all([
-        fetchUsers(),
-        fetchSignInConfig(),
-        fetchAIProviderConfig(),
-        fetchCatalogAssets(),
-      ])
-      setUsers(userResponse.users)
-      setSignInConfig(signInResponse.signIn)
-      setAIConnection(aiProviderResponse.aiProvider)
-      setCatalogAssets(catalogResponse.assets)
-    } catch (error) {
-      setAdminError(error instanceof Error ? error.message : 'Could not load admin console')
+    const [userResponse, signInResponse, aiProviderResponse, mcpResponse, catalogResponse] = await Promise.allSettled([
+      fetchUsers(),
+      fetchSignInConfig(),
+      fetchAIProviderConfig(),
+      fetchMCPConfig(),
+      fetchCatalogAssets(),
+    ] as const)
+    const criticalFailure = [userResponse, signInResponse, aiProviderResponse, catalogResponse].find((result) => result.status === 'rejected')
+    if (criticalFailure?.status === 'rejected') {
+      setAdminError(criticalFailure.reason instanceof Error ? criticalFailure.reason.message : 'Could not load admin console')
     }
+    if (userResponse.status === 'fulfilled') setUsers(userResponse.value.users)
+    if (signInResponse.status === 'fulfilled') setSignInConfig(signInResponse.value.signIn)
+    if (aiProviderResponse.status === 'fulfilled') setAIConnection(aiProviderResponse.value.aiProvider)
+    if (mcpResponse.status === 'fulfilled') setMCPConfig(mcpResponse.value.mcp)
+    if (catalogResponse.status === 'fulfilled') setCatalogAssets(catalogResponse.value.assets)
   }
 
   async function addCatalogAsset(input: {
@@ -1022,6 +1130,16 @@ export function App() {
       setAIConnection(response.aiProvider)
     } catch (error) {
       setAdminError(error instanceof Error ? error.message : 'Could not save AI provider settings')
+    }
+  }
+
+  async function saveMCP(nextConfig: BackendMCPConfig) {
+    setAdminError(null)
+    try {
+      const response = await updateMCPConfig(nextConfig)
+      setMCPConfig(response.mcp)
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : 'Could not save MCP settings')
     }
   }
 
@@ -1740,8 +1858,10 @@ export function App() {
         <AdminConsole
           users={users}
           activeUserId={activeUserId}
+          workspaces={homeWorkspaces}
           signInConfig={signInConfig}
           aiProviderConfig={aiConnection}
+          mcpConfig={mcpConfig}
           catalogAssets={catalogAssets}
           error={adminError}
           onAddUser={addAdminUser}
@@ -1749,9 +1869,12 @@ export function App() {
           onDeleteUser={(userId) => void removeAdminUser(userId)}
           onSaveSignIn={(config) => void saveSignIn(config)}
           onSaveAIProvider={(config) => void saveAIProvider(config)}
+          onSaveMCP={(config) => void saveMCP(config)}
           onAddCatalogAsset={addCatalogAsset}
           onSaveCatalogAsset={saveCatalogAsset}
           onDeleteCatalogAsset={removeCatalogAsset}
+          activeSection={route.screen === 'admin' ? route.section ?? 'overview' : 'overview'}
+          onSelectSection={(section) => applyRoute({ screen: 'admin', section })}
         />
       </div>
     )
@@ -2582,11 +2705,26 @@ function LoginScreen({
   )
 }
 
+function AdminSectionIcon({ section, size = 18 }: { section: AdminSection; size?: number }) {
+  if (section === 'overview') return <LayoutDashboard size={size} />
+  if (section === 'users') return <UserCheck size={size} />
+  if (section === 'access') return <ShieldCheck size={size} />
+  if (section === 'workspaces') return <Boxes size={size} />
+  if (section === 'catalog') return <Database size={size} />
+  if (section === 'identity') return <LockKeyhole size={size} />
+  if (section === 'ai') return <Sparkles size={size} />
+  if (section === 'integrations') return <Server size={size} />
+  if (section === 'security') return <BadgeCheck size={size} />
+  return <Settings size={size} />
+}
+
 function AdminConsole({
   users,
   activeUserId,
+  workspaces,
   signInConfig,
   aiProviderConfig,
+  mcpConfig,
   catalogAssets,
   error,
   onAddUser,
@@ -2594,14 +2732,19 @@ function AdminConsole({
   onDeleteUser,
   onSaveSignIn,
   onSaveAIProvider,
+  onSaveMCP,
   onAddCatalogAsset,
   onSaveCatalogAsset,
   onDeleteCatalogAsset,
+  activeSection,
+  onSelectSection,
 }: {
   users: BackendUser[]
   activeUserId: string
+  workspaces: BackendWorkspace[]
   signInConfig: BackendSignInConfig | null
   aiProviderConfig: BackendAIProviderConfig | null
+  mcpConfig: BackendMCPConfig | null
   catalogAssets: BackendCatalogAsset[]
   error: string | null
   onAddUser: (input: { displayName: string; email: string; role: string; password?: string }) => Promise<void>
@@ -2609,9 +2752,12 @@ function AdminConsole({
   onDeleteUser: (userId: string) => void
   onSaveSignIn: (config: BackendSignInConfig & { clientSecret?: string }) => void
   onSaveAIProvider: (config: Partial<BackendAIProviderConfig> & { apiKey?: string }) => void
+  onSaveMCP: (config: BackendMCPConfig) => void
   onAddCatalogAsset: (input: { name: string; type: string; owner?: string; description?: string; criticality?: string; tags?: string[] }) => Promise<BackendCatalogAsset>
   onSaveCatalogAsset: (asset: BackendCatalogAsset) => Promise<void>
   onDeleteCatalogAsset: (assetId: string) => Promise<void>
+  activeSection: AdminSection
+  onSelectSection: (section: AdminSection) => void
 }) {
   const [newUser, setNewUser] = useState({ displayName: '', email: '', role: 'member', password: '' })
   const [newAsset, setNewAsset] = useState({ name: '', type: 'compute.service', owner: '', description: '', criticality: 'medium' })
@@ -2623,21 +2769,127 @@ function AdminConsole({
   const [assetError, setAssetError] = useState<string | null>(null)
   const [signInDraft, setSignInDraft] = useState<(BackendSignInConfig & { clientSecret?: string }) | null>(signInConfig)
   const [aiDraft, setAIDraft] = useState<(BackendAIProviderConfig & { apiKey?: string }) | null>(aiProviderConfig)
+  const [mcpDraft, setMCPDraft] = useState<BackendMCPConfig | null>(mcpConfig)
+  const [adminSearch, setAdminSearch] = useState('')
+  const [catalogAdminSearch, setCatalogAdminSearch] = useState('')
+  const [accessScope, setAccessScope] = useState<'workspace' | 'design'>('workspace')
+  const [accessWorkspaceId, setAccessWorkspaceId] = useState(workspaces[0]?.id ?? '')
+  const [accessDesignId, setAccessDesignId] = useState('')
+  const [accessDesigns, setAccessDesigns] = useState<BackendDesign[]>([])
+  const [workspaceAccess, setWorkspaceAccess] = useState<BackendWorkspaceAccess[]>([])
+  const [designAccess, setDesignAccess] = useState<BackendDesignAccess[]>([])
+  const [accessUserId, setAccessUserId] = useState('')
+  const [workspaceAccessDraft, setWorkspaceAccessDraft] = useState({ canRead: true, canCreateDesign: false, canManage: false })
+  const [designAccessDraft, setDesignAccessDraft] = useState({
+    canRead: true,
+    canEdit: false,
+    canComment: true,
+    canReview: false,
+    canManage: false,
+  })
+  const [accessError, setAccessError] = useState<string | null>(null)
+  const [accessLoading, setAccessLoading] = useState(false)
 
   useEffect(() => setDraftUsers(users), [users])
   useEffect(() => setDraftAssets(catalogAssets), [catalogAssets])
   useEffect(() => setSignInDraft(signInConfig), [signInConfig])
   useEffect(() => setAIDraft(aiProviderConfig), [aiProviderConfig])
+  useEffect(() => setMCPDraft(mcpConfig), [mcpConfig])
+  useEffect(() => {
+    if (!accessWorkspaceId && workspaces[0]) setAccessWorkspaceId(workspaces[0].id)
+  }, [accessWorkspaceId, workspaces])
 
   const activeUsers = users.filter((user) => user.status !== 'disabled').length
   const adminUsers = users.filter((user) => user.role === 'admin' && user.status !== 'disabled').length
+  const reviewerUsers = users.filter((user) => user.role === 'reviewer' && user.status !== 'disabled').length
+  const architectUsers = users.filter((user) => user.role === 'architect' && user.status !== 'disabled').length
   const ssoMode = signInDraft?.ssoEnabled ? 'SSO ready' : 'Local only'
   const providerLabel = signInDraft?.provider?.trim() || 'Okta'
   const hasOktaCore = Boolean(signInDraft?.issuer?.trim() && signInDraft?.clientId?.trim())
   const aiStatus = aiDraft?.enabled && aiDraft.apiKeySet ? 'AI analysis enabled' : 'AI analysis off'
   const aiVerifiedAt = aiDraft?.verifiedAt && !aiDraft.verifiedAt.startsWith('0001-') ? aiDraft.verifiedAt : ''
+  const enabledMCPCapabilities = mcpDraft
+    ? [mcpDraft.readCatalog, mcpDraft.readDesigns, mcpDraft.createDraftDesign, mcpDraft.runAnalysis, mcpDraft.fetchImpactReport].filter(Boolean).length
+    : 0
   const duplicateNewAsset = catalogAssets.find((asset) => normalizedCatalogLabel(asset.name) === normalizedCatalogLabel(newAsset.name))
   const newAssetSuggestions = catalogAssets.filter((asset) => isPotentialCatalogMatch(newAsset.name, asset.name))
+  const activeSectionCopy = adminSectionCopy[activeSection]
+  const visibleAdminSections = adminSectionOrder.filter((section) => {
+    const query = adminSearch.trim().toLowerCase()
+    if (!query) return true
+    const copy = adminSectionCopy[section]
+    return `${copy.label} ${copy.description} ${copy.group}`.toLowerCase().includes(query)
+  })
+  const dashboardAttention = [
+    {
+      section: 'identity' as AdminSection,
+      title: hasOktaCore ? 'Identity provider configured' : 'Complete identity provider',
+      detail: hasOktaCore ? 'Okta issuer and client ID are present.' : 'Okta issuer and client ID are still missing.',
+      status: hasOktaCore ? 'ready' : 'warning',
+    },
+    {
+      section: 'ai' as AdminSection,
+      title: aiDraft?.enabled && aiDraft.apiKeySet ? 'AI provider active' : 'Configure analysis AI',
+      detail: aiDraft?.enabled && aiDraft.apiKeySet ? `${aiDraft.provider} ${aiDraft.model}` : 'Analysis, vision, and draft generation need a central provider.',
+      status: aiDraft?.enabled && aiDraft.apiKeySet ? 'ready' : 'warning',
+    },
+    {
+      section: 'integrations' as AdminSection,
+      title: mcpDraft?.enabled ? 'MCP readiness enabled' : 'Review MCP readiness',
+      detail: mcpDraft?.enabled ? `${enabledMCPCapabilities} capabilities selected.` : 'MCP is disabled until an admin explicitly enables it.',
+      status: mcpDraft?.enabled ? 'ready' : 'neutral',
+    },
+  ]
+  const activeAccessWorkspace = workspaces.find((workspace) => workspace.id === accessWorkspaceId)
+  const activeAccessDesign = accessDesigns.find((design) => design.id === accessDesignId)
+  const accessRows = accessScope === 'workspace' ? workspaceAccess : designAccess
+  const grantableUsers = useMemo(() => users.filter((user) => user.status !== 'disabled'), [users])
+  const selectedAccessUser = grantableUsers.find((user) => user.id === accessUserId)
+  const catalogQuery = normalizedCatalogLabel(catalogAdminSearch)
+  const filteredDraftAssets = draftAssets.filter((asset) => {
+    if (!catalogQuery) return true
+    return [asset.name, asset.type, asset.owner, asset.description, asset.normalizedName].some((value) =>
+      normalizedCatalogLabel(value ?? '').includes(catalogQuery),
+    )
+  })
+
+  useEffect(() => {
+    if (grantableUsers.length && !accessUserId) setAccessUserId(grantableUsers[0].id)
+  }, [accessUserId, grantableUsers])
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadAccessCenter() {
+      if (activeSection !== 'access' || !accessWorkspaceId) return
+      setAccessLoading(true)
+      setAccessError(null)
+      try {
+        const [designResponse, workspaceAccessResponse] = await Promise.all([
+          fetchWorkspaceDesigns(accessWorkspaceId),
+          fetchWorkspaceAccess(accessWorkspaceId),
+        ])
+        if (cancelled) return
+        setAccessDesigns(designResponse.designs)
+        setWorkspaceAccess(workspaceAccessResponse.access)
+        const nextDesignId = accessDesignId || designResponse.designs[0]?.id || ''
+        if (!accessDesignId && nextDesignId) setAccessDesignId(nextDesignId)
+        if (nextDesignId) {
+          const designAccessResponse = await fetchDesignAccess(accessWorkspaceId, nextDesignId)
+          if (!cancelled) setDesignAccess(designAccessResponse.access)
+        } else {
+          setDesignAccess([])
+        }
+      } catch (error) {
+        if (!cancelled) setAccessError(error instanceof Error ? error.message : 'Could not load access settings.')
+      } finally {
+        if (!cancelled) setAccessLoading(false)
+      }
+    }
+    void loadAccessCenter()
+    return () => {
+      cancelled = true
+    }
+  }, [accessDesignId, accessWorkspaceId, activeSection])
 
   function updateDraftUser(user: BackendUser, patch: Partial<BackendUser & { password?: string }>) {
     setDraftUsers((current) => current.map((item) => (item.id === user.id ? { ...item, ...patch } : item)))
@@ -2700,46 +2952,384 @@ function AdminConsole({
     }
   }
 
+  async function submitAccessGrant() {
+    if (!accessWorkspaceId || !accessUserId) return
+    setAccessError(null)
+    setAccessLoading(true)
+    try {
+      if (accessScope === 'workspace') {
+        const response = await grantWorkspaceAccess(accessWorkspaceId, { userId: accessUserId, ...workspaceAccessDraft })
+        setWorkspaceAccess((current) => {
+          const existing = current.filter((item) => item.userId !== response.access.userId)
+          return [...existing, response.access]
+        })
+      } else if (accessDesignId) {
+        const response = await grantDesignAccess(accessWorkspaceId, accessDesignId, { userId: accessUserId, ...designAccessDraft })
+        setDesignAccess((current) => {
+          const existing = current.filter((item) => item.userId !== response.access.userId)
+          return [...existing, response.access]
+        })
+      }
+    } catch (error) {
+      setAccessError(error instanceof Error ? error.message : 'Could not save access grant.')
+    } finally {
+      setAccessLoading(false)
+    }
+  }
+
+  async function revokeAccessGrant(userId: string) {
+    if (!accessWorkspaceId) return
+    setAccessError(null)
+    setAccessLoading(true)
+    try {
+      if (accessScope === 'workspace') {
+        await revokeWorkspaceAccess(accessWorkspaceId, userId)
+        setWorkspaceAccess((current) => current.filter((item) => item.userId !== userId))
+      } else if (accessDesignId) {
+        await revokeDesignAccess(accessWorkspaceId, accessDesignId, userId)
+        setDesignAccess((current) => current.filter((item) => item.userId !== userId))
+      }
+    } catch (error) {
+      setAccessError(error instanceof Error ? error.message : 'Could not revoke access grant.')
+    } finally {
+      setAccessLoading(false)
+    }
+  }
+
   return (
-    <main className="admin-shell">
-      <section className="admin-hero">
-        <div>
+    <main className="admin-shell admin-center-shell">
+      <section className="admin-command-bar">
+        <div className="admin-command-copy">
           <p className="eyebrow">Enterprise administration</p>
           <h1>Admin console</h1>
-          <p>Manage users, roles, and sign-in methods for a deployment-ready Stratum workspace.</p>
+          <p>Control identity, access, catalog governance, AI providers, and integrations from one command surface.</p>
         </div>
-        <div className="admin-hero-actions" aria-label="Administration status">
-          <span><BadgeCheck size={16} /> {ssoMode}</span>
-          <span><ShieldCheck size={16} /> {adminUsers} admin{adminUsers === 1 ? '' : 's'}</span>
-        </div>
+        <label className="admin-command-search">
+          <Search size={18} />
+          <input
+            value={adminSearch}
+            onChange={(event) => setAdminSearch(event.target.value)}
+            placeholder="Search users, catalog, SSO, AI, integrations..."
+          />
+        </label>
       </section>
-      {error ? <div className="home-error"><span>{error}</span></div> : null}
+      {error ? <div className="home-error admin-page-error"><span>{error}</span></div> : null}
 
-      <section className="admin-metrics" aria-label="Administration overview">
-        <article>
-          <span>Total users</span>
-          <strong>{users.length}</strong>
-          <small>{activeUsers} active</small>
-        </article>
-        <article>
-          <span>Identity provider</span>
-          <strong>{providerLabel}</strong>
-          <small>{hasOktaCore ? 'Core settings present' : 'Configuration incomplete'}</small>
-        </article>
-        <article>
-          <span>Provisioning</span>
-          <strong>{signInDraft?.jitProvisioning ? 'JIT' : 'Manual'}</strong>
-          <small>{signInDraft?.jitProvisioning ? 'Users created on first login' : 'Admins add users manually'}</small>
-        </article>
-        <article>
-          <span>Analysis AI</span>
-          <strong>{aiDraft?.enabled ? 'Enabled' : 'Disabled'}</strong>
-          <small>{aiDraft?.provider ? `${aiDraft.provider} ${aiDraft.model}` : 'Central provider not configured'}</small>
-        </article>
-      </section>
+      <div className="admin-center-layout">
+        <aside className="admin-section-nav" aria-label="Admin sections">
+          {visibleAdminSections.map((section) => {
+            const copy = adminSectionCopy[section]
+            return (
+              <button
+                className={section === activeSection ? 'admin-section-button active' : 'admin-section-button'}
+                key={section}
+                type="button"
+                onClick={() => onSelectSection(section)}
+              >
+                <AdminSectionIcon section={section} />
+                <span>
+                  <strong>{copy.label}</strong>
+                  <small>{copy.group}</small>
+                </span>
+                {section === activeSection ? <CheckCircle2 size={15} /> : null}
+              </button>
+            )
+          })}
+        </aside>
 
-      <section className="admin-grid">
-        <div className="admin-panel">
+        <section className="admin-section-content">
+          <header className="admin-page-header">
+            <span><AdminSectionIcon section={activeSection} /></span>
+            <div>
+              <p className="eyebrow">{activeSectionCopy.group}</p>
+              <h2>{activeSectionCopy.label}</h2>
+              <p>{activeSectionCopy.description}</p>
+            </div>
+          </header>
+
+          {activeSection === 'overview' ? (
+            <>
+              <section className="admin-metrics" aria-label="Administration overview">
+                <article>
+                  <span>Total users</span>
+                  <strong>{users.length}</strong>
+                  <small>{activeUsers} active</small>
+                </article>
+                <article>
+                  <span>Identity provider</span>
+                  <strong>{providerLabel}</strong>
+                  <small>{hasOktaCore ? 'Core settings present' : 'Configuration incomplete'}</small>
+                </article>
+                <article>
+                  <span>Provisioning</span>
+                  <strong>{signInDraft?.jitProvisioning ? 'JIT' : 'Manual'}</strong>
+                  <small>{signInDraft?.jitProvisioning ? 'Users created on first login' : 'Admins add users manually'}</small>
+                </article>
+                <article>
+                  <span>Analysis AI</span>
+                  <strong>{aiDraft?.enabled ? 'Enabled' : 'Disabled'}</strong>
+                  <small>{aiDraft?.provider ? `${aiDraft.provider} ${aiDraft.model}` : 'Central provider not configured'}</small>
+                </article>
+                <article>
+                  <span>MCP server</span>
+                  <strong>{mcpDraft?.enabled ? 'Enabled' : 'Disabled'}</strong>
+                  <small>{mcpDraft ? `${enabledMCPCapabilities} configured capabilities` : 'Configuration not loaded'}</small>
+                </article>
+              </section>
+              <section className="admin-dashboard-grid" aria-label="Administration status">
+                <article className="admin-dashboard-panel">
+                  <div className="admin-panel-heading compact">
+                    <span><Activity size={18} /></span>
+                    <div>
+                      <strong>Needs attention</strong>
+                      <p>Configuration items that affect enterprise readiness.</p>
+                    </div>
+                  </div>
+                  <div className="admin-attention-list">
+                    {dashboardAttention.map((item) => (
+                      <button className={`admin-attention-row ${item.status}`} key={item.title} type="button" onClick={() => onSelectSection(item.section)}>
+                        <span />
+                        <div>
+                          <strong>{item.title}</strong>
+                          <small>{item.detail}</small>
+                        </div>
+                        <ChevronRight size={16} />
+                      </button>
+                    ))}
+                  </div>
+                </article>
+                <article className="admin-dashboard-panel">
+                  <div className="admin-panel-heading compact">
+                    <span><ShieldCheck size={18} /></span>
+                    <div>
+                      <strong>Governance posture</strong>
+                      <p>Current control model for users, workspaces, and designs.</p>
+                    </div>
+                  </div>
+                  <div className="admin-governance-list">
+                    <span><strong>{adminUsers}</strong> admin account{adminUsers === 1 ? '' : 's'} active</span>
+                    <span>Workspace and design ACL guard layers are enforced by the backend.</span>
+                    <span>Catalog updates are admin-managed to reduce duplicate shared-service registration.</span>
+                  </div>
+                </article>
+              </section>
+            </>
+          ) : null}
+
+          {activeSection === 'access' ? (
+            <div className="admin-panel access-center-panel">
+              <div className="admin-panel-heading">
+                <span><ShieldCheck size={18} /></span>
+                <div>
+                  <strong>Access Center</strong>
+                  <p>Grant workspace and design-level permissions without changing global product roles.</p>
+                </div>
+              </div>
+
+              <div className="access-center-grid">
+                <section className="access-control-card">
+                  <div className="access-scope-switch" aria-label="Access scope">
+                    <button className={accessScope === 'workspace' ? 'active' : ''} type="button" onClick={() => setAccessScope('workspace')}>
+                      Workspace
+                    </button>
+                    <button className={accessScope === 'design' ? 'active' : ''} type="button" onClick={() => setAccessScope('design')}>
+                      Design
+                    </button>
+                  </div>
+                  <div className="access-selector-grid">
+                    <label className="field">
+                      <span>Workspace</span>
+                      <select
+                        value={accessWorkspaceId}
+                        onChange={(event) => {
+                          setAccessWorkspaceId(event.target.value)
+                          setAccessDesignId('')
+                        }}
+                      >
+                        {workspaces.map((workspace) => (
+                          <option key={workspace.id} value={workspace.id}>
+                            {workspace.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {accessScope === 'design' ? (
+                      <label className="field">
+                        <span>Design</span>
+                        <select value={accessDesignId} onChange={(event) => setAccessDesignId(event.target.value)}>
+                          {accessDesigns.map((design) => (
+                            <option key={design.id} value={design.id}>
+                              {design.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                  </div>
+                  <div className="access-context-card">
+                    <strong>{accessScope === 'workspace' ? activeAccessWorkspace?.name || 'Select workspace' : activeAccessDesign?.name || 'Select design'}</strong>
+                    <span>
+                      {accessScope === 'workspace'
+                        ? 'Controls who can see this workspace, create designs, or manage grants.'
+                        : 'Controls who can read, edit, comment, review, or manage this design.'}
+                    </span>
+                  </div>
+                </section>
+
+                <section className="access-control-card">
+                  <div className="admin-section-title">
+                    <span>Grant access</span>
+                    <small>{selectedAccessUser ? selectedAccessUser.email : 'Choose a user'}</small>
+                  </div>
+                  <label className="field">
+                    <span>User</span>
+                    <select value={accessUserId} onChange={(event) => setAccessUserId(event.target.value)}>
+                      {grantableUsers.map((user) => (
+                        <option key={user.id} value={user.id}>
+                          {user.displayName} · {user.email}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="permission-chip-grid">
+                    {accessScope === 'workspace' ? (
+                      <>
+                        <label><input type="checkbox" checked={workspaceAccessDraft.canRead} onChange={(event) => setWorkspaceAccessDraft((current) => ({ ...current, canRead: event.target.checked }))} /> Read</label>
+                        <label><input type="checkbox" checked={workspaceAccessDraft.canCreateDesign} onChange={(event) => setWorkspaceAccessDraft((current) => ({ ...current, canCreateDesign: event.target.checked }))} /> Create designs</label>
+                        <label><input type="checkbox" checked={workspaceAccessDraft.canManage} onChange={(event) => setWorkspaceAccessDraft((current) => ({ ...current, canManage: event.target.checked }))} /> Manage</label>
+                      </>
+                    ) : (
+                      <>
+                        <label><input type="checkbox" checked={designAccessDraft.canRead} onChange={(event) => setDesignAccessDraft((current) => ({ ...current, canRead: event.target.checked }))} /> Read</label>
+                        <label><input type="checkbox" checked={designAccessDraft.canEdit} onChange={(event) => setDesignAccessDraft((current) => ({ ...current, canEdit: event.target.checked }))} /> Edit</label>
+                        <label><input type="checkbox" checked={designAccessDraft.canComment} onChange={(event) => setDesignAccessDraft((current) => ({ ...current, canComment: event.target.checked }))} /> Comment</label>
+                        <label><input type="checkbox" checked={designAccessDraft.canReview} onChange={(event) => setDesignAccessDraft((current) => ({ ...current, canReview: event.target.checked }))} /> Review</label>
+                        <label><input type="checkbox" checked={designAccessDraft.canManage} onChange={(event) => setDesignAccessDraft((current) => ({ ...current, canManage: event.target.checked }))} /> Manage</label>
+                      </>
+                    )}
+                  </div>
+                  <button className="primary-action full-width" type="button" disabled={accessLoading || !accessUserId || (accessScope === 'design' && !accessDesignId)} onClick={() => void submitAccessGrant()}>
+                    <ShieldCheck size={16} /> Save grant
+                  </button>
+                </section>
+              </div>
+
+              {accessError ? <div className="admin-inline-error">{accessError}</div> : null}
+
+              <div className="access-grant-list">
+                {accessRows.length ? accessRows.map((grant) => {
+                  const user = users.find((item) => item.id === grant.userId)
+                  const permissions =
+                    'canCreateDesign' in grant
+                      ? [
+                          grant.canRead ? 'Read' : '',
+                          grant.canCreateDesign ? 'Create designs' : '',
+                          grant.canManage ? 'Manage' : '',
+                        ].filter(Boolean)
+                      : [
+                          grant.canRead ? 'Read' : '',
+                          grant.canEdit ? 'Edit' : '',
+                          grant.canComment ? 'Comment' : '',
+                          grant.canReview ? 'Review' : '',
+                          grant.canManage ? 'Manage' : '',
+                        ].filter(Boolean)
+                  return (
+                    <article className="access-grant-row" key={`${grant.userId}-${grant.updatedAt}`}>
+                      <div className="admin-user-identity">
+                        <span>{initialsFor(user?.displayName || user?.email || grant.userId)}</span>
+                        <div>
+                          <strong>{user?.displayName || 'Unknown user'}</strong>
+                          <small>{user?.email || grant.userId}</small>
+                        </div>
+                      </div>
+                      <div className="access-permission-list">
+                        {permissions.map((permission) => <span key={permission}>{permission}</span>)}
+                      </div>
+                      <button className="text-button danger" type="button" disabled={accessLoading} onClick={() => void revokeAccessGrant(grant.userId)}>
+                        Revoke
+                      </button>
+                    </article>
+                  )
+                }) : (
+                  <div className="analysis-empty">
+                    <strong>No explicit grants yet</strong>
+                    <span>Admins can add user-specific grants for this {accessScope}.</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : null}
+
+          {activeSection === 'workspaces' ? (
+            <div className="admin-panel">
+              <div className="admin-panel-heading">
+                <span><Boxes size={18} /></span>
+                <div>
+                  <strong>Workspace governance</strong>
+                  <p>Foundation for workspace ownership, default policies, and deletion readiness.</p>
+                </div>
+              </div>
+              <div className="admin-policy-grid">
+                <article>
+                  <strong>Deletion guard</strong>
+                  <span>Workspaces can only be deleted when empty and backend deletion is guarded for concurrent requests.</span>
+                </article>
+                <article>
+                  <strong>Design creation</strong>
+                  <span>Creating designs is now controlled by workspace-level ACL, not only broad product roles.</span>
+                </article>
+                <article>
+                  <strong>Next UI step</strong>
+                  <span>Add grant management tables once the access model stabilizes with real enterprise user groups.</span>
+                </article>
+              </div>
+            </div>
+          ) : null}
+
+          {activeSection === 'security' ? (
+            <div className="admin-panel">
+              <div className="admin-panel-heading">
+                <span><BadgeCheck size={18} /></span>
+                <div>
+                  <strong>Security and audit</strong>
+                  <p>Security posture for auth, provider secrets, authorization, and future audit event streams.</p>
+                </div>
+              </div>
+              <div className="admin-policy-grid">
+                <article>
+                  <strong>Token scope</strong>
+                  <span>Backend APIs require authenticated sessions and role or ACL checks before sensitive operations.</span>
+                </article>
+                <article>
+                  <strong>Secret handling</strong>
+                  <span>AI and SSO secrets are written through admin-only endpoints and are not stored in browser local storage.</span>
+                </article>
+                <article>
+                  <strong>Audit backlog</strong>
+                  <span>Persisted admin and ACL change events are the next hardening layer before external compliance use.</span>
+                </article>
+              </div>
+            </div>
+          ) : null}
+
+          {activeSection === 'settings' ? (
+            <div className="admin-panel">
+              <div className="admin-panel-heading">
+                <span><Settings size={18} /></span>
+                <div>
+                  <strong>System settings</strong>
+                  <p>Reserved for deployment defaults, retention policy, export policy, and workspace templates.</p>
+                </div>
+              </div>
+              <div className="analysis-empty">
+                <strong>Settings modules will land here</strong>
+                <span>This keeps future configuration out of the canvas and out of crowded one-page admin forms.</span>
+              </div>
+            </div>
+          ) : null}
+
+          <section className="admin-grid admin-section-grid" hidden={activeSection === 'overview' || activeSection === 'access' || activeSection === 'workspaces' || activeSection === 'security' || activeSection === 'settings'}>
+        <div className="admin-panel users-admin-panel" hidden={activeSection !== 'users'}>
           <div className="admin-panel-heading">
             <span><UserCheck size={18} /></span>
             <div>
@@ -2747,7 +3337,13 @@ function AdminConsole({
               <p>Add people, assign roles, and control account status.</p>
             </div>
           </div>
-          <div className="admin-add-user">
+          <div className="admin-user-summary">
+            <article><strong>{users.length}</strong><span>Total users</span></article>
+            <article><strong>{activeUsers}</strong><span>Active</span></article>
+            <article><strong>{adminUsers}</strong><span>Admins</span></article>
+            <article><strong>{architectUsers + reviewerUsers}</strong><span>Review roles</span></article>
+          </div>
+          <div className="admin-add-user user-add-form">
             <Field label="Name" value={newUser.displayName} onChange={(displayName) => setNewUser((current) => ({ ...current, displayName }))} />
             <Field label="Email" value={newUser.email} onChange={(email) => setNewUser((current) => ({ ...current, email }))} />
             <Field label="Temporary password" type="password" value={newUser.password} onChange={(password) => setNewUser((current) => ({ ...current, password }))} />
@@ -2771,13 +3367,18 @@ function AdminConsole({
           </div>
           {userError ? <div className="admin-inline-error">{userError}</div> : null}
 
-          <div className="admin-role-strip" aria-label="Role model">
-            <span>Admin <small>platform control</small></span>
-            <span>Architect <small>create and evolve</small></span>
-            <span>Reviewer <small>review and comment</small></span>
-            <span>Member <small>view workspace</small></span>
+          <div className="admin-role-strip polished" aria-label="Role model">
+            <span><strong>Admin</strong><small>Platform control</small></span>
+            <span><strong>Architect</strong><small>Create and evolve</small></span>
+            <span><strong>Reviewer</strong><small>Review and comment</small></span>
+            <span><strong>Member</strong><small>View workspace</small></span>
           </div>
 
+          <section className="admin-user-directory">
+            <div className="admin-section-title">
+              <span>Directory</span>
+              <small>{users.length} account{users.length === 1 ? '' : 's'}</small>
+            </div>
           <div className="admin-user-list">
             {draftUsers.map((user) => (
               editingUserId === user.id ? (
@@ -2856,9 +3457,10 @@ function AdminConsole({
               )
             ))}
           </div>
+          </section>
         </div>
 
-        <div className="admin-panel catalog-admin-panel">
+        <div className="admin-panel catalog-admin-panel" hidden={activeSection !== 'catalog'}>
           <div className="admin-panel-heading">
             <span><Boxes size={18} /></span>
             <div>
@@ -2866,58 +3468,81 @@ function AdminConsole({
               <p>Canonical services and infrastructure shared across architecture designs.</p>
             </div>
           </div>
-
-          <div className="admin-add-user catalog-add-asset">
-            <Field label="Asset name" value={newAsset.name} onChange={(name) => setNewAsset((current) => ({ ...current, name }))} />
-            <label className="field">
-              <span>Type</span>
-              <select value={newAsset.type} onChange={(event) => setNewAsset((current) => ({ ...current, type: event.target.value }))}>
-                {componentCatalog.filter((item) => item.type !== 'note.sticky' && item.type !== 'frame.cloud' && item.type !== 'design.link').map((item) => (
-                  <option key={item.type} value={item.type}>
-                    {item.label}
-                  </option>
-                ))}
-              </select>
+          <div className="catalog-command-row">
+            <div className="catalog-kpis">
+              <article><strong>{catalogAssets.length}</strong><span>Catalog assets</span></article>
+              <article><strong>{catalogAssets.reduce((count, asset) => count + asset.usedInDesignCount, 0)}</strong><span>Design links</span></article>
+              <article><strong>{catalogAssets.filter((asset) => asset.criticality === 'critical' || asset.criticality === 'high').length}</strong><span>High criticality</span></article>
+            </div>
+            <label className="admin-command-search catalog-search">
+              <Search size={17} />
+              <input value={catalogAdminSearch} onChange={(event) => setCatalogAdminSearch(event.target.value)} placeholder="Search catalog assets..." />
             </label>
-            <Field label="Owner" value={newAsset.owner} onChange={(owner) => setNewAsset((current) => ({ ...current, owner }))} />
-            <label className="field">
-              <span>Criticality</span>
-              <select value={newAsset.criticality} onChange={(event) => setNewAsset((current) => ({ ...current, criticality: event.target.value }))}>
-                <option value="low">Low</option>
-                <option value="medium">Medium</option>
-                <option value="high">High</option>
-                <option value="critical">Critical</option>
-              </select>
-            </label>
-            <button className="primary-action" type="button" disabled={!newAsset.name.trim() || Boolean(duplicateNewAsset)} onClick={() => void submitNewAsset()}>
-              <FilePlus2 size={16} /> Add asset
-            </button>
           </div>
-          <TextareaField
-            label="Description"
-            value={newAsset.description}
-            onChange={(description) => setNewAsset((current) => ({ ...current, description }))}
-          />
-          {duplicateNewAsset ? (
-            <div className="catalog-duplicate-warning">
-              Possible duplicate: <strong>{duplicateNewAsset.name}</strong>. Link existing assets instead of creating duplicates.
-            </div>
-          ) : null}
-          {!duplicateNewAsset && newAssetSuggestions.length ? (
-            <div className="catalog-suggestions">
-              <strong>Similar catalog assets</strong>
-              {newAssetSuggestions.slice(0, 4).map((asset) => (
-                <span className="catalog-suggestion readonly" key={asset.id}>
-                  <span>{asset.name}</span>
-                  <small>{asset.type} • normalized as {asset.normalizedName}</small>
-                </span>
-              ))}
-            </div>
-          ) : null}
-          {assetError ? <div className="admin-inline-error">{assetError}</div> : null}
 
-          <div className="catalog-admin-list">
-            {draftAssets.length ? draftAssets.map((asset) => (
+          <div className="catalog-workbench">
+            <section className="catalog-composer">
+              <div className="admin-section-title">
+                <span>Register asset</span>
+                <small>Duplicate detection uses normalized names</small>
+              </div>
+              <Field label="Asset name" value={newAsset.name} onChange={(name) => setNewAsset((current) => ({ ...current, name }))} />
+              <div className="admin-field-grid two">
+                <label className="field">
+                  <span>Type</span>
+                  <select value={newAsset.type} onChange={(event) => setNewAsset((current) => ({ ...current, type: event.target.value }))}>
+                    {componentCatalog.filter((item) => item.type !== 'note.sticky' && item.type !== 'frame.cloud' && item.type !== 'design.link').map((item) => (
+                      <option key={item.type} value={item.type}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Criticality</span>
+                  <select value={newAsset.criticality} onChange={(event) => setNewAsset((current) => ({ ...current, criticality: event.target.value }))}>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                    <option value="critical">Critical</option>
+                  </select>
+                </label>
+              </div>
+              <Field label="Owner" value={newAsset.owner} onChange={(owner) => setNewAsset((current) => ({ ...current, owner }))} />
+              <TextareaField
+                label="Description"
+                value={newAsset.description}
+                onChange={(description) => setNewAsset((current) => ({ ...current, description }))}
+              />
+              {duplicateNewAsset ? (
+                <div className="catalog-duplicate-warning">
+                  Possible duplicate: <strong>{duplicateNewAsset.name}</strong>. Link existing assets instead of creating duplicates.
+                </div>
+              ) : null}
+              {!duplicateNewAsset && newAssetSuggestions.length ? (
+                <div className="catalog-suggestions">
+                  <strong>Similar catalog assets</strong>
+                  {newAssetSuggestions.slice(0, 4).map((asset) => (
+                    <span className="catalog-suggestion readonly" key={asset.id}>
+                      <span>{asset.name}</span>
+                      <small>{asset.type} • normalized as {asset.normalizedName}</small>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              {assetError ? <div className="admin-inline-error">{assetError}</div> : null}
+              <button className="primary-action full-width" type="button" disabled={!newAsset.name.trim() || Boolean(duplicateNewAsset)} onClick={() => void submitNewAsset()}>
+                <FilePlus2 size={16} /> Add catalog asset
+              </button>
+            </section>
+
+            <section className="catalog-library">
+              <div className="admin-section-title">
+                <span>Canonical assets</span>
+                <small>{filteredDraftAssets.length} visible</small>
+              </div>
+              <div className="catalog-admin-list modern">
+            {filteredDraftAssets.length ? filteredDraftAssets.map((asset) => (
               editingAssetId === asset.id ? (
                 <article className="catalog-admin-row editing" key={asset.id}>
                   <Field label="Name" value={asset.name} onChange={(name) => updateDraftAsset(asset, { name })} />
@@ -2960,10 +3585,11 @@ function AdminConsole({
                   </div>
                 </article>
               ) : (
-                <article className="catalog-admin-row" key={asset.id}>
+                <article className="catalog-admin-row modern" key={asset.id}>
+                  <span className="catalog-type-icon"><AdminSectionIcon section="catalog" size={18} /></span>
                   <div>
                     <strong>{asset.name}</strong>
-                    <small>{asset.type} • {asset.owner || 'No owner'}</small>
+                    <small>{getCatalogItem(asset.type as ComponentType)?.label || asset.type} • {asset.owner || 'No owner'}</small>
                   </div>
                   <span className={`admin-status-pill ${asset.criticality}`}>{asset.criticality}</span>
                   <span>{asset.usedInDesignCount} design{asset.usedInDesignCount === 1 ? '' : 's'}</span>
@@ -2983,10 +3609,12 @@ function AdminConsole({
                 <span>Users can promote design components, and admins can curate them here.</span>
               </div>
             )}
+              </div>
+            </section>
           </div>
         </div>
 
-        <div className="admin-panel">
+        <div className="admin-panel" hidden={activeSection !== 'identity'}>
           <div className="admin-panel-heading">
             <span><LockKeyhole size={18} /></span>
             <div>
@@ -3085,7 +3713,7 @@ function AdminConsole({
           )}
         </div>
 
-        <div className="admin-panel ai-admin-panel">
+        <div className="admin-panel ai-admin-panel" hidden={activeSection !== 'ai'}>
           <div className="admin-panel-heading">
             <span><Sparkles size={18} /></span>
             <div>
@@ -3173,7 +3801,101 @@ function AdminConsole({
             </div>
           )}
         </div>
-      </section>
+
+        <div className="admin-panel mcp-admin-panel" hidden={activeSection !== 'integrations'}>
+          <div className="admin-panel-heading">
+            <span><Server size={18} /></span>
+            <div>
+              <strong>MCP readiness</strong>
+              <p>Prepare controlled MCP access for catalog, design, and analysis tools.</p>
+            </div>
+          </div>
+          {mcpDraft ? (
+            <div className="signin-form">
+              <div className="admin-ai-status">
+                <span className={mcpDraft.enabled ? 'admin-status-pill active' : 'admin-status-pill disabled'}>
+                  {mcpDraft.enabled ? 'MCP configured' : 'MCP disabled'}
+                </span>
+                <small>{enabledMCPCapabilities} capabilities selected</small>
+              </div>
+
+              <label className="toggle-row enterprise-toggle">
+                <input
+                  type="checkbox"
+                  checked={mcpDraft.enabled}
+                  onChange={(event) => setMCPDraft({ ...mcpDraft, enabled: event.target.checked })}
+                />
+                <span>
+                  <strong>Enable MCP configuration</strong>
+                  <small>Stores deployment intent. The MCP server remains gated until server runtime support is added.</small>
+                </span>
+              </label>
+
+              <div className="admin-form-section">
+                <div className="admin-section-title">
+                  <span>Endpoint</span>
+                  <small>Advertised server path for future MCP clients</small>
+                </div>
+                <Field label="Endpoint path" value={mcpDraft.endpointPath} onChange={(endpointPath) => setMCPDraft({ ...mcpDraft, endpointPath })} />
+              </div>
+
+              <div className="admin-form-section">
+                <div className="admin-section-title">
+                  <span>Capabilities</span>
+                  <small>Write actions stay limited until RBAC and audit events are complete</small>
+                </div>
+                <div className="mcp-capability-grid">
+                  {[
+                    ['readCatalog', 'Read catalog', 'Expose canonical components and metadata.'],
+                    ['readDesigns', 'Read designs', 'Expose structured design documents.'],
+                    ['createDraftDesign', 'Create draft design', 'Allow AI tools to propose draft architectures.'],
+                    ['runAnalysis', 'Run analysis', 'Trigger deterministic and AI analysis suites.'],
+                    ['fetchImpactReport', 'Fetch impact report', 'Reserved for cross-design impact visualization.'],
+                  ].map(([key, label, description]) => (
+                    <label className="auth-mode-card compact" key={key}>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(mcpDraft[key as keyof BackendMCPConfig])}
+                        onChange={(event) => setMCPDraft({ ...mcpDraft, [key]: event.target.checked })}
+                      />
+                      <strong>{label}</strong>
+                      <span>{description}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <label className="toggle-row enterprise-toggle">
+                <input
+                  type="checkbox"
+                  checked={mcpDraft.requireAdminConsent}
+                  onChange={(event) => setMCPDraft({ ...mcpDraft, requireAdminConsent: event.target.checked })}
+                />
+                <span>
+                  <strong>Require admin consent</strong>
+                  <small>External clients must be explicitly approved before accessing configured capabilities.</small>
+                </span>
+              </label>
+
+              <div className="okta-guidance">
+                <strong>Security posture</strong>
+                <span>MCP write access is intentionally not active yet. The backend now stores enterprise configuration so runtime support can be added behind RBAC, audit logging, and scoped client credentials.</span>
+              </div>
+
+              <button className="primary-action full-width" type="button" onClick={() => onSaveMCP(mcpDraft)}>
+                Save MCP settings
+              </button>
+            </div>
+          ) : (
+            <div className="analysis-empty">
+              <strong>Loading MCP settings</strong>
+              <span>MCP readiness settings will appear once the backend responds.</span>
+            </div>
+          )}
+        </div>
+          </section>
+        </section>
+      </div>
     </main>
   )
 }

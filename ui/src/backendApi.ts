@@ -47,6 +47,17 @@ export interface BackendAIProviderConfig {
   verifiedAt?: string
   updatedAt: string
 }
+export interface BackendMCPConfig {
+  enabled: boolean
+  endpointPath: string
+  readCatalog: boolean
+  readDesigns: boolean
+  createDraftDesign: boolean
+  runAnalysis: boolean
+  fetchImpactReport: boolean
+  requireAdminConsent: boolean
+  updatedAt: string
+}
 export interface BackendCatalogAsset {
   id: string
   name: string
@@ -62,11 +73,44 @@ export interface BackendCatalogAsset {
   updatedAt: string
   usedInDesignCount: number
 }
+export interface BackendWorkspaceAccess {
+  workspaceId: string
+  userId: string
+  canRead: boolean
+  canCreateDesign: boolean
+  canManage: boolean
+  createdAt: string
+  updatedAt: string
+}
+export interface BackendDesignAccess {
+  workspaceId: string
+  designId: string
+  userId: string
+  canRead: boolean
+  canEdit: boolean
+  canComment: boolean
+  canReview: boolean
+  canManage: boolean
+  createdAt: string
+  updatedAt: string
+}
 interface CatalogAssetsResponse {
   assets: BackendCatalogAsset[]
 }
 interface CatalogAssetResponse {
   asset: BackendCatalogAsset
+}
+interface WorkspaceAccessResponse {
+  access: BackendWorkspaceAccess[]
+}
+interface WorkspaceAccessGrantResponse {
+  access: BackendWorkspaceAccess
+}
+interface DesignAccessResponse {
+  access: BackendDesignAccess[]
+}
+interface DesignAccessGrantResponse {
+  access: BackendDesignAccess
 }
 interface SetupStatusResponse {
   requiresSetup: boolean
@@ -86,6 +130,9 @@ interface SignInConfigResponse {
 }
 interface AIProviderConfigResponse {
   aiProvider: BackendAIProviderConfig
+}
+interface MCPConfigResponse {
+  mcp: BackendMCPConfig
 }
 export interface BackendDesignComment {
   id: string
@@ -353,6 +400,17 @@ export function updateAIProviderConfig(input: Partial<BackendAIProviderConfig> &
   })
 }
 
+export function fetchMCPConfig() {
+  return request<MCPConfigResponse>('/api/admin/mcp')
+}
+
+export function updateMCPConfig(input: BackendMCPConfig) {
+  return request<MCPConfigResponse>('/api/admin/mcp', {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  })
+}
+
 export function fetchCatalogAssets(query = '') {
   const suffix = query.trim() ? `?query=${encodeURIComponent(query.trim())}` : ''
   return request<CatalogAssetsResponse>(`/api/catalog/assets${suffix}`)
@@ -414,6 +472,23 @@ export function deleteWorkspace(workspaceId: string) {
   })
 }
 
+export function fetchWorkspaceAccess(workspaceId: string) {
+  return request<WorkspaceAccessResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/access`)
+}
+
+export function grantWorkspaceAccess(workspaceId: string, input: Omit<BackendWorkspaceAccess, 'workspaceId' | 'createdAt' | 'updatedAt'>) {
+  return request<WorkspaceAccessGrantResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/access`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export function revokeWorkspaceAccess(workspaceId: string, userId: string) {
+  return request<void>(`/api/workspaces/${encodeURIComponent(workspaceId)}/access/${encodeURIComponent(userId)}`, {
+    method: 'DELETE',
+  })
+}
+
 export function fetchWorkspaceDesigns(workspaceId: string) {
   return request<DesignsResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/designs`)
 }
@@ -440,6 +515,23 @@ export function updateDesignMetadata(workspaceId: string, designId: string, inpu
       body: JSON.stringify(input),
     },
   )
+}
+
+export function fetchDesignAccess(workspaceId: string, designId: string) {
+  return request<DesignAccessResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/access`)
+}
+
+export function grantDesignAccess(workspaceId: string, designId: string, input: Omit<BackendDesignAccess, 'workspaceId' | 'designId' | 'createdAt' | 'updatedAt'>) {
+  return request<DesignAccessGrantResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/access`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export function revokeDesignAccess(workspaceId: string, designId: string, userId: string) {
+  return request<void>(`/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/access/${encodeURIComponent(userId)}`, {
+    method: 'DELETE',
+  })
 }
 
 export function saveDesignDocument(

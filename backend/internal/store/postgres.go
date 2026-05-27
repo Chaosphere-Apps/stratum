@@ -109,6 +109,35 @@ ALTER TABLE users ALTER COLUMN last_seen_at SET NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_users_role_status ON users(role, status);
 
+CREATE TABLE IF NOT EXISTS workspace_access (
+	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	can_read BOOLEAN NOT NULL DEFAULT FALSE,
+	can_create_design BOOLEAN NOT NULL DEFAULT FALSE,
+	can_manage BOOLEAN NOT NULL DEFAULT FALSE,
+	created_at TIMESTAMPTZ NOT NULL,
+	updated_at TIMESTAMPTZ NOT NULL,
+	PRIMARY KEY (workspace_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_access_user ON workspace_access(user_id);
+
+CREATE TABLE IF NOT EXISTS design_access (
+	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+	design_id TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	can_read BOOLEAN NOT NULL DEFAULT FALSE,
+	can_edit BOOLEAN NOT NULL DEFAULT FALSE,
+	can_comment BOOLEAN NOT NULL DEFAULT FALSE,
+	can_review BOOLEAN NOT NULL DEFAULT FALSE,
+	can_manage BOOLEAN NOT NULL DEFAULT FALSE,
+	created_at TIMESTAMPTZ NOT NULL,
+	updated_at TIMESTAMPTZ NOT NULL,
+	PRIMARY KEY (workspace_id, design_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_design_access_user ON design_access(user_id);
+
 CREATE TABLE IF NOT EXISTS auth_sessions (
 	token_hash TEXT PRIMARY KEY,
 	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -150,6 +179,19 @@ CREATE TABLE IF NOT EXISTS ai_provider_settings (
 	base_url TEXT NOT NULL DEFAULT '',
 	api_key TEXT NOT NULL DEFAULT '',
 	verified_at TIMESTAMPTZ,
+	updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mcp_settings (
+	id TEXT PRIMARY KEY,
+	enabled BOOLEAN NOT NULL,
+	endpoint_path TEXT NOT NULL,
+	read_catalog BOOLEAN NOT NULL,
+	read_designs BOOLEAN NOT NULL,
+	create_draft_design BOOLEAN NOT NULL,
+	run_analysis BOOLEAN NOT NULL,
+	fetch_impact_report BOOLEAN NOT NULL,
+	require_admin_consent BOOLEAN NOT NULL,
 	updated_at TIMESTAMPTZ NOT NULL
 );
 
@@ -747,6 +789,95 @@ func (r *PostgresRepository) DeleteDesignDoc(ctx context.Context, workspaceID st
 	return nil
 }
 
+func (r *PostgresRepository) ListWorkspaceAccess(ctx context.Context, workspaceID string) ([]domain.WorkspaceAccess, error) {
+	rows, err := r.pool.Query(ctx, `
+SELECT workspace_id, user_id, can_read, can_create_design, can_manage, created_at, updated_at
+FROM workspace_access
+WHERE workspace_id = $1
+ORDER BY user_id
+`, strings.TrimSpace(workspaceID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	access := []domain.WorkspaceAccess{}
+	for rows.Next() {
+		entry, err := scanWorkspaceAccess(rows)
+		if err != nil {
+			return nil, err
+		}
+		access = append(access, entry)
+	}
+	return access, rows.Err()
+}
+
+func (r *PostgresRepository) GrantWorkspaceAccess(ctx context.Context, access domain.WorkspaceAccess) (domain.WorkspaceAccess, error) {
+	access.WorkspaceID = strings.TrimSpace(access.WorkspaceID)
+	access.UserID = strings.TrimSpace(access.UserID)
+	if access.WorkspaceID == "" || access.UserID == "" {
+		return domain.WorkspaceAccess{}, errors.New("workspace id and user id are required")
+	}
+	now := r.clock().UTC()
+	row := r.pool.QueryRow(ctx, `
+INSERT INTO workspace_access (workspace_id, user_id, can_read, can_create_design, can_manage, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $6)
+ON CONFLICT (workspace_id, user_id)
+DO UPDATE SET can_read = EXCLUDED.can_read, can_create_design = EXCLUDED.can_create_design, can_manage = EXCLUDED.can_manage, updated_at = EXCLUDED.updated_at
+RETURNING workspace_id, user_id, can_read, can_create_design, can_manage, created_at, updated_at
+`, access.WorkspaceID, access.UserID, access.CanRead, access.CanCreateDesign, access.CanManage, now)
+	return scanWorkspaceAccess(row)
+}
+
+func (r *PostgresRepository) RevokeWorkspaceAccess(ctx context.Context, workspaceID string, userID string) error {
+	_, err := r.pool.Exec(ctx, `DELETE FROM workspace_access WHERE workspace_id = $1 AND user_id = $2`, strings.TrimSpace(workspaceID), strings.TrimSpace(userID))
+	return err
+}
+
+func (r *PostgresRepository) ListDesignAccess(ctx context.Context, workspaceID string, designID string) ([]domain.DesignAccess, error) {
+	rows, err := r.pool.Query(ctx, `
+SELECT workspace_id, design_id, user_id, can_read, can_edit, can_comment, can_review, can_manage, created_at, updated_at
+FROM design_access
+WHERE workspace_id = $1 AND design_id = $2
+ORDER BY user_id
+`, strings.TrimSpace(workspaceID), strings.TrimSpace(designID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	access := []domain.DesignAccess{}
+	for rows.Next() {
+		entry, err := scanDesignAccess(rows)
+		if err != nil {
+			return nil, err
+		}
+		access = append(access, entry)
+	}
+	return access, rows.Err()
+}
+
+func (r *PostgresRepository) GrantDesignAccess(ctx context.Context, access domain.DesignAccess) (domain.DesignAccess, error) {
+	access.WorkspaceID = strings.TrimSpace(access.WorkspaceID)
+	access.DesignID = strings.TrimSpace(access.DesignID)
+	access.UserID = strings.TrimSpace(access.UserID)
+	if access.WorkspaceID == "" || access.DesignID == "" || access.UserID == "" {
+		return domain.DesignAccess{}, errors.New("workspace id, design id, and user id are required")
+	}
+	now := r.clock().UTC()
+	row := r.pool.QueryRow(ctx, `
+INSERT INTO design_access (workspace_id, design_id, user_id, can_read, can_edit, can_comment, can_review, can_manage, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+ON CONFLICT (workspace_id, design_id, user_id)
+DO UPDATE SET can_read = EXCLUDED.can_read, can_edit = EXCLUDED.can_edit, can_comment = EXCLUDED.can_comment, can_review = EXCLUDED.can_review, can_manage = EXCLUDED.can_manage, updated_at = EXCLUDED.updated_at
+RETURNING workspace_id, design_id, user_id, can_read, can_edit, can_comment, can_review, can_manage, created_at, updated_at
+`, access.WorkspaceID, access.DesignID, access.UserID, access.CanRead, access.CanEdit, access.CanComment, access.CanReview, access.CanManage, now)
+	return scanDesignAccess(row)
+}
+
+func (r *PostgresRepository) RevokeDesignAccess(ctx context.Context, workspaceID string, designID string, userID string) error {
+	_, err := r.pool.Exec(ctx, `DELETE FROM design_access WHERE workspace_id = $1 AND design_id = $2 AND user_id = $3`, strings.TrimSpace(workspaceID), strings.TrimSpace(designID), strings.TrimSpace(userID))
+	return err
+}
+
 func (r *PostgresRepository) ListUsers(ctx context.Context) ([]domain.User, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -1174,6 +1305,63 @@ RETURNING enabled, provider, model, base_url, api_key, api_key <> '', verified_a
 		return domain.AIProviderConfig{}, err
 	}
 	return sanitizeAIProviderConfig(next), nil
+}
+
+func (r *PostgresRepository) GetMCPConfig(ctx context.Context) (domain.MCPConfig, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.MCPConfig{}, err
+	}
+	defer rollback(ctx, tx)
+	if err := ensureDefaultMCPConfig(ctx, tx, r.clock().UTC()); err != nil {
+		return domain.MCPConfig{}, err
+	}
+	row := tx.QueryRow(ctx, `
+SELECT enabled, endpoint_path, read_catalog, read_designs, create_draft_design, run_analysis, fetch_impact_report, require_admin_consent, updated_at
+FROM mcp_settings
+WHERE id = 'default'
+`)
+	config, err := scanMCPConfig(row)
+	if err != nil {
+		return domain.MCPConfig{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.MCPConfig{}, err
+	}
+	return config, nil
+}
+
+func (r *PostgresRepository) UpdateMCPConfig(ctx context.Context, config domain.MCPConfig) (domain.MCPConfig, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.MCPConfig{}, err
+	}
+	defer rollback(ctx, tx)
+	if err := ensureDefaultMCPConfig(ctx, tx, r.clock().UTC()); err != nil {
+		return domain.MCPConfig{}, err
+	}
+	row := tx.QueryRow(ctx, `
+UPDATE mcp_settings
+SET enabled = $1,
+	endpoint_path = $2,
+	read_catalog = $3,
+	read_designs = $4,
+	create_draft_design = $5,
+	run_analysis = $6,
+	fetch_impact_report = $7,
+	require_admin_consent = $8,
+	updated_at = $9
+WHERE id = 'default'
+RETURNING enabled, endpoint_path, read_catalog, read_designs, create_draft_design, run_analysis, fetch_impact_report, require_admin_consent, updated_at
+`, config.Enabled, normalizedMCPPath(config.EndpointPath), config.ReadCatalog, config.ReadDesigns, config.CreateDraftDesign, config.RunAnalysis, config.FetchImpactReport, config.RequireAdminConsent, r.clock().UTC())
+	next, err := scanMCPConfig(row)
+	if err != nil {
+		return domain.MCPConfig{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.MCPConfig{}, err
+	}
+	return next, nil
 }
 
 func (r *PostgresRepository) ListDesignComments(ctx context.Context, workspaceID string, designID string) ([]domain.DesignComment, error) {
@@ -1707,6 +1895,53 @@ func scanAIProviderConfig(row rowScanner) (domain.AIProviderConfig, error) {
 	return config, err
 }
 
+func scanWorkspaceAccess(row rowScanner) (domain.WorkspaceAccess, error) {
+	var access domain.WorkspaceAccess
+	err := row.Scan(
+		&access.WorkspaceID,
+		&access.UserID,
+		&access.CanRead,
+		&access.CanCreateDesign,
+		&access.CanManage,
+		&access.CreatedAt,
+		&access.UpdatedAt,
+	)
+	return access, err
+}
+
+func scanDesignAccess(row rowScanner) (domain.DesignAccess, error) {
+	var access domain.DesignAccess
+	err := row.Scan(
+		&access.WorkspaceID,
+		&access.DesignID,
+		&access.UserID,
+		&access.CanRead,
+		&access.CanEdit,
+		&access.CanComment,
+		&access.CanReview,
+		&access.CanManage,
+		&access.CreatedAt,
+		&access.UpdatedAt,
+	)
+	return access, err
+}
+
+func scanMCPConfig(row rowScanner) (domain.MCPConfig, error) {
+	var config domain.MCPConfig
+	err := row.Scan(
+		&config.Enabled,
+		&config.EndpointPath,
+		&config.ReadCatalog,
+		&config.ReadDesigns,
+		&config.CreateDraftDesign,
+		&config.RunAnalysis,
+		&config.FetchImpactReport,
+		&config.RequireAdminConsent,
+		&config.UpdatedAt,
+	)
+	return config, err
+}
+
 func scanDesignComment(row rowScanner) (domain.DesignComment, error) {
 	var comment domain.DesignComment
 	err := row.Scan(
@@ -1913,6 +2148,19 @@ INSERT INTO ai_provider_settings (id, enabled, provider, model, base_url, api_ke
 VALUES ('default', $1, $2, $3, $4, '', NULL, $5)
 ON CONFLICT (id) DO NOTHING
 `, config.Enabled, config.Provider, config.Model, config.BaseURL, config.UpdatedAt)
+	return err
+}
+
+func ensureDefaultMCPConfig(ctx context.Context, tx pgx.Tx, now time.Time) error {
+	config := defaultMCPConfig(now)
+	_, err := tx.Exec(ctx, `
+INSERT INTO mcp_settings (
+	id, enabled, endpoint_path, read_catalog, read_designs, create_draft_design,
+	run_analysis, fetch_impact_report, require_admin_consent, updated_at
+)
+VALUES ('default', $1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (id) DO NOTHING
+`, config.Enabled, config.EndpointPath, config.ReadCatalog, config.ReadDesigns, config.CreateDraftDesign, config.RunAnalysis, config.FetchImpactReport, config.RequireAdminConsent, config.UpdatedAt)
 	return err
 }
 

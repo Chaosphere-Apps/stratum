@@ -20,16 +20,20 @@ type Client struct {
 	hub         *Hub
 	log         *slog.Logger
 	workspaceID string
+	userID      string
+	isAdmin     bool
 	send        chan Envelope
 	closeOnce   sync.Once
 }
 
-func NewClient(conn *websocket.Conn, hub *Hub, log *slog.Logger, workspaceID string) *Client {
+func NewClient(conn *websocket.Conn, hub *Hub, log *slog.Logger, workspaceID string, userID string, isAdmin bool) *Client {
 	return &Client{
 		conn:        conn,
 		hub:         hub,
 		log:         log,
 		workspaceID: workspaceID,
+		userID:      userID,
+		isAdmin:     isAdmin,
 		send:        make(chan Envelope, 32),
 	}
 }
@@ -113,6 +117,10 @@ func (c *Client) handleEnvelope(ctx context.Context, envelope Envelope) {
 			c.Send(errorEnvelope(envelope.RequestID, "invalid_payload", "Invalid design.upsert payload."))
 			return
 		}
+		if !c.canEditDesign(ctx, payload) {
+			c.Send(errorEnvelope(envelope.RequestID, "forbidden", "design edit access is required."))
+			return
+		}
 		design, err := c.hub.UpsertDesign(ctx, c.workspaceID, payload)
 		if err != nil {
 			c.Send(errorEnvelope(envelope.RequestID, "upsert_failed", err.Error()))
@@ -131,6 +139,44 @@ func (c *Client) handleEnvelope(ctx context.Context, envelope Envelope) {
 	default:
 		c.Send(errorEnvelope(envelope.RequestID, "unknown_message_type", "Unknown message type."))
 	}
+}
+
+func (c *Client) canEditDesign(ctx context.Context, payload UpsertDesignPayload) bool {
+	if c.isAdmin {
+		return true
+	}
+	var document struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(payload.Design, &document); err != nil || document.ID == "" {
+		return false
+	}
+	design, err := c.hub.Repository().GetDesign(ctx, c.workspaceID, document.ID)
+	if err != nil {
+		entries, _ := c.hub.Repository().ListWorkspaceAccess(ctx, c.workspaceID)
+		for _, entry := range entries {
+			if entry.UserID == c.userID && (entry.CanCreateDesign || entry.CanManage) {
+				return true
+			}
+		}
+		return false
+	}
+	if design.CreatedBy == c.userID {
+		return true
+	}
+	workspaceEntries, _ := c.hub.Repository().ListWorkspaceAccess(ctx, c.workspaceID)
+	for _, entry := range workspaceEntries {
+		if entry.UserID == c.userID && entry.CanManage {
+			return true
+		}
+	}
+	designEntries, _ := c.hub.Repository().ListDesignAccess(ctx, c.workspaceID, document.ID)
+	for _, entry := range designEntries {
+		if entry.UserID == c.userID && (entry.CanEdit || entry.CanManage) {
+			return true
+		}
+	}
+	return false
 }
 
 func errorEnvelope(requestID string, code string, message string) Envelope {
