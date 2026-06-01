@@ -27,15 +27,24 @@ func NewHub(repo store.Repository, log *slog.Logger) *Hub {
 }
 
 func (h *Hub) Repository() store.Repository {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	return h.repo
 }
 
+func (h *Hub) SetRepository(repo store.Repository) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.repo = repo
+}
+
 func (h *Hub) Snapshot(ctx context.Context, workspaceID string) (domain.WorkspaceSnapshot, error) {
-	workspace, err := h.repo.GetWorkspace(ctx, workspaceID)
+	repo := h.Repository()
+	workspace, err := repo.GetWorkspace(ctx, workspaceID)
 	if err != nil {
 		return domain.WorkspaceSnapshot{}, err
 	}
-	designs, err := h.repo.ListDesigns(ctx, workspaceID)
+	designs, err := repo.ListDesigns(ctx, workspaceID)
 	if err != nil {
 		return domain.WorkspaceSnapshot{}, err
 	}
@@ -110,5 +119,5 @@ func (h *Hub) UpsertDesign(ctx context.Context, workspaceID string, payload Upse
 		design.CanvasSnapshot = payload.CanvasSnapshot
 	}
 
-	return h.repo.UpsertDesign(ctx, design)
+	return h.Repository().UpsertDesign(ctx, design)
 }

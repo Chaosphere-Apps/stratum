@@ -7,9 +7,24 @@ export interface BackendProfile {
   role: string
   status?: string
   setupRequired?: boolean
+  storage?: BackendStorageStatus
 }
 
 interface ProfileResponse extends BackendProfile {}
+export interface BackendStorageStatus {
+  mode: 'stateless' | 'database'
+  stateless: boolean
+  databaseConfigured: boolean
+  databaseConnected: boolean
+  databasePending: boolean
+  currentDatabaseUrl?: string
+  pendingDatabaseUrl?: string
+  canMigrateUsers: boolean
+  cacheUserCount: number
+  databaseUserCount: number
+  warning?: string
+  persistentConfigHint?: string
+}
 export interface BackendUser {
   id: string
   displayName: string
@@ -94,11 +109,82 @@ export interface BackendDesignAccess {
   createdAt: string
   updatedAt: string
 }
+export interface BackendAccessGroup {
+  id: string
+  name: string
+  description: string
+  oktaGroupName: string
+  memberCount: number
+  createdAt: string
+  updatedAt: string
+}
+export interface BackendAccessGroupMember {
+  groupId: string
+  userId: string
+  addedAt: string
+}
+export interface BackendWorkspaceGroupAccess {
+  workspaceId: string
+  groupId: string
+  canRead: boolean
+  canCreateDesign: boolean
+  canManage: boolean
+  createdAt: string
+  updatedAt: string
+}
+export interface BackendDesignGroupAccess {
+  workspaceId: string
+  designId: string
+  groupId: string
+  canRead: boolean
+  canEdit: boolean
+  canComment: boolean
+  canReview: boolean
+  canManage: boolean
+  createdAt: string
+  updatedAt: string
+}
+export interface BackendUserAccessSummary {
+  scope: 'workspace' | 'design'
+  userId: string
+  groupId?: string
+  groupName?: string
+  source?: 'user' | 'group'
+  workspaceId: string
+  workspaceName: string
+  designId?: string
+  designName?: string
+  permissions: string[]
+  updatedAt: string
+}
+export type BackendDesignVersionStatus = 'draft' | 'pending_review' | 'reviewed' | 'live'
+export interface BackendDesignVersion {
+  id: string
+  designId: string
+  workspaceId: string
+  versionNumber: number
+  status: BackendDesignVersionStatus
+  remarks: string
+  document: unknown
+  canvasSnapshot?: unknown
+  createdBy: string
+  createdAt: string
+  updatedAt: string
+}
 interface CatalogAssetsResponse {
   assets: BackendCatalogAsset[]
 }
 interface CatalogAssetResponse {
   asset: BackendCatalogAsset
+}
+interface AccessGroupsResponse {
+  groups: BackendAccessGroup[]
+}
+interface AccessGroupResponse {
+  group: BackendAccessGroup
+}
+interface AccessGroupMembersResponse {
+  members: BackendAccessGroupMember[]
 }
 interface WorkspaceAccessResponse {
   access: BackendWorkspaceAccess[]
@@ -106,15 +192,48 @@ interface WorkspaceAccessResponse {
 interface WorkspaceAccessGrantResponse {
   access: BackendWorkspaceAccess
 }
+interface WorkspaceGroupAccessResponse {
+  access: BackendWorkspaceGroupAccess[]
+}
+interface WorkspaceGroupAccessGrantResponse {
+  access: BackendWorkspaceGroupAccess
+}
 interface DesignAccessResponse {
   access: BackendDesignAccess[]
 }
 interface DesignAccessGrantResponse {
   access: BackendDesignAccess
 }
+interface DesignGroupAccessResponse {
+  access: BackendDesignGroupAccess[]
+}
+interface DesignGroupAccessGrantResponse {
+  access: BackendDesignGroupAccess
+}
+interface UserAccessSummaryResponse {
+  access: BackendUserAccessSummary[]
+}
+interface DesignVersionsResponse {
+  versions: BackendDesignVersion[]
+}
+interface DesignVersionResponse {
+  version: BackendDesignVersion
+}
 interface SetupStatusResponse {
   requiresSetup: boolean
   requiresPasswordSetup: boolean
+  storage?: BackendStorageStatus
+}
+interface StorageStatusResponse {
+  storage: BackendStorageStatus
+}
+interface StorageTestResponse {
+  ok: boolean
+  storage: BackendStorageStatus
+}
+interface StorageMigrationResponse {
+  storage: BackendStorageStatus
+  migratedUsers: number
 }
 interface UserResponse {
   user: BackendUser
@@ -154,6 +273,8 @@ export interface BackendDesignReviewRequest {
   id: string
   workspaceId: string
   designId: string
+  versionId: string
+  versionNumber: number
   requestedBy: string
   reviewerId: string
   status: 'requested' | 'approved' | 'changes_requested'
@@ -168,6 +289,9 @@ interface DesignReviewsResponse {
 }
 interface DesignReviewResponse {
   review: BackendDesignReviewRequest
+}
+interface DesignReviewRequestsResponse {
+  reviews: BackendDesignReviewRequest[]
 }
 export interface BackendNotification {
   id: string
@@ -326,6 +450,10 @@ export function fetchSetupStatus() {
   return request<SetupStatusResponse>('/api/setup/status')
 }
 
+export function fetchStorageStatus() {
+  return request<StorageStatusResponse>('/api/storage/status')
+}
+
 export function createFirstAdmin(input: { displayName: string; email: string; password: string }) {
   return request<AuthResponse>('/api/setup/first-admin', {
     method: 'POST',
@@ -411,6 +539,31 @@ export function updateMCPConfig(input: BackendMCPConfig) {
   })
 }
 
+export function fetchAdminStorageStatus() {
+  return request<StorageStatusResponse>('/api/admin/storage')
+}
+
+export function testStorageDatabase(databaseUrl: string) {
+  return request<StorageTestResponse>('/api/admin/storage/test', {
+    method: 'POST',
+    body: JSON.stringify({ databaseUrl }),
+  })
+}
+
+export function configureStorageDatabase(databaseUrl: string) {
+  return request<StorageStatusResponse>('/api/admin/storage/database', {
+    method: 'PATCH',
+    body: JSON.stringify({ databaseUrl }),
+  })
+}
+
+export function migrateStorageUsers() {
+  return request<StorageMigrationResponse>('/api/admin/storage/migrate-users', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+}
+
 export function fetchCatalogAssets(query = '') {
   const suffix = query.trim() ? `?query=${encodeURIComponent(query.trim())}` : ''
   return request<CatalogAssetsResponse>(`/api/catalog/assets${suffix}`)
@@ -489,6 +642,65 @@ export function revokeWorkspaceAccess(workspaceId: string, userId: string) {
   })
 }
 
+export function fetchUserAccessSummary(userId: string) {
+  return request<UserAccessSummaryResponse>(`/api/admin/access/users/${encodeURIComponent(userId)}`)
+}
+
+export function fetchAccessGroups() {
+  return request<AccessGroupsResponse>('/api/admin/access/groups')
+}
+
+export function createAccessGroup(input: { name: string; description?: string; oktaGroupName?: string }) {
+  return request<AccessGroupResponse>('/api/admin/access/groups', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export function updateAccessGroup(groupId: string, input: { name: string; description?: string; oktaGroupName?: string }) {
+  return request<AccessGroupResponse>(`/api/admin/access/groups/${encodeURIComponent(groupId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  })
+}
+
+export function deleteAccessGroup(groupId: string) {
+  return request<void>(`/api/admin/access/groups/${encodeURIComponent(groupId)}`, {
+    method: 'DELETE',
+  })
+}
+
+export function fetchAccessGroupMembers(groupId: string) {
+  return request<AccessGroupMembersResponse>(`/api/admin/access/groups/${encodeURIComponent(groupId)}/members`)
+}
+
+export function replaceAccessGroupMembers(groupId: string, userIds: string[]) {
+  return request<AccessGroupMembersResponse>(`/api/admin/access/groups/${encodeURIComponent(groupId)}/members`, {
+    method: 'PUT',
+    body: JSON.stringify({ userIds }),
+  })
+}
+
+export function fetchWorkspaceGroupAccess(workspaceId: string) {
+  return request<WorkspaceGroupAccessResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/group-access`)
+}
+
+export function grantWorkspaceGroupAccess(
+  workspaceId: string,
+  input: Omit<BackendWorkspaceGroupAccess, 'workspaceId' | 'createdAt' | 'updatedAt'>,
+) {
+  return request<WorkspaceGroupAccessGrantResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/group-access`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export function revokeWorkspaceGroupAccess(workspaceId: string, groupId: string) {
+  return request<void>(`/api/workspaces/${encodeURIComponent(workspaceId)}/group-access/${encodeURIComponent(groupId)}`, {
+    method: 'DELETE',
+  })
+}
+
 export function fetchWorkspaceDesigns(workspaceId: string) {
   return request<DesignsResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/designs`)
 }
@@ -534,16 +746,85 @@ export function revokeDesignAccess(workspaceId: string, designId: string, userId
   })
 }
 
+export function fetchDesignGroupAccess(workspaceId: string, designId: string) {
+  return request<DesignGroupAccessResponse>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/group-access`,
+  )
+}
+
+export function grantDesignGroupAccess(
+  workspaceId: string,
+  designId: string,
+  input: Omit<BackendDesignGroupAccess, 'workspaceId' | 'designId' | 'createdAt' | 'updatedAt'>,
+) {
+  return request<DesignGroupAccessGrantResponse>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/group-access`,
+    {
+      method: 'POST',
+      body: JSON.stringify(input),
+    },
+  )
+}
+
+export function revokeDesignGroupAccess(workspaceId: string, designId: string, groupId: string) {
+  return request<void>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/group-access/${encodeURIComponent(groupId)}`,
+    {
+      method: 'DELETE',
+    },
+  )
+}
+
 export function saveDesignDocument(
   workspaceId: string,
   designId: string,
-  input: { document: unknown },
+  input: { document: unknown; versionRemarks?: string },
 ) {
   return request<DesignResponse>(
     `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/document`,
     {
       method: 'PUT',
       body: JSON.stringify(input),
+    },
+  )
+}
+
+export function fetchDesignVersions(workspaceId: string, designId: string) {
+  return request<DesignVersionsResponse>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/versions`,
+  )
+}
+
+export function createDesignVersion(workspaceId: string, designId: string, remarks = '') {
+  return request<DesignVersionResponse>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/versions`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ remarks }),
+    },
+  )
+}
+
+export function updateDesignVersionStatus(
+  workspaceId: string,
+  designId: string,
+  versionId: string,
+  status: BackendDesignVersionStatus,
+) {
+  return request<DesignVersionResponse>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/versions/${encodeURIComponent(versionId)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    },
+  )
+}
+
+export function deleteDesignVersion(workspaceId: string, designId: string, versionId: string) {
+  return request<void>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/versions/${encodeURIComponent(versionId)}`,
+    {
+      method: 'DELETE',
     },
   )
 }
@@ -637,9 +918,9 @@ export function fetchDesignReviews(workspaceId: string, designId: string) {
 export function requestDesignReview(
   workspaceId: string,
   designId: string,
-  input: { reviewerId: string; message: string },
+  input: { versionId: string; reviewerIds: string[]; message: string },
 ) {
-  return request<DesignReviewResponse>(
+  return request<DesignReviewRequestsResponse>(
     `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/reviews`,
     {
       method: 'POST',

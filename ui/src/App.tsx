@@ -1,10 +1,7 @@
 import {
-  Component,
   lazy,
   Suspense,
-  type ErrorInfo,
   type CSSProperties,
-  type ReactNode,
   useEffect,
   useMemo,
   useRef,
@@ -23,6 +20,7 @@ import {
   ChevronRight,
   ChevronsLeftRight,
   Cloud,
+  Copy,
   FilePlus2,
   Database,
   Download,
@@ -52,51 +50,102 @@ import {
   SkipForward,
   Trash2,
   Upload,
+  Users,
   UserCheck,
   UserPlus,
 } from 'lucide-react'
 import { componentCatalog, getCatalogItem } from './catalog'
 import {
+  adminSectionCopy,
+  adminSectionOrder,
+  defaultWorkspace,
+  parseRoute,
+  routePath,
+  type AdminSection,
+  type AppRoute,
+} from './app/navigation'
+import {
+  buildPrimaryJourney,
+  catalogAssetUsageLabel,
+  isBackendOfflineMessage,
+  isPotentialCatalogMatch,
+  normalizedCatalogLabel,
+  stripHtml,
+  versionStatusLabel,
+} from './app/designUtils'
+import { formatCompactDateTime, initialsFor, roleLabel, userDisplayName } from './app/format'
+import { AppNavbar } from './components/AppNavbar'
+import { FirstAdminOnboarding, LoginScreen } from './components/AuthScreens'
+import { CanvasErrorBoundary } from './components/CanvasErrorBoundary'
+import { CatalogGlyph, isCatalogComponentType } from './components/CatalogGlyph'
+import { ReviewWorkspace, RequestReviewModal, NotificationsModal } from './components/CollaborationPanels'
+import { CloneDesignModal, ConfirmDeleteModal, type DeleteTarget } from './components/DesignLifecycleModals'
+import { Field, NumberField, SelectField, TextareaField } from './components/FormFields'
+import { HomeScreen } from './components/HomeScreen'
+import { ComponentInspector, ConnectorInspector, StructuredView } from './components/InspectorPanels'
+import { StatelessModeBanner } from './components/StatelessModeBanner'
+import {
   analyzeDesign,
   createCatalogAsset,
+  createAccessGroup,
   createDesign,
   createDesignComment,
   createDesignDoc,
+  createDesignVersion,
   createAdminUser,
   createFirstAdmin,
   createWorkspace,
   deleteAdminUser,
+  deleteAccessGroup,
   deleteCatalogAsset,
   deleteDesign as deleteDesignFromBackend,
   deleteDesignDoc as deleteDesignDocFromBackend,
+  deleteDesignVersion as deleteDesignVersionFromBackend,
   deleteWorkspace as deleteWorkspaceFromBackend,
+  configureStorageDatabase,
   fetchDesignComments,
   fetchDesignDocs,
   fetchDesignReviews,
+  fetchDesignVersions,
   fetchNotifications,
   fetchProfile,
   fetchAIProviderConfig,
+  fetchAccessGroupMembers,
+  fetchAccessGroups,
+  fetchAdminStorageStatus,
   fetchMCPConfig,
   fetchCatalogAssets,
   fetchDesignAccess,
+  fetchDesignGroupAccess,
   fetchSetupStatus,
   fetchSignInConfig,
+  fetchUserAccessSummary,
   fetchUsers,
   fetchWorkspaceAccess,
+  fetchWorkspaceGroupAccess,
   fetchWorkspaceDesign,
   fetchWorkspaceDesigns,
   fetchWorkspaces,
   grantDesignAccess,
+  grantDesignGroupAccess,
   grantWorkspaceAccess,
+  grantWorkspaceGroupAccess,
   login,
   logout,
   markNotificationRead,
+  migrateStorageUsers,
   requestDesignReview,
+  replaceAccessGroupMembers,
   revokeDesignAccess,
+  revokeDesignGroupAccess,
   revokeWorkspaceAccess,
+  revokeWorkspaceGroupAccess,
   saveDesignDocument as saveDesignDocumentToBackend,
   setInitialAdminPassword,
+  testStorageDatabase,
   updateDesignReview,
+  updateDesignVersionStatus,
+  updateAccessGroup,
   updateDesignDoc,
   updateDesignMetadata,
   updateAdminUser,
@@ -104,18 +153,26 @@ import {
   updateCatalogAsset,
   updateMCPConfig,
   updateSignInConfig,
+  type BackendAccessGroup,
+  type BackendAccessGroupMember,
   type BackendAIProviderConfig,
   type BackendCatalogAsset,
   type BackendDesignAccess,
   type BackendDesignComment,
   type BackendDesignDoc,
+  type BackendDesignGroupAccess,
   type BackendDesignReviewRequest,
   type BackendMCPConfig,
   type BackendNotification,
   type BackendProfile,
   type BackendSignInConfig,
+  type BackendStorageStatus,
+  type BackendDesignVersion,
+  type BackendDesignVersionStatus,
+  type BackendUserAccessSummary,
   type BackendUser,
   type BackendWorkspaceAccess,
+  type BackendWorkspaceGroupAccess,
   type DesignAnalysisReport,
 } from './backendApi'
 import { useBackendDesignSync, type BackendWorkspace } from './backendSync'
@@ -134,96 +191,8 @@ import type {
 } from './types'
 import type { BackendDesign } from './backendSync'
 
-type AppRoute =
-  | { screen: 'home' }
-  | { screen: 'admin'; section?: AdminSection }
-  | { screen: 'workspace'; workspaceId: string }
-  | { screen: 'design'; workspaceId: string; designId: string }
-
-type AdminSection =
-  | 'overview'
-  | 'users'
-  | 'access'
-  | 'workspaces'
-  | 'catalog'
-  | 'identity'
-  | 'ai'
-  | 'integrations'
-  | 'security'
-  | 'settings'
 type CanvasMode = 'design' | 'view' | 'comment' | 'journey'
 type ContextPanel = 'inspector' | 'requirements' | 'journey' | 'review'
-
-const adminSectionOrder: AdminSection[] = [
-  'overview',
-  'users',
-  'access',
-  'workspaces',
-  'catalog',
-  'identity',
-  'ai',
-  'integrations',
-  'security',
-  'settings',
-]
-
-const adminSectionCopy: Record<AdminSection, { label: string; description: string; group: string }> = {
-  overview: {
-    label: 'Dashboard',
-    description: 'Deployment health, configuration state, and setup shortcuts.',
-    group: 'Command',
-  },
-  users: {
-    label: 'Users and roles',
-    description: 'Manage people, passwords, roles, and account state.',
-    group: 'Identity',
-  },
-  access: {
-    label: 'Access center',
-    description: 'Workspace and design ACL policy surface.',
-    group: 'Identity',
-  },
-  workspaces: {
-    label: 'Workspaces',
-    description: 'Govern workspace ownership, deletion, and design creation.',
-    group: 'Content',
-  },
-  catalog: {
-    label: 'Enterprise catalog',
-    description: 'Canonical services and infrastructure reused across designs.',
-    group: 'Content',
-  },
-  identity: {
-    label: 'Sign-in and SSO',
-    description: 'Local sign-in, Okta OIDC, claims, and provisioning.',
-    group: 'Security',
-  },
-  ai: {
-    label: 'AI suite',
-    description: 'Central provider for analysis, vision, and future copilots.',
-    group: 'Intelligence',
-  },
-  integrations: {
-    label: 'Integrations',
-    description: 'MCP readiness and future enterprise integration endpoints.',
-    group: 'Platform',
-  },
-  security: {
-    label: 'Security and audit',
-    description: 'Policy posture, audit readiness, and security controls.',
-    group: 'Security',
-  },
-  settings: {
-    label: 'System settings',
-    description: 'Deployment defaults and platform-level configuration.',
-    group: 'Platform',
-  },
-}
-
-const defaultWorkspace: BackendWorkspace = {
-  id: 'guest-workspace',
-  name: 'Guest Workspace',
-}
 
 const RichTextDocEditor = lazy(() =>
   import('./components/RichTextDocEditor').then((module) => ({ default: module.RichTextDocEditor })),
@@ -231,13 +200,15 @@ const RichTextDocEditor = lazy(() =>
 
 type AIConnectionMetadata = BackendAIProviderConfig
 
-type DeleteTarget =
-  | { kind: 'workspace'; workspace: BackendWorkspace }
-  | { kind: 'design'; design: BackendDesign }
-
 type PendingConnector = {
   fromComponentId: string
   toComponentId: string
+}
+
+type CanvasClipboard = {
+  components: DesignComponent[]
+  connectors: DesignConnector[]
+  copiedAt: string
 }
 
 const connectorTypeOptions: Array<{ value: ConnectorType; label: string; description: string }> = [
@@ -249,184 +220,6 @@ const connectorTypeOptions: Array<{ value: ConnectorType; label: string; descrip
   { value: 'model_call', label: 'Model call', description: 'Calls an AI model or inference service.' },
   { value: 'observability_signal', label: 'Observability signal', description: 'Metrics, logs, traces, or audit signals.' },
 ]
-
-function parseRoute(pathname: string): AppRoute {
-  const segments = pathname.split('/').filter(Boolean).map(decodeURIComponent)
-  if (segments[0] === 'workspaces' && segments[1] && segments[2] === 'designs' && segments[3]) {
-    return { screen: 'design', workspaceId: segments[1], designId: segments[3] }
-  }
-  if (segments[0] === 'workspaces' && segments[1]) {
-    return { screen: 'workspace', workspaceId: segments[1] }
-  }
-  if (segments[0] === 'admin') {
-    return { screen: 'admin', section: parseAdminSection(segments[1]) }
-  }
-  return { screen: 'home' }
-}
-
-function routePath(route: AppRoute) {
-  if (route.screen === 'admin') return route.section && route.section !== 'overview' ? `/admin/${route.section}` : '/admin'
-  if (route.screen === 'workspace') return `/workspaces/${encodeURIComponent(route.workspaceId)}`
-  if (route.screen === 'design') {
-    return `/workspaces/${encodeURIComponent(route.workspaceId)}/designs/${encodeURIComponent(route.designId)}`
-  }
-  return '/'
-}
-
-function parseAdminSection(value: string | undefined): AdminSection {
-  if (
-    value === 'users' ||
-    value === 'access' ||
-    value === 'workspaces' ||
-    value === 'catalog' ||
-    value === 'identity' ||
-    value === 'ai' ||
-    value === 'integrations' ||
-    value === 'security' ||
-    value === 'settings'
-  ) {
-    return value
-  }
-  return 'overview'
-}
-
-function isJourneyComponent(component: DesignComponent) {
-  return component.type !== 'frame.cloud' && component.type !== 'note.sticky'
-}
-
-function buildPrimaryJourney(design: DesignDocument): DesignJourney | null {
-  const components = design.components.filter(isJourneyComponent)
-  if (!components.length) return null
-
-  const componentById = new Map(design.components.map((component) => [component.id, component]))
-  const incoming = new Set(design.connectors.map((connector) => connector.toComponentId))
-  const preferredStartTypes: ComponentType[] = ['client.web', 'external.api', 'edge.api_gateway']
-  const start =
-    components.find((component) => !incoming.has(component.id) && preferredStartTypes.includes(component.type)) ??
-    components.find((component) => !incoming.has(component.id)) ??
-    components[0]
-  const now = new Date().toISOString()
-  const steps: DesignJourney['steps'] = []
-  const visitedComponents = new Set<string>()
-  const visitedConnectors = new Set<string>()
-
-  function pushComponentStep(component: DesignComponent, prefix = 'Start') {
-    if (visitedComponents.has(component.id) || steps.length >= 18) return
-    visitedComponents.add(component.id)
-    steps.push({
-      id: `step_${crypto.randomUUID()}`,
-      componentId: component.id,
-      title: component.name || getCatalogItem(component.type).label,
-      description: `${prefix} at ${component.name || getCatalogItem(component.type).label}.`,
-    })
-  }
-
-  function walk(component: DesignComponent) {
-    if (steps.length >= 18) return
-    const outgoing = design.connectors.filter(
-      (connector) => connector.fromComponentId === component.id && !visitedConnectors.has(connector.id),
-    )
-    for (const connector of outgoing) {
-      if (steps.length >= 18) return
-      visitedConnectors.add(connector.id)
-      const target = componentById.get(connector.toComponentId)
-      const sourceName = component.name || getCatalogItem(component.type).label
-      const targetName = target ? target.name || getCatalogItem(target.type).label : 'unknown target'
-      steps.push({
-        id: `step_${crypto.randomUUID()}`,
-        componentId: target?.id,
-        connectorId: connector.id,
-        title: `${sourceName} to ${targetName}`,
-        description: `${sourceName} sends ${connector.type.replaceAll('_', ' ')} traffic to ${targetName}${
-          connector.protocol ? ` over ${connector.protocol}` : ''
-        }.`,
-      })
-      if (target && isJourneyComponent(target) && !visitedComponents.has(target.id)) {
-        visitedComponents.add(target.id)
-        walk(target)
-      }
-    }
-  }
-
-  pushComponentStep(start)
-  walk(start)
-
-  if (steps.length === 1 && design.connectors.length) {
-    const firstConnector = design.connectors[0]
-    const source = componentById.get(firstConnector.fromComponentId)
-    const target = componentById.get(firstConnector.toComponentId)
-    steps.push({
-      id: `step_${crypto.randomUUID()}`,
-      componentId: target?.id,
-      connectorId: firstConnector.id,
-      title: `${source?.name ?? 'Source'} to ${target?.name ?? 'Target'}`,
-      description: `${source?.name ?? 'Source'} sends ${firstConnector.type.replaceAll('_', ' ')} traffic to ${
-        target?.name ?? 'target'
-      }.`,
-    })
-  }
-
-  return {
-    id: `journey_${crypto.randomUUID()}`,
-    title: design.requirementBrief.useCase.trim() ? `${design.requirementBrief.useCase.trim()} journey` : 'Primary request journey',
-    description: 'Ordered walkthrough generated from the current component graph. Refine the step text as the design matures.',
-    entryComponentId: start.id,
-    steps,
-    createdAt: now,
-    updatedAt: now,
-  }
-}
-
-function stripHtml(value: string) {
-  return value
-    .replace(/<style[\s\S]*?<\/style>/gi, '')
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-function isBackendOfflineMessage(message: string) {
-  const normalized = message.toLowerCase()
-  return normalized.includes('backend unavailable') || normalized.includes('load failed') || normalized.includes('failed to fetch')
-}
-
-function normalizedCatalogLabel(value: string) {
-  return value.trim().toLowerCase().replace(/\s+/g, ' ')
-}
-
-function isPotentialCatalogMatch(left: string, right: string) {
-  const normalizedLeft = normalizedCatalogLabel(left)
-  const normalizedRight = normalizedCatalogLabel(right)
-  return Boolean(
-    normalizedLeft &&
-      normalizedRight &&
-      (normalizedLeft === normalizedRight || normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft)),
-  )
-}
-
-function CatalogGlyph({ type }: { type: ComponentType }) {
-  if (type === 'client.web') return <Monitor size={17} />
-  if (type === 'edge.api_gateway') return <Route size={17} />
-  if (type === 'data.sql_database' || type === 'data.redis' || type === 'data.object_store') return <Database size={17} />
-  if (type === 'messaging.queue') return <ChevronsLeftRight size={17} />
-  if (type === 'ai.llm') return <Sparkles size={17} />
-  if (type === 'external.api') return <Globe2 size={17} />
-  if (type === 'observability.telemetry') return <Activity size={17} />
-  if (type === 'security.control') return <ShieldCheck size={17} />
-  if (type === 'design.link') return <FilePlus2 size={17} />
-  if (type === 'frame.cloud') return <Cloud size={17} />
-  if (type === 'note.sticky') return <MessageSquare size={17} />
-  return <Server size={17} />
-}
-
-function isCatalogComponentType(type: string): type is ComponentType {
-  return componentCatalog.some((item) => item.type === type)
-}
-
-function catalogAssetUsageLabel(count: number) {
-  return `${count} design${count === 1 ? '' : 's'}`
-}
 
 export function App() {
   const initialRoute = parseRoute(window.location.pathname)
@@ -449,6 +242,7 @@ export function App() {
   const [authAction, setAuthAction] = useState<'idle' | 'saving' | 'error'>('idle')
   const [authError, setAuthError] = useState<string | null>(null)
   const [adminError, setAdminError] = useState<string | null>(null)
+  const [storageStatus, setStorageStatus] = useState<BackendStorageStatus | null>(null)
   const [signInConfig, setSignInConfig] = useState<BackendSignInConfig | null>(null)
   const [mcpConfig, setMCPConfig] = useState<BackendMCPConfig | null>(null)
   const [catalogAssets, setCatalogAssets] = useState<BackendCatalogAsset[]>([])
@@ -461,17 +255,32 @@ export function App() {
   const [homeDesigns, setHomeDesigns] = useState<BackendDesign[]>([])
   const [newWorkspaceName, setNewWorkspaceName] = useState('')
   const [homeError, setHomeError] = useState<string | null>(null)
-  const [homeAction, setHomeAction] = useState<'workspace' | 'design' | 'delete-workspace' | 'delete-design' | null>(null)
+  const [homeAction, setHomeAction] = useState<'workspace' | 'design' | 'delete-workspace' | 'delete-design' | 'delete-version' | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
+  const [cloneTarget, setCloneTarget] = useState<BackendDesign | null>(null)
+  const [cloneVersions, setCloneVersions] = useState<BackendDesignVersion[]>([])
+  const [cloneVersionId, setCloneVersionId] = useState('current')
+  const [cloneTitle, setCloneTitle] = useState('')
+  const [cloneState, setCloneState] = useState<'idle' | 'loading' | 'cloning' | 'error'>('idle')
+  const [cloneError, setCloneError] = useState<string | null>(null)
   const [deletedDesignIds, setDeletedDesignIds] = useState<Set<string>>(() => new Set())
   const [newDesignBriefOpen, setNewDesignBriefOpen] = useState(false)
   const [newDesignTitle, setNewDesignTitle] = useState('Untitled system design')
   const [newDesignBrief, setNewDesignBrief] = useState<RequirementBrief>(() => createEmptyRequirementBrief())
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const [versionState, setVersionState] = useState<'idle' | 'loading' | 'saving' | 'saved' | 'error'>('idle')
+  const [designVersions, setDesignVersions] = useState<BackendDesignVersion[]>([])
+  const [saveDialogOpen, setSaveDialogOpen] = useState(false)
+  const [saveVersionMode, setSaveVersionMode] = useState<'override' | 'new'>('override')
+  const [saveRemarks, setSaveRemarks] = useState('')
   const [design, setDesign] = useState<DesignDocument>(() => touchDesign(loadDesignDocument() ?? createEmptyDesign()))
   const [designName, setDesignName] = useState(() => loadDesignDocument()?.title ?? 'Untitled system design')
   const [selectedComponentId, setSelectedComponentId] = useState<string | null>(null)
   const [selectedConnectorId, setSelectedConnectorId] = useState<string | null>(null)
+  const [selectedComponentIds, setSelectedComponentIds] = useState<Set<string>>(() => new Set())
+  const [selectedConnectorIds, setSelectedConnectorIds] = useState<Set<string>>(() => new Set())
+  const [canvasClipboard, setCanvasClipboard] = useState<CanvasClipboard | null>(null)
+  const pasteCountRef = useRef(0)
   const [pendingConnector, setPendingConnector] = useState<PendingConnector | null>(null)
   const [rightRailOpen, setRightRailOpen] = useState(true)
   const [contextPanel, setContextPanel] = useState<ContextPanel>('requirements')
@@ -494,6 +303,8 @@ export function App() {
   const [commentDraft, setCommentDraft] = useState('')
   const [reviewSummaryDrafts, setReviewSummaryDrafts] = useState<Record<string, string>>({})
   const [requestReviewOpen, setRequestReviewOpen] = useState(false)
+  const [requestReviewVersion, setRequestReviewVersion] = useState<BackendDesignVersion | null>(null)
+  const [versionPreview, setVersionPreview] = useState<{ version: BackendDesignVersion; document: DesignDocument } | null>(null)
   const [collaborationState, setCollaborationState] = useState<'idle' | 'loading' | 'saving' | 'error'>('idle')
   const [collaborationError, setCollaborationError] = useState<string | null>(null)
   const [collaborationOffline, setCollaborationOffline] = useState(false)
@@ -504,17 +315,20 @@ export function App() {
   const designNameRef = useRef(designName)
   const autosaveTimer = useRef<number | null>(null)
   const hydratedRouteDesignRef = useRef<string | null>(null)
+  const canvasDesign = versionPreview?.document ?? design
   const selectedComponent = useMemo(
-    () => design.components.find((component) => component.id === selectedComponentId) ?? null,
-    [design.components, selectedComponentId],
+    () => canvasDesign.components.find((component) => component.id === selectedComponentId) ?? null,
+    [canvasDesign.components, selectedComponentId],
   )
   const selectedConnector = useMemo(
-    () => design.connectors.find((connector) => connector.id === selectedConnectorId) ?? null,
-    [design.connectors, selectedConnectorId],
+    () => canvasDesign.connectors.find((connector) => connector.id === selectedConnectorId) ?? null,
+    [canvasDesign.connectors, selectedConnectorId],
   )
+  const selectedComponentIdList = useMemo(() => [...selectedComponentIds], [selectedComponentIds])
+  const selectedConnectorIdList = useMemo(() => [...selectedConnectorIds], [selectedConnectorIds])
   const activeJourney = useMemo(
-    () => design.journeys?.find((journey) => journey.id === activeJourneyId) ?? null,
-    [activeJourneyId, design.journeys],
+    () => canvasDesign.journeys?.find((journey) => journey.id === activeJourneyId) ?? null,
+    [activeJourneyId, canvasDesign.journeys],
   )
   const filteredCatalogAssets = useMemo(() => {
     const query = normalizedCatalogLabel(catalogSearch)
@@ -550,7 +364,7 @@ export function App() {
       activeConnectorId: activeStep?.connectorId ?? null,
     }
   }, [activeJourney, activeJourneyStepIndex, canvasMode])
-  const isCanvasReadOnly = canvasMode !== 'design'
+  const isCanvasReadOnly = canvasMode !== 'design' || Boolean(versionPreview)
 
   useEffect(() => {
     designRef.current = design
@@ -561,10 +375,10 @@ export function App() {
   }, [designName])
 
   useEffect(() => {
-    if (activeJourneyId && design.journeys.some((journey) => journey.id === activeJourneyId)) return
-    setActiveJourneyId(design.journeys[0]?.id ?? null)
+    if (activeJourneyId && canvasDesign.journeys.some((journey) => journey.id === activeJourneyId)) return
+    setActiveJourneyId(canvasDesign.journeys[0]?.id ?? null)
     setActiveJourneyStepIndex(0)
-  }, [activeJourneyId, design.journeys])
+  }, [activeJourneyId, canvasDesign.journeys])
 
   useEffect(() => {
     if (!activeJourney) return
@@ -584,6 +398,7 @@ export function App() {
       try {
         const setup = await fetchSetupStatus()
         if (cancelled) return
+        if (setup.storage) setStorageStatus(setup.storage)
         setSetupRequired(setup.requiresSetup)
         setPasswordSetupRequired(setup.requiresPasswordSetup)
         if (setup.requiresSetup || setup.requiresPasswordSetup) {
@@ -601,6 +416,7 @@ export function App() {
         ])
         if (cancelled) return
         setHomeProfile(profile)
+        if (profile.storage) setStorageStatus(profile.storage)
         setActiveUserId(profile.id)
         setAuthenticated(true)
         setUsers(userResponse.users)
@@ -658,6 +474,33 @@ export function App() {
     }
 
     void loadDesignDocs()
+    return () => {
+      cancelled = true
+    }
+  }, [activeWorkspaceId, selectedDesignId])
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadVersions() {
+      if (!selectedDesignId) {
+        setDesignVersions([])
+        setVersionState('idle')
+        return
+      }
+      setVersionState('loading')
+      try {
+        const response = await fetchDesignVersions(activeWorkspaceId, selectedDesignId)
+        if (cancelled) return
+        setDesignVersions(response.versions)
+        setVersionState('idle')
+      } catch (error) {
+        if (cancelled) return
+        console.warn('Could not load design versions', error)
+        setDesignVersions([])
+        setVersionState('error')
+      }
+    }
+    void loadVersions()
     return () => {
       cancelled = true
     }
@@ -765,9 +608,25 @@ export function App() {
       ) {
         return
       }
+      const isCopy = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c'
+      const isPaste = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'v'
+      if (isCopy) {
+        if (copyCanvasSelection()) event.preventDefault()
+        return
+      }
+      if (isPaste) {
+        if (pasteCanvasSelection()) event.preventDefault()
+        return
+      }
       if (event.key !== 'Delete' && event.key !== 'Backspace') return
       if (isCanvasReadOnly) return
-      if (selectedComponentId) {
+      if (selectedComponentIds.size) {
+        event.preventDefault()
+        deleteComponents([...selectedComponentIds])
+      } else if (selectedConnectorIds.size) {
+        event.preventDefault()
+        deleteConnectors([...selectedConnectorIds])
+      } else if (selectedComponentId) {
         event.preventDefault()
         deleteComponents([selectedComponentId])
       } else if (selectedConnectorId) {
@@ -778,7 +637,7 @@ export function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [isCanvasReadOnly, selectedComponentId, selectedConnectorId])
+  }, [canvasClipboard, isCanvasReadOnly, selectedComponentId, selectedComponentIds, selectedConnectorId, selectedConnectorIds])
 
   function updateDesign(updater: (current: DesignDocument) => DesignDocument) {
     setDesign((current) => {
@@ -786,6 +645,141 @@ export function App() {
       designRef.current = nextDesign
       return nextDesign
     })
+  }
+
+  function sameIds(current: Set<string>, next: string[]) {
+    if (current.size !== next.length) return false
+    return next.every((id) => current.has(id))
+  }
+
+  function handleCanvasSelectionChange(componentIds: string[], connectorIds: string[]) {
+    const nextComponentId = componentIds.length === 1 && connectorIds.length === 0 ? componentIds[0] : null
+    const nextConnectorId = connectorIds.length === 1 && componentIds.length === 0 ? connectorIds[0] : null
+    if (
+      sameIds(selectedComponentIds, componentIds) &&
+      sameIds(selectedConnectorIds, connectorIds) &&
+      selectedComponentId === nextComponentId &&
+      selectedConnectorId === nextConnectorId
+    ) {
+      return
+    }
+    setSelectedComponentIds(new Set(componentIds))
+    setSelectedConnectorIds(new Set(connectorIds))
+    setSelectedComponentId(nextComponentId)
+    setSelectedConnectorId(nextConnectorId)
+  }
+
+  function getComponentAbsolutePosition(component: DesignComponent, components = designRef.current.components) {
+    const position = component.metadata.position ?? { x: 0, y: 0 }
+    const parentFrameId = component.metadata.parentFrameId
+    if (!parentFrameId) return position
+    const parent = components.find((item) => item.id === parentFrameId)
+    const parentPosition = parent?.metadata.position ?? { x: 0, y: 0 }
+    return {
+      x: parentPosition.x + position.x,
+      y: parentPosition.y + position.y,
+    }
+  }
+
+  function copyCanvasSelection() {
+    const selectedIds = new Set(selectedComponentIds)
+    if (!selectedIds.size && selectedComponentId) selectedIds.add(selectedComponentId)
+    const components = designRef.current.components
+      .filter((component) => selectedIds.has(component.id))
+      .map((component) => {
+        const parentFrameId = component.metadata.parentFrameId
+        if (!parentFrameId || selectedIds.has(parentFrameId)) return component
+        return {
+          ...component,
+          metadata: {
+            ...component.metadata,
+            position: getComponentAbsolutePosition(component),
+            parentFrameId: undefined,
+          },
+        }
+      })
+    if (!components.length) return false
+    const connectorIds = new Set(selectedConnectorIds)
+    const connectors = designRef.current.connectors.filter(
+      (connector) =>
+        (selectedIds.has(connector.fromComponentId) && selectedIds.has(connector.toComponentId)) ||
+        connectorIds.has(connector.id),
+    )
+    setCanvasClipboard({
+      components,
+      connectors: connectors.filter((connector) => selectedIds.has(connector.fromComponentId) && selectedIds.has(connector.toComponentId)),
+      copiedAt: new Date().toISOString(),
+    })
+    return true
+  }
+
+  function cloneComponentForPaste(
+    component: DesignComponent,
+    idMap: Map<string, string>,
+    selectedOriginalIds: Set<string>,
+    offset: { x: number; y: number },
+    allCopiedComponents: DesignComponent[],
+  ): DesignComponent {
+    const newId = idMap.get(component.id) ?? `cmp_${crypto.randomUUID()}`
+    const originalParentId = component.metadata.parentFrameId
+    const mappedParentId = originalParentId ? idMap.get(originalParentId) : undefined
+    const originalAbsolutePosition = getComponentAbsolutePosition(component, allCopiedComponents)
+    const nextPosition = mappedParentId
+      ? component.metadata.position ?? { x: 0, y: 0 }
+      : {
+          x: originalAbsolutePosition.x + offset.x,
+          y: originalAbsolutePosition.y + offset.y,
+        }
+    return {
+      ...component,
+      id: newId,
+      shapeId: `rf:${crypto.randomUUID()}`,
+      metadata: {
+        ...component.metadata,
+        position: nextPosition,
+        parentFrameId: mappedParentId && selectedOriginalIds.has(originalParentId ?? '') ? mappedParentId : undefined,
+      },
+      notes: component.notes.map((note) => ({ ...note, id: `note_${crypto.randomUUID()}` })),
+    }
+  }
+
+  function pasteCanvasSelection() {
+    if (isCanvasReadOnly || !canvasClipboard?.components.length) return false
+    pasteCountRef.current += 1
+    const selectedOriginalIds = new Set(canvasClipboard.components.map((component) => component.id))
+    const idMap = new Map(canvasClipboard.components.map((component) => [component.id, `cmp_${crypto.randomUUID()}`]))
+    const offset = {
+      x: 48 + pasteCountRef.current * 18,
+      y: 48 + pasteCountRef.current * 18,
+    }
+    const pastedComponents = canvasClipboard.components.map((component) =>
+      cloneComponentForPaste(component, idMap, selectedOriginalIds, offset, canvasClipboard.components),
+    )
+    const pastedConnectors = canvasClipboard.connectors.flatMap((connector) => {
+      const fromComponentId = idMap.get(connector.fromComponentId)
+      const toComponentId = idMap.get(connector.toComponentId)
+      if (!fromComponentId || !toComponentId) return []
+      return [{
+        ...connector,
+        id: `conn_${crypto.randomUUID()}`,
+        shapeId: `rf:${crypto.randomUUID()}`,
+        fromComponentId,
+        toComponentId,
+      }]
+    })
+    updateDesign((current) => ({
+      ...current,
+      components: [...current.components, ...pastedComponents],
+      connectors: [...current.connectors, ...pastedConnectors],
+    }))
+    const nextSelectedIds = new Set(pastedComponents.map((component) => component.id))
+    setSelectedComponentIds(nextSelectedIds)
+    setSelectedConnectorIds(new Set())
+    setSelectedComponentId(pastedComponents.length === 1 ? pastedComponents[0].id : null)
+    setSelectedConnectorId(null)
+    setContextPanel('inspector')
+    setRightRailOpen(true)
+    return true
   }
 
   function renameDesign(value: string) {
@@ -826,12 +820,28 @@ export function App() {
     }
   }
 
+  function cloneDesignDocumentForFork(sourceDocument: unknown, nextDesignId: string, nextTitle: string): DesignDocument {
+    const source = normalizeDesignDocument(sourceDocument as DesignDocument)
+    return touchDesign({
+      ...source,
+      id: nextDesignId,
+      title: nextTitle,
+      requirementBrief: createEmptyRequirementBrief(source.requirementBrief),
+      components: source.components ?? [],
+      connectors: source.connectors ?? [],
+      journeys: source.journeys ?? [],
+    })
+  }
+
   function loadDesignIntoWorkspace(nextDesign: DesignDocument, metadataName?: string) {
     const normalizedDesign = normalizeDesignDocument(nextDesign)
+    setVersionPreview(null)
     setDesign(normalizedDesign)
     setDesignName(metadataName || normalizedDesign.title || 'Untitled system design')
     setSelectedComponentId(null)
     setSelectedConnectorId(null)
+    setSelectedComponentIds(new Set())
+    setSelectedConnectorIds(new Set())
     setActiveJourneyId(normalizedDesign.journeys[0]?.id ?? null)
     setActiveJourneyStepIndex(0)
     saveDesignDocument(normalizedDesign)
@@ -840,10 +850,12 @@ export function App() {
   function persistDesignToRealtime() {
     const currentDesign = designRef.current
     saveDesignDocument(currentDesign)
-    return Boolean(selectedDesignId && backendSync.saveDesign(currentDesign))
+    const saved = Boolean(selectedDesignId && backendSync.saveDesign(currentDesign))
+    if (saved) markCurrentVersionDraft()
+    return saved
   }
 
-  async function persistDesignToBackend() {
+  async function persistDesignToBackend(versionRemarks = '') {
     const currentDesign = designRef.current
     saveDesignDocument(currentDesign)
     if (!selectedDesignId) return false
@@ -852,10 +864,12 @@ export function App() {
     try {
       const response = await saveDesignDocumentToBackend(activeWorkspaceId, selectedDesignId, {
         document: currentDesign,
+        versionRemarks,
       })
       setHomeDesigns((current) =>
         current.map((backendDesign) => (backendDesign.id === response.design.id ? response.design : backendDesign)),
       )
+      markCurrentVersionDraft(response.design.versionNumber, response.design.updatedAt)
       setSaveState('saved')
       window.setTimeout(() => setSaveState('idle'), 1400)
       return true
@@ -865,6 +879,117 @@ export function App() {
       setSaveState('error')
       return false
     }
+  }
+
+  async function createManualVersion(remarks = '') {
+    if (!selectedDesignId) return false
+    const saved = await persistDesignToBackend()
+    if (!saved) return false
+    setVersionState('saving')
+    try {
+      const response = await createDesignVersion(activeWorkspaceId, selectedDesignId, remarks)
+      setDesignVersions((current) => [response.version, ...current.filter((version) => version.id !== response.version.id)])
+      setHomeDesigns((current) =>
+        current.map((backendDesign) =>
+          backendDesign.id === selectedDesignId
+            ? { ...backendDesign, versionNumber: response.version.versionNumber, updatedAt: response.version.updatedAt }
+            : backendDesign,
+        ),
+      )
+      setVersionState('saved')
+      window.setTimeout(() => setVersionState('idle'), 1400)
+      return true
+    } catch (error) {
+      console.warn('Could not create design version', error)
+      setHomeError(error instanceof Error ? error.message : 'Could not create version')
+      setVersionState('error')
+      return false
+    }
+  }
+
+  async function saveDesignFromDialog() {
+    const remarks = saveRemarks.trim()
+    const saved = saveVersionMode === 'new'
+      ? await createManualVersion(remarks)
+      : await persistDesignToBackend(remarks)
+    if (!saved) return
+    setSaveDialogOpen(false)
+    setSaveRemarks('')
+  }
+
+  async function changeVersionStatus(versionId: string, status: BackendDesignVersionStatus) {
+    if (!selectedDesignId) return
+    setVersionState('saving')
+    try {
+      const response = await updateDesignVersionStatus(activeWorkspaceId, selectedDesignId, versionId, status)
+      setDesignVersions((current) =>
+        current.map((version) => {
+          if (version.id === response.version.id) return response.version
+          if (status === 'live' && version.status === 'live') return { ...version, status: 'reviewed' }
+          return version
+        }),
+      )
+      setVersionState('saved')
+      window.setTimeout(() => setVersionState('idle'), 1400)
+    } catch (error) {
+      console.warn('Could not update design version', error)
+      setHomeError(error instanceof Error ? error.message : 'Could not update version')
+      setVersionState('error')
+    }
+  }
+
+  function markVersionReadyForReview(versionId: string) {
+    const targetVersion = designVersions.find((version) => version.id === versionId) ?? null
+    if (!targetVersion) {
+      setHomeError('Could not find the selected version.')
+      return
+    }
+    setRequestReviewVersion(targetVersion)
+    setCanvasMode('comment')
+    setContextPanel('review')
+    setRightRailOpen(true)
+    setRequestReviewOpen(true)
+  }
+
+  function requestDeleteVersion(versionId: string) {
+    const targetVersion = designVersions.find((version) => version.id === versionId)
+    if (!targetVersion) {
+      setHomeError('Could not find the selected version.')
+      return
+    }
+    setHomeError(null)
+    setDeleteTarget({ kind: 'version', version: targetVersion })
+  }
+
+  function viewVersion(version: BackendDesignVersion) {
+    const previewDocument = normalizeDesignDocument(version.document as DesignDocument)
+    setVersionPreview({ version, document: previewDocument })
+    setCanvasMode('view')
+    setSelectedComponentId(null)
+    setSelectedConnectorId(null)
+    setSelectedComponentIds(new Set())
+    setSelectedConnectorIds(new Set())
+    setActiveJourneyId(previewDocument.journeys[0]?.id ?? null)
+    setActiveJourneyStepIndex(0)
+  }
+
+  function exitVersionPreview() {
+    setVersionPreview(null)
+    setActiveJourneyId(designRef.current.journeys[0]?.id ?? null)
+    setActiveJourneyStepIndex(0)
+  }
+
+  function markCurrentVersionDraft(versionNumber?: number, updatedAt = new Date().toISOString()) {
+    const currentVersionNumber =
+      versionNumber ?? homeDesigns.find((backendDesign) => backendDesign.id === selectedDesignId)?.versionNumber ?? 0
+    if (currentVersionNumber <= 0) return
+    setDesignVersions((current) =>
+      current.map((version) =>
+        version.versionNumber === currentVersionNumber && version.status !== 'live'
+          ? { ...version, status: 'draft', updatedAt }
+          : version,
+      ),
+    )
   }
 
   function scheduleAutosave() {
@@ -926,12 +1051,67 @@ export function App() {
     }
   }
 
+  async function requestCloneDesign(sourceDesign: BackendDesign) {
+    if (homeAction || cloneState === 'cloning') return
+    setCloneTarget(sourceDesign)
+    setCloneTitle(`${sourceDesign.name || sourceDesign.document.title || 'Untitled design'} Copy`)
+    setCloneVersionId('current')
+    setCloneVersions([])
+    setCloneError(null)
+    setCloneState('loading')
+    try {
+      const response = await fetchDesignVersions(sourceDesign.workspaceId, sourceDesign.id)
+      const versions = response.versions
+      setCloneVersions(versions)
+      const preferredVersion = versions.find((version) => version.status === 'live') ?? versions[0]
+      setCloneVersionId(preferredVersion?.id ?? 'current')
+      setCloneState('idle')
+    } catch (error) {
+      setCloneVersions([])
+      setCloneVersionId('current')
+      setCloneError(error instanceof Error ? error.message : 'Could not load versions for cloning')
+      setCloneState('error')
+    }
+  }
+
+  async function confirmCloneDesign() {
+    if (!cloneTarget || cloneState === 'cloning') return
+    const title = cloneTitle.trim() || `${cloneTarget.name || cloneTarget.document.title || 'Untitled design'} Copy`
+    const selectedVersion = cloneVersions.find((version) => version.id === cloneVersionId)
+    const sourceDocument = selectedVersion?.document ?? cloneTarget.document
+    try {
+      setCloneState('cloning')
+      setCloneError(null)
+      const created = await createDesign(cloneTarget.workspaceId, title, null)
+      const clonedDocument = cloneDesignDocumentForFork(sourceDocument, created.design.id, title)
+      const saved = await saveDesignDocumentToBackend(created.design.workspaceId, created.design.id, {
+        document: clonedDocument,
+        versionRemarks: selectedVersion
+          ? `Cloned from ${cloneTarget.name || cloneTarget.document.title || 'design'} v${selectedVersion.versionNumber}`
+          : `Cloned from ${cloneTarget.name || cloneTarget.document.title || 'design'}`,
+      })
+      setHomeDesigns((current) => [saved.design, ...current.filter((designItem) => designItem.id !== saved.design.id)])
+      setCloneTarget(null)
+      setCloneVersions([])
+      setCloneVersionId('current')
+      setCloneTitle('')
+      setCloneState('idle')
+      loadDesignIntoWorkspace(saved.design.document, saved.design.name)
+      hydratedRouteDesignRef.current = `${saved.design.workspaceId}/${saved.design.id}`
+      applyRoute({ screen: 'design', workspaceId: saved.design.workspaceId, designId: saved.design.id })
+    } catch (error) {
+      setCloneError(error instanceof Error ? error.message : 'Could not clone design')
+      setCloneState('error')
+    }
+  }
+
   async function refreshHome(workspaceId: string) {
     try {
       setHomeError(null)
       const [profile, workspaces] = await Promise.all([fetchProfile(), fetchWorkspaces()])
       const nextWorkspaces = workspaces.workspaces.length ? workspaces.workspaces : [defaultWorkspace]
       setHomeProfile(profile)
+      if (profile.storage) setStorageStatus(profile.storage)
       setHomeWorkspaces(nextWorkspaces)
       const selectedWorkspace = nextWorkspaces.some((workspace) => workspace.id === workspaceId)
         ? workspaceId
@@ -1018,12 +1198,13 @@ export function App() {
 
   async function refreshAdmin() {
     setAdminError(null)
-    const [userResponse, signInResponse, aiProviderResponse, mcpResponse, catalogResponse] = await Promise.allSettled([
+    const [userResponse, signInResponse, aiProviderResponse, mcpResponse, catalogResponse, storageResponse] = await Promise.allSettled([
       fetchUsers(),
       fetchSignInConfig(),
       fetchAIProviderConfig(),
       fetchMCPConfig(),
       fetchCatalogAssets(),
+      fetchAdminStorageStatus(),
     ] as const)
     const criticalFailure = [userResponse, signInResponse, aiProviderResponse, catalogResponse].find((result) => result.status === 'rejected')
     if (criticalFailure?.status === 'rejected') {
@@ -1034,6 +1215,7 @@ export function App() {
     if (aiProviderResponse.status === 'fulfilled') setAIConnection(aiProviderResponse.value.aiProvider)
     if (mcpResponse.status === 'fulfilled') setMCPConfig(mcpResponse.value.mcp)
     if (catalogResponse.status === 'fulfilled') setCatalogAssets(catalogResponse.value.assets)
+    if (storageResponse.status === 'fulfilled') setStorageStatus(storageResponse.value.storage)
   }
 
   async function addCatalogAsset(input: {
@@ -1143,6 +1325,40 @@ export function App() {
     }
   }
 
+  async function refreshStorage() {
+    setAdminError(null)
+    try {
+      const response = await fetchAdminStorageStatus()
+      setStorageStatus(response.storage)
+      return response.storage
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : 'Could not load storage settings')
+      throw error
+    }
+  }
+
+  async function testDatabaseStorage(databaseUrl: string) {
+    setAdminError(null)
+    const response = await testStorageDatabase(databaseUrl)
+    setStorageStatus(response.storage)
+    return response
+  }
+
+  async function configureDatabaseStorage(databaseUrl: string) {
+    setAdminError(null)
+    const response = await configureStorageDatabase(databaseUrl)
+    setStorageStatus(response.storage)
+    return response.storage
+  }
+
+  async function migrateCachedUsersToDatabase() {
+    setAdminError(null)
+    const response = await migrateStorageUsers()
+    setStorageStatus(response.storage)
+    await refreshHome(activeWorkspaceId)
+    return response
+  }
+
   async function refreshNotifications() {
     try {
       const response = await fetchNotifications()
@@ -1204,15 +1420,30 @@ export function App() {
     }
   }
 
-  async function submitReviewRequest(reviewerId: string, message: string) {
-    if (!selectedDesignId) return
+  async function submitReviewRequest(reviewerIds: string[], message: string) {
+    if (!selectedDesignId || !reviewerIds.length) return
+    const reviewVersion = requestReviewVersion ?? versionPreview?.version ?? designVersions[0]
+    if (!reviewVersion) {
+      setCollaborationError('Create or save a design version before requesting review')
+      return
+    }
     setCollaborationState('saving')
     setCollaborationError(null)
     setCollaborationOffline(false)
     try {
-      const response = await requestDesignReview(activeWorkspaceId, selectedDesignId, { reviewerId, message })
-      setReviews((current) => [response.review, ...current])
+      const response = await requestDesignReview(activeWorkspaceId, selectedDesignId, {
+        versionId: reviewVersion.id,
+        reviewerIds,
+        message,
+      })
+      setReviews((current) => [
+        ...response.reviews,
+        ...current.filter((review) => !response.reviews.some((item) => item.id === review.id)),
+      ])
+      const versionResponse = await fetchDesignVersions(activeWorkspaceId, selectedDesignId)
+      setDesignVersions(versionResponse.versions)
       setRequestReviewOpen(false)
+      setRequestReviewVersion(null)
       setCollaborationState('idle')
       await refreshNotifications()
     } catch (error) {
@@ -1234,6 +1465,9 @@ export function App() {
       })
       setReviews((current) => current.map((review) => (review.id === response.review.id ? response.review : review)))
       setReviewSummaryDrafts((current) => ({ ...current, [reviewId]: response.review.summary }))
+      if (response.review.versionId) {
+        void fetchDesignVersions(activeWorkspaceId, selectedDesignId).then((versionResponse) => setDesignVersions(versionResponse.versions))
+      }
       setCollaborationState('idle')
       await refreshNotifications()
     } catch (error) {
@@ -1320,6 +1554,31 @@ export function App() {
         return
       }
 
+      if (deleteTarget.kind === 'version') {
+        if (!selectedDesignId) return
+        setHomeAction('delete-version')
+        await deleteDesignVersionFromBackend(activeWorkspaceId, selectedDesignId, deleteTarget.version.id)
+        const nextVersions = designVersions.filter((version) => version.id !== deleteTarget.version.id)
+        setDesignVersions(nextVersions)
+        setReviews((current) => current.filter((review) => review.versionId !== deleteTarget.version.id))
+        setHomeDesigns((current) =>
+          current.map((designItem) =>
+            designItem.id === selectedDesignId
+              ? { ...designItem, versionNumber: nextVersions[0]?.versionNumber ?? 0, updatedAt: new Date().toISOString() }
+              : designItem,
+          ),
+        )
+        if (versionPreview?.version.id === deleteTarget.version.id) {
+          exitVersionPreview()
+        }
+        if (requestReviewVersion?.id === deleteTarget.version.id) {
+          setRequestReviewVersion(null)
+          setRequestReviewOpen(false)
+        }
+        setDeleteTarget(null)
+        return
+      }
+
       setHomeAction('delete-design')
       await deleteDesignFromBackend(deleteTarget.design.workspaceId, deleteTarget.design.id)
       setDeletedDesignIds((current) => new Set(current).add(deleteTarget.design.id))
@@ -1383,7 +1642,9 @@ export function App() {
       components: [...current.components, component],
     }))
     setSelectedComponentId(component.id)
+    setSelectedComponentIds(new Set([component.id]))
     setSelectedConnectorId(null)
+    setSelectedConnectorIds(new Set())
   }
 
   function createReactFlowCatalogAsset(asset: BackendCatalogAsset, position: { x: number; y: number }) {
@@ -1418,7 +1679,9 @@ export function App() {
       components: [...current.components, component],
     }))
     setSelectedComponentId(component.id)
+    setSelectedComponentIds(new Set([component.id]))
     setSelectedConnectorId(null)
+    setSelectedConnectorIds(new Set())
     setContextPanel('inspector')
     setRightRailOpen(true)
   }
@@ -1486,7 +1749,9 @@ export function App() {
         notes: component.notes.map((note) => ({ ...note, id: `note_${crypto.randomUUID()}` })),
       }
       setSelectedComponentId(copy.id)
+      setSelectedComponentIds(new Set([copy.id]))
       setSelectedConnectorId(null)
+      setSelectedConnectorIds(new Set())
       return {
         ...current,
         components: [...current.components, copy],
@@ -1530,6 +1795,8 @@ export function App() {
       }
     })
     setSelectedComponentId(null)
+    setSelectedComponentIds(new Set())
+    setSelectedConnectorIds(new Set())
   }
 
   function completePendingConnector(type: ConnectorType) {
@@ -1563,6 +1830,8 @@ export function App() {
     })
     if (selectedComponentId && ids.has(selectedComponentId)) setSelectedComponentId(null)
     setSelectedConnectorId(null)
+    setSelectedComponentIds((current) => new Set([...current].filter((componentId) => !ids.has(componentId))))
+    setSelectedConnectorIds(new Set())
   }
 
   function updateConnectorFromInspector(connector: DesignConnector) {
@@ -1582,7 +1851,9 @@ export function App() {
       ),
     }))
     setSelectedConnectorId(connectorId)
+    setSelectedConnectorIds(new Set([connectorId]))
     setSelectedComponentId(null)
+    setSelectedComponentIds(new Set())
   }
 
   function deleteConnectors(connectorIds: string[]) {
@@ -1597,6 +1868,7 @@ export function App() {
       })),
     }))
     if (selectedConnectorId && ids.has(selectedConnectorId)) setSelectedConnectorId(null)
+    setSelectedConnectorIds((current) => new Set([...current].filter((connectorId) => !ids.has(connectorId))))
   }
 
   function createPrimaryJourney() {
@@ -1614,6 +1886,8 @@ export function App() {
     setCanvasMode('journey')
     setSelectedComponentId(null)
     setSelectedConnectorId(null)
+    setSelectedComponentIds(new Set())
+    setSelectedConnectorIds(new Set())
   }
 
   function updateJourney(journey: DesignJourney) {
@@ -1721,7 +1995,8 @@ export function App() {
   }
 
   function saveDraft() {
-    void persistDesignToBackend()
+    setSaveVersionMode(designVersions.length ? 'override' : 'new')
+    setSaveDialogOpen(true)
   }
 
   function openAnalysisModal(options: { run?: boolean } = {}) {
@@ -1820,9 +2095,10 @@ export function App() {
             onWorkspace={() => applyRoute({ screen: 'workspace', workspaceId: activeWorkspaceId })}
             onSelectDesign={selectBackendDesign}
             onAdmin={() => applyRoute({ screen: 'admin' })}
-            onOpenNotifications={() => setNotificationsOpen(true)}
-            onLogout={() => void signOut()}
-          />
+          onOpenNotifications={() => setNotificationsOpen(true)}
+          onLogout={() => void signOut()}
+        />
+        <StatelessModeBanner storageStatus={storageStatus} />
           <main className="admin-shell">
             <section className="onboarding-card">
               <p className="eyebrow">Access control</p>
@@ -1855,10 +2131,12 @@ export function App() {
           onOpenNotifications={() => setNotificationsOpen(true)}
           onLogout={() => void signOut()}
         />
+        <StatelessModeBanner storageStatus={storageStatus} />
         <AdminConsole
           users={users}
           activeUserId={activeUserId}
           workspaces={homeWorkspaces}
+          storageStatus={storageStatus}
           signInConfig={signInConfig}
           aiProviderConfig={aiConnection}
           mcpConfig={mcpConfig}
@@ -1873,6 +2151,10 @@ export function App() {
           onAddCatalogAsset={addCatalogAsset}
           onSaveCatalogAsset={saveCatalogAsset}
           onDeleteCatalogAsset={removeCatalogAsset}
+          onRefreshStorage={refreshStorage}
+          onTestDatabase={testDatabaseStorage}
+          onConfigureDatabase={configureDatabaseStorage}
+          onMigrateStorageUsers={migrateCachedUsersToDatabase}
           activeSection={route.screen === 'admin' ? route.section ?? 'overview' : 'overview'}
           onSelectSection={(section) => applyRoute({ screen: 'admin', section })}
         />
@@ -1900,6 +2182,7 @@ export function App() {
           onOpenNotifications={() => setNotificationsOpen(true)}
           onLogout={() => void signOut()}
         />
+        <StatelessModeBanner storageStatus={storageStatus} />
         <HomeScreen
           workspaces={homeWorkspaces}
           designs={homeDesigns}
@@ -1912,6 +2195,7 @@ export function App() {
           onCreateWorkspace={handleCreateWorkspace}
           onDeleteWorkspace={requestDeleteWorkspace}
           onOpenDesign={selectBackendDesign}
+          onCloneDesign={requestCloneDesign}
           onDeleteDesign={requestDeleteDesign}
           onNewDesign={openNewDesignBrief}
           onRefresh={() => refreshHome(activeWorkspaceId)}
@@ -1930,9 +2214,27 @@ export function App() {
         {deleteTarget ? (
           <ConfirmDeleteModal
             target={deleteTarget}
-            isDeleting={homeAction === 'delete-workspace' || homeAction === 'delete-design'}
+            isDeleting={homeAction === 'delete-workspace' || homeAction === 'delete-design' || homeAction === 'delete-version'}
             onCancel={() => setDeleteTarget(null)}
             onConfirm={() => void confirmDeleteTarget()}
+          />
+        ) : null}
+        {cloneTarget ? (
+          <CloneDesignModal
+            sourceDesign={cloneTarget}
+            versions={cloneVersions}
+            selectedVersionId={cloneVersionId}
+            title={cloneTitle}
+            state={cloneState}
+            error={cloneError}
+            onTitleChange={setCloneTitle}
+            onVersionChange={setCloneVersionId}
+            onCancel={() => {
+              setCloneTarget(null)
+              setCloneError(null)
+              setCloneState('idle')
+            }}
+            onClone={() => void confirmCloneDesign()}
           />
         ) : null}
         {notificationsOpen ? (
@@ -1956,16 +2258,25 @@ export function App() {
         designTitle={designName}
         designs={workspaceDesigns}
         selectedDesignId={selectedDesignId}
+        designVersions={designVersions}
+        versionState={versionState}
+        previewVersion={versionPreview?.version ?? null}
+        reviews={reviews}
         aiConnection={aiConnection}
         currentUser={homeProfile}
         notifications={notifications}
         onHome={() => applyRoute({ screen: 'home' })}
         onWorkspace={() => applyRoute({ screen: 'workspace', workspaceId: activeWorkspaceId })}
         onSelectDesign={selectBackendDesign}
+        onVersionStatusChange={(versionId, status) => void changeVersionStatus(versionId, status)}
+        onVersionReadyForReview={markVersionReadyForReview}
+        onDeleteVersion={requestDeleteVersion}
+        onViewVersion={viewVersion}
         onAdmin={() => applyRoute({ screen: 'admin' })}
         onOpenNotifications={() => setNotificationsOpen(true)}
         onLogout={() => void signOut()}
       />
+      <StatelessModeBanner storageStatus={storageStatus} />
       <main className={`app-shell ${rightRailOpen ? '' : 'right-rail-collapsed'}`}>
         <aside className="left-rail">
           <div className="brand">
@@ -2081,10 +2392,6 @@ export function App() {
           </section>
 
           <section className="panel-section draft-actions">
-            <div className="section-title">Draft</div>
-            <button className="command" onClick={saveDraft}>
-              <Save size={16} /> Save design
-            </button>
             <button className="command" onClick={exportDesign}>
               <Download size={16} /> Export JSON
             </button>
@@ -2103,6 +2410,13 @@ export function App() {
               onChange={(event) => renameDesign(event.target.value)}
             />
             <div className="top-bar-status">
+              <span className={`canvas-state-pill ${versionPreview ? 'preview' : canvasMode}`}>
+                {versionPreview
+                  ? `Viewing v${versionPreview.version.versionNumber} · ${versionStatusLabel(versionPreview.version.status)}`
+                  : `${canvasMode === 'design' ? 'Editing' : canvasMode.charAt(0).toUpperCase() + canvasMode.slice(1)} · ${
+                      designVersions[0] ? `v${designVersions[0].versionNumber} ${versionStatusLabel(designVersions[0].status)}` : 'unsaved draft'
+                    }`}
+              </span>
               {saveState === 'error' ? <span className="save-error">Save failed</span> : null}
               {analysisState === 'ready' && analysisReport ? (
                 <button className="analysis-pill button-pill" type="button" onClick={() => openAnalysisModal()}>
@@ -2130,6 +2444,7 @@ export function App() {
                 className={canvasMode === 'design' ? 'active' : ''}
                 type="button"
                 onClick={() => {
+                  if (versionPreview) exitVersionPreview()
                   setCanvasMode('design')
                   setContextPanel('inspector')
                 }}
@@ -2178,7 +2493,7 @@ export function App() {
                 <Route size={14} /> <span>Journey</span>
               </button>
             </div>
-            <button className="command compact" onClick={saveDraft} title="Save design">
+            <button className="command compact" onClick={saveDraft} disabled={Boolean(versionPreview)} title={versionPreview ? 'Exit version preview before saving' : 'Save design'}>
               <Save size={16} /> <span>{saveState === 'saving' ? 'Saving' : saveState === 'saved' ? 'Saved' : 'Save'}</span>
             </button>
             <button
@@ -2198,6 +2513,15 @@ export function App() {
               </>
             )}
           </div>
+          {versionPreview ? (
+            <div className="version-preview-banner" role="status">
+              <Eye size={16} />
+              <span>
+                You are viewing saved version v{versionPreview.version.versionNumber}. The canvas is read-only and changes are disabled.
+              </span>
+              <button type="button" onClick={exitVersionPreview}>Back to editable draft</button>
+            </div>
+          ) : null}
           <button
             className={`context-rail-toggle ${rightRailOpen ? 'open' : 'closed'}`}
             type="button"
@@ -2206,18 +2530,23 @@ export function App() {
           >
             {rightRailOpen ? <ChevronRight size={17} /> : <ChevronLeft size={17} />}
           </button>
-          <StratumCanvasBoundary
+          <CanvasErrorBoundary
             onResetCanvas={() => resetDraft()}
           >
             <ReactFlowCanvasProvider
-              design={design}
+              design={canvasDesign}
               selectedComponentId={selectedComponentId}
               selectedConnectorId={selectedConnectorId}
+              selectedComponentIds={selectedComponentIdList}
+              selectedConnectorIds={selectedConnectorIdList}
               readOnly={isCanvasReadOnly}
               traversalFocus={traversalFocus}
+              onSelectionChange={handleCanvasSelectionChange}
               onSelectComponent={(componentId) => {
                 setSelectedComponentId(componentId || null)
+                setSelectedComponentIds(componentId ? new Set([componentId]) : new Set())
                 if (componentId) setSelectedConnectorId(null)
+                if (componentId) setSelectedConnectorIds(new Set())
                 if (componentId) {
                   setContextPanel('inspector')
                   setRightRailOpen(true)
@@ -2225,7 +2554,9 @@ export function App() {
               }}
               onSelectConnector={(connectorId) => {
                 setSelectedConnectorId(connectorId || null)
+                setSelectedConnectorIds(connectorId ? new Set([connectorId]) : new Set())
                 if (connectorId) setSelectedComponentId(null)
+                if (connectorId) setSelectedComponentIds(new Set())
                 if (connectorId) {
                   setContextPanel('inspector')
                   setRightRailOpen(true)
@@ -2244,7 +2575,7 @@ export function App() {
               onDeleteComponents={deleteComponents}
               onDeleteConnectors={deleteConnectors}
             />
-          </StratumCanvasBoundary>
+          </CanvasErrorBoundary>
         </div>
       </section>
 
@@ -2254,9 +2585,6 @@ export function App() {
               <strong>Workspace context</strong>
               <span>Inspect, explain, and review this system</span>
             </div>
-            <button className="icon-command" type="button" onClick={() => setRightRailOpen(false)} title="Collapse context drawer">
-              <ChevronRight size={16} />
-            </button>
           </div>
           <div className="context-tabs" role="tablist" aria-label="Canvas context">
             <button className={contextPanel === 'inspector' ? 'active' : ''} type="button" onClick={() => setContextPanel('inspector')}>
@@ -2279,6 +2607,7 @@ export function App() {
               activeUserId={activeUserId}
               comments={comments}
               reviews={reviews}
+              activeVersion={versionPreview?.version ?? designVersions[0] ?? null}
               selectedComponent={selectedComponent}
               selectedConnector={selectedConnector}
               commentDraft={commentDraft}
@@ -2288,7 +2617,11 @@ export function App() {
               offline={collaborationOffline}
               onCommentDraftChange={setCommentDraft}
               onSubmitComment={() => void submitDesignComment()}
-              onRequestReview={() => setRequestReviewOpen(true)}
+              onRequestReview={() => {
+                const targetVersion = versionPreview?.version ?? designVersions[0] ?? null
+                setRequestReviewVersion(targetVersion)
+                setRequestReviewOpen(true)
+              }}
               onReviewSummaryChange={(reviewId, summary) =>
                 setReviewSummaryDrafts((current) => ({ ...current, [reviewId]: summary }))
               }
@@ -2332,13 +2665,14 @@ export function App() {
                   <span>Use case, scale, consistency, and SLA context</span>
                 </div>
               </div>
-              <RequirementPanel design={design} onChange={updateDesign} compact />
+              <RequirementPanel design={canvasDesign} onChange={updateDesign} compact readOnly={Boolean(versionPreview)} />
             </section>
           ) : (
             <JourneyPanel
-              design={design}
+              design={canvasDesign}
               activeJourneyId={activeJourneyId}
               activeStepIndex={activeJourneyStepIndex}
+              readOnly={Boolean(versionPreview)}
               onCreatePrimaryJourney={() => {
                 createPrimaryJourney()
                 setCanvasMode('journey')
@@ -2371,7 +2705,7 @@ export function App() {
       {deleteTarget ? (
         <ConfirmDeleteModal
           target={deleteTarget}
-          isDeleting={homeAction === 'delete-workspace' || homeAction === 'delete-design'}
+          isDeleting={homeAction === 'delete-workspace' || homeAction === 'delete-design' || homeAction === 'delete-version'}
           onCancel={() => setDeleteTarget(null)}
           onConfirm={() => void confirmDeleteTarget()}
         />
@@ -2385,6 +2719,18 @@ export function App() {
           analysisError={analysisError}
           onClose={() => setAnalysisModalOpen(false)}
           onRunAnalysis={() => void runAnalysis()}
+        />
+      ) : null}
+      {saveDialogOpen ? (
+        <SaveDesignModal
+          mode={saveVersionMode}
+          remarks={saveRemarks}
+          hasVersions={designVersions.length > 0}
+          isSaving={saveState === 'saving' || versionState === 'saving'}
+          onModeChange={setSaveVersionMode}
+          onRemarksChange={setSaveRemarks}
+          onCancel={() => setSaveDialogOpen(false)}
+          onSave={() => void saveDesignFromDialog()}
         />
       ) : null}
       {pendingConnector ? (
@@ -2426,9 +2772,13 @@ export function App() {
         <RequestReviewModal
           users={users}
           activeUserId={activeUserId}
+          version={requestReviewVersion ?? versionPreview?.version ?? designVersions[0] ?? null}
           isSaving={collaborationState === 'saving'}
-          onCancel={() => setRequestReviewOpen(false)}
-          onRequest={(reviewerId, message) => void submitReviewRequest(reviewerId, message)}
+          onCancel={() => {
+            setRequestReviewOpen(false)
+            setRequestReviewVersion(null)
+          }}
+          onRequest={(reviewerIds, message) => void submitReviewRequest(reviewerIds, message)}
         />
       ) : null}
       {notificationsOpen ? (
@@ -2440,268 +2790,6 @@ export function App() {
         />
       ) : null}
     </div>
-  )
-}
-
-function AppNavbar({
-  profile,
-  route,
-  workspaceName,
-  designTitle,
-  designs = [],
-  selectedDesignId,
-  aiConnection,
-  currentUser,
-  notifications,
-  onHome,
-  onWorkspace,
-  onSelectDesign,
-  onAdmin,
-  onOpenNotifications,
-  onLogout,
-}: {
-  profile: BackendProfile | null
-  route: AppRoute
-  workspaceName?: string
-  designTitle: string
-  designs?: BackendDesign[]
-  selectedDesignId?: string | null
-  aiConnection?: AIConnectionMetadata | null
-  currentUser: BackendProfile | null
-  notifications: BackendNotification[]
-  onHome: () => void
-  onWorkspace: () => void
-  onSelectDesign?: (design: BackendDesign) => void
-  onAdmin: () => void
-  onOpenNotifications: () => void
-  onLogout: () => void
-}) {
-  const unreadCount = notifications.filter((notification) => !notification.read).length
-  const activeUser = currentUser ?? profile
-  return (
-    <header className="app-navbar">
-      <button className="app-brand" onClick={onHome} title="Go to Stratum home">
-        <div className="home-logo">S</div>
-        <div>
-          <strong>Stratum</strong>
-          <span>System design workspace</span>
-        </div>
-      </button>
-
-      <nav className="app-breadcrumbs" aria-label="Current location">
-        <button className={route.screen === 'home' ? 'active' : ''} onClick={onHome}>
-          <LayoutDashboard size={16} /> Home
-        </button>
-        {route.screen !== 'home' && route.screen !== 'admin' ? (
-          <button className={route.screen === 'workspace' ? 'active' : ''} onClick={onWorkspace}>
-            {workspaceName ?? 'Workspace'}
-          </button>
-        ) : null}
-        {route.screen === 'admin' ? <span>Admin</span> : null}
-        {route.screen === 'design' ? (
-          <select
-            className="breadcrumb-design-select"
-            aria-label="Switch design"
-            value={selectedDesignId ?? ''}
-            onChange={(event) => {
-              const nextDesign = designs.find((item) => item.id === event.target.value)
-              if (nextDesign) onSelectDesign?.(nextDesign)
-            }}
-          >
-            {designs.map((backendDesign) => (
-              <option key={backendDesign.id} value={backendDesign.id}>
-                {backendDesign.name || backendDesign.document.title || designTitle || 'Untitled design'}
-              </option>
-            ))}
-          </select>
-        ) : null}
-      </nav>
-
-      <div className="navbar-actions">
-        <button className="notification-button" type="button" onClick={onOpenNotifications} title="Notifications">
-          <Bell size={18} />
-          {unreadCount ? <span>{unreadCount}</span> : null}
-        </button>
-        <details className="user-menu">
-          <summary title={activeUser?.email ?? 'Signed in'}>
-            <span className="user-avatar" aria-hidden="true">{initialsFor(activeUser?.displayName || activeUser?.email || 'User')}</span>
-            <span className="user-menu-label">
-              <strong>{activeUser?.displayName ?? 'Signed in'}</strong>
-              <small>{roleLabel(activeUser?.role ?? 'member')}</small>
-            </span>
-            <ChevronDown size={15} />
-          </summary>
-          <div className="user-menu-popover">
-            <div className="user-menu-card">
-              <span className="user-avatar large" aria-hidden="true">{initialsFor(activeUser?.displayName || activeUser?.email || 'User')}</span>
-              <div>
-                <strong>{activeUser?.displayName ?? 'Signed in'}</strong>
-                <small>{activeUser?.email ?? roleLabel(activeUser?.role ?? 'member')}</small>
-              </div>
-            </div>
-            <button type="button" disabled title="Profile editing is coming next">
-              <UserCheck size={16} /> Edit profile
-            </button>
-            {activeUser?.role === 'admin' ? (
-              <button type="button" onClick={onAdmin}>
-                <Settings size={16} /> Admin console
-              </button>
-            ) : null}
-            <button type="button" onClick={onLogout}>
-              <LogOut size={16} /> Sign out
-            </button>
-          </div>
-        </details>
-      </div>
-    </header>
-  )
-}
-
-class StratumCanvasBoundary extends Component<
-  { children: ReactNode; onResetCanvas: () => void },
-  { error: Error | null }
-> {
-  state: { error: Error | null } = { error: null }
-
-  static getDerivedStateFromError(error: Error) {
-    return { error }
-  }
-
-  componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error('Stratum canvas error', error, info)
-  }
-
-  render() {
-    if (!this.state.error) return this.props.children
-
-    return (
-      <div className="canvas-error-panel">
-        <div>
-          <strong>Canvas could not be opened</strong>
-          <span>{this.state.error.message || 'The saved canvas data is invalid or from an unsupported version.'}</span>
-        </div>
-        <div className="canvas-error-actions">
-          <button
-            onClick={() => {
-              this.props.onResetCanvas()
-              this.setState({ error: null })
-            }}
-          >
-            Reset canvas data
-          </button>
-          <button onClick={() => window.location.reload()}>Refresh</button>
-        </div>
-      </div>
-    )
-  }
-}
-
-function userDisplayName(users: BackendUser[], userId: string) {
-  return users.find((user) => user.id === userId)?.displayName ?? userId.replaceAll('-', ' ')
-}
-
-function initialsFor(value: string) {
-  const words = value.trim().split(/[\s@._-]+/).filter(Boolean)
-  return words
-    .slice(0, 2)
-    .map((word) => word[0]?.toUpperCase())
-    .join('') || 'U'
-}
-
-function formatCompactDateTime(value?: string) {
-  if (!value) return 'Never'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return 'Never'
-  return date.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  })
-}
-
-function roleLabel(role: string) {
-  if (role === 'admin') return 'Admin'
-  if (role === 'architect') return 'Architect'
-  if (role === 'reviewer') return 'Reviewer'
-  return 'Member'
-}
-
-function FirstAdminOnboarding({
-  error,
-  isSaving,
-  onCreate,
-}: {
-  error: string | null
-  isSaving: boolean
-  onCreate: (input: { displayName: string; email: string; password: string }) => void
-}) {
-  const [displayName, setDisplayName] = useState('')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  return (
-    <main className="onboarding-shell">
-      <section className="onboarding-card">
-        <div className="home-logo">S</div>
-        <p className="eyebrow">First run setup</p>
-        <h1>Create the first admin</h1>
-        <p>Stratum has no users yet. The first account becomes the organization admin and can configure SSO and user access.</p>
-        {error ? <div className="home-error inline-error"><span>{error}</span></div> : null}
-        <Field label="Name" value={displayName} onChange={setDisplayName} />
-        <Field label="Work email" value={email} onChange={setEmail} />
-        <Field label="Password" type="password" value={password} onChange={setPassword} />
-        <button
-          className="primary-action full-width"
-          type="button"
-          disabled={isSaving || !displayName.trim() || !email.trim() || password.length < 8}
-          onClick={() => onCreate({ displayName, email, password })}
-        >
-          <ShieldCheck size={17} /> {isSaving ? 'Creating admin...' : 'Create admin'}
-        </button>
-      </section>
-    </main>
-  )
-}
-
-function LoginScreen({
-  requiresPasswordSetup,
-  error,
-  isSaving,
-  onLogin,
-  onSetInitialPassword,
-}: {
-  requiresPasswordSetup: boolean
-  error: string | null
-  isSaving: boolean
-  onLogin: (input: { email: string; password: string }) => void
-  onSetInitialPassword: (input: { email: string; password: string }) => void
-}) {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const title = requiresPasswordSetup ? 'Set admin password' : 'Sign in to Stratum'
-  const description = requiresPasswordSetup
-    ? 'Existing users were created before local passwords existed. Set the first admin password to continue.'
-    : 'Use your workspace account to access designs, reviews, and admin settings.'
-  return (
-    <main className="onboarding-shell">
-      <section className="onboarding-card">
-        <div className="home-logo">S</div>
-        <p className="eyebrow">Enterprise access</p>
-        <h1>{title}</h1>
-        <p>{description}</p>
-        {error ? <div className="home-error inline-error"><span>{error}</span></div> : null}
-        <Field label="Work email" value={email} onChange={setEmail} />
-        <Field label="Password" type="password" value={password} onChange={setPassword} />
-        <button
-          className="primary-action full-width"
-          type="button"
-          disabled={isSaving || !email.trim() || password.length < 8}
-          onClick={() => (requiresPasswordSetup ? onSetInitialPassword({ email, password }) : onLogin({ email, password }))}
-        >
-          <ShieldCheck size={17} /> {isSaving ? 'Checking...' : requiresPasswordSetup ? 'Set password and continue' : 'Sign in'}
-        </button>
-      </section>
-    </main>
   )
 }
 
@@ -2722,6 +2810,7 @@ function AdminConsole({
   users,
   activeUserId,
   workspaces,
+  storageStatus,
   signInConfig,
   aiProviderConfig,
   mcpConfig,
@@ -2736,12 +2825,17 @@ function AdminConsole({
   onAddCatalogAsset,
   onSaveCatalogAsset,
   onDeleteCatalogAsset,
+  onRefreshStorage,
+  onTestDatabase,
+  onConfigureDatabase,
+  onMigrateStorageUsers,
   activeSection,
   onSelectSection,
 }: {
   users: BackendUser[]
   activeUserId: string
   workspaces: BackendWorkspace[]
+  storageStatus: BackendStorageStatus | null
   signInConfig: BackendSignInConfig | null
   aiProviderConfig: BackendAIProviderConfig | null
   mcpConfig: BackendMCPConfig | null
@@ -2756,6 +2850,10 @@ function AdminConsole({
   onAddCatalogAsset: (input: { name: string; type: string; owner?: string; description?: string; criticality?: string; tags?: string[] }) => Promise<BackendCatalogAsset>
   onSaveCatalogAsset: (asset: BackendCatalogAsset) => Promise<void>
   onDeleteCatalogAsset: (assetId: string) => Promise<void>
+  onRefreshStorage: () => Promise<BackendStorageStatus>
+  onTestDatabase: (databaseUrl: string) => Promise<{ ok: boolean; storage: BackendStorageStatus }>
+  onConfigureDatabase: (databaseUrl: string) => Promise<BackendStorageStatus>
+  onMigrateStorageUsers: () => Promise<{ storage: BackendStorageStatus; migratedUsers: number }>
   activeSection: AdminSection
   onSelectSection: (section: AdminSection) => void
 }) {
@@ -2770,6 +2868,10 @@ function AdminConsole({
   const [signInDraft, setSignInDraft] = useState<(BackendSignInConfig & { clientSecret?: string }) | null>(signInConfig)
   const [aiDraft, setAIDraft] = useState<(BackendAIProviderConfig & { apiKey?: string }) | null>(aiProviderConfig)
   const [mcpDraft, setMCPDraft] = useState<BackendMCPConfig | null>(mcpConfig)
+  const [storageDatabaseUrl, setStorageDatabaseUrl] = useState('')
+  const [storageAction, setStorageAction] = useState<'idle' | 'refreshing' | 'testing' | 'configuring' | 'migrating'>('idle')
+  const [storageMessage, setStorageMessage] = useState<string | null>(null)
+  const [storageError, setStorageError] = useState<string | null>(null)
   const [adminSearch, setAdminSearch] = useState('')
   const [catalogAdminSearch, setCatalogAdminSearch] = useState('')
   const [accessScope, setAccessScope] = useState<'workspace' | 'design'>('workspace')
@@ -2778,7 +2880,17 @@ function AdminConsole({
   const [accessDesigns, setAccessDesigns] = useState<BackendDesign[]>([])
   const [workspaceAccess, setWorkspaceAccess] = useState<BackendWorkspaceAccess[]>([])
   const [designAccess, setDesignAccess] = useState<BackendDesignAccess[]>([])
+  const [workspaceGroupAccess, setWorkspaceGroupAccess] = useState<BackendWorkspaceGroupAccess[]>([])
+  const [designGroupAccess, setDesignGroupAccess] = useState<BackendDesignGroupAccess[]>([])
+  const [accessGroups, setAccessGroups] = useState<BackendAccessGroup[]>([])
+  const [selectedGroupId, setSelectedGroupId] = useState('')
+  const [groupMembers, setGroupMembers] = useState<BackendAccessGroupMember[]>([])
+  const [accessSubject, setAccessSubject] = useState<'user' | 'group'>('user')
   const [accessUserId, setAccessUserId] = useState('')
+  const [accessGroupId, setAccessGroupId] = useState('')
+  const [newAccessGroup, setNewAccessGroup] = useState({ name: '', description: '', oktaGroupName: '' })
+  const [editingGroupId, setEditingGroupId] = useState<string | null>(null)
+  const [draftAccessGroups, setDraftAccessGroups] = useState<BackendAccessGroup[]>([])
   const [workspaceAccessDraft, setWorkspaceAccessDraft] = useState({ canRead: true, canCreateDesign: false, canManage: false })
   const [designAccessDraft, setDesignAccessDraft] = useState({
     canRead: true,
@@ -2789,6 +2901,8 @@ function AdminConsole({
   })
   const [accessError, setAccessError] = useState<string | null>(null)
   const [accessLoading, setAccessLoading] = useState(false)
+  const [userAccessSummary, setUserAccessSummary] = useState<BackendUserAccessSummary[]>([])
+  const [userAccessLoading, setUserAccessLoading] = useState(false)
 
   useEffect(() => setDraftUsers(users), [users])
   useEffect(() => setDraftAssets(catalogAssets), [catalogAssets])
@@ -2842,9 +2956,25 @@ function AdminConsole({
   ]
   const activeAccessWorkspace = workspaces.find((workspace) => workspace.id === accessWorkspaceId)
   const activeAccessDesign = accessDesigns.find((design) => design.id === accessDesignId)
-  const accessRows = accessScope === 'workspace' ? workspaceAccess : designAccess
+  const selectedAccessGroup = accessGroups.find((group) => group.id === accessGroupId)
+  const selectedGroup = accessGroups.find((group) => group.id === selectedGroupId)
+  const accessRows = (accessScope === 'workspace' ? workspaceAccess : designAccess).filter((grant) =>
+    'canCreateDesign' in grant
+      ? grant.canRead || grant.canCreateDesign || grant.canManage
+      : grant.canRead || grant.canEdit || grant.canComment || grant.canReview || grant.canManage,
+  )
+  const groupAccessRows = (accessScope === 'workspace' ? workspaceGroupAccess : designGroupAccess).filter((grant) =>
+    'canCreateDesign' in grant
+      ? grant.canRead || grant.canCreateDesign || grant.canManage
+      : grant.canRead || grant.canEdit || grant.canComment || grant.canReview || grant.canManage,
+  )
   const grantableUsers = useMemo(() => users.filter((user) => user.status !== 'disabled'), [users])
   const selectedAccessUser = grantableUsers.find((user) => user.id === accessUserId)
+  const selectedGroupUserIds = new Set(groupMembers.map((member) => member.userId))
+  const workspaceGrantHasPermissions = workspaceAccessDraft.canRead || workspaceAccessDraft.canCreateDesign || workspaceAccessDraft.canManage
+  const designGrantHasPermissions =
+    designAccessDraft.canRead || designAccessDraft.canEdit || designAccessDraft.canComment || designAccessDraft.canReview || designAccessDraft.canManage
+  const accessGrantHasPermissions = accessScope === 'workspace' ? workspaceGrantHasPermissions : designGrantHasPermissions
   const catalogQuery = normalizedCatalogLabel(catalogAdminSearch)
   const filteredDraftAssets = draftAssets.filter((asset) => {
     if (!catalogQuery) return true
@@ -2858,26 +2988,43 @@ function AdminConsole({
   }, [accessUserId, grantableUsers])
 
   useEffect(() => {
+    if (accessGroups.length && !accessGroupId) setAccessGroupId(accessGroups[0].id)
+    if (accessGroups.length && !selectedGroupId) setSelectedGroupId(accessGroups[0].id)
+  }, [accessGroupId, accessGroups, selectedGroupId])
+
+  useEffect(() => {
     let cancelled = false
     async function loadAccessCenter() {
       if (activeSection !== 'access' || !accessWorkspaceId) return
       setAccessLoading(true)
       setAccessError(null)
       try {
-        const [designResponse, workspaceAccessResponse] = await Promise.all([
+        const [designResponse, workspaceAccessResponse, workspaceGroupAccessResponse, accessGroupsResponse] = await Promise.all([
           fetchWorkspaceDesigns(accessWorkspaceId),
           fetchWorkspaceAccess(accessWorkspaceId),
+          fetchWorkspaceGroupAccess(accessWorkspaceId),
+          fetchAccessGroups(),
         ])
         if (cancelled) return
         setAccessDesigns(designResponse.designs)
         setWorkspaceAccess(workspaceAccessResponse.access)
+        setWorkspaceGroupAccess(workspaceGroupAccessResponse.access)
+        setAccessGroups(accessGroupsResponse.groups)
+        setDraftAccessGroups(accessGroupsResponse.groups)
         const nextDesignId = accessDesignId || designResponse.designs[0]?.id || ''
         if (!accessDesignId && nextDesignId) setAccessDesignId(nextDesignId)
         if (nextDesignId) {
-          const designAccessResponse = await fetchDesignAccess(accessWorkspaceId, nextDesignId)
-          if (!cancelled) setDesignAccess(designAccessResponse.access)
+          const [designAccessResponse, designGroupAccessResponse] = await Promise.all([
+            fetchDesignAccess(accessWorkspaceId, nextDesignId),
+            fetchDesignGroupAccess(accessWorkspaceId, nextDesignId),
+          ])
+          if (!cancelled) {
+            setDesignAccess(designAccessResponse.access)
+            setDesignGroupAccess(designGroupAccessResponse.access)
+          }
         } else {
           setDesignAccess([])
+          setDesignGroupAccess([])
         }
       } catch (error) {
         if (!cancelled) setAccessError(error instanceof Error ? error.message : 'Could not load access settings.')
@@ -2891,12 +3038,52 @@ function AdminConsole({
     }
   }, [accessDesignId, accessWorkspaceId, activeSection])
 
+  useEffect(() => {
+    let cancelled = false
+    async function loadGroupMembers() {
+      if (activeSection !== 'access' || !selectedGroupId) {
+        setGroupMembers([])
+        return
+      }
+      try {
+        const response = await fetchAccessGroupMembers(selectedGroupId)
+        if (!cancelled) setGroupMembers(response.members)
+      } catch (error) {
+        if (!cancelled) setAccessError(error instanceof Error ? error.message : 'Could not load group members.')
+      }
+    }
+    void loadGroupMembers()
+    return () => {
+      cancelled = true
+    }
+  }, [activeSection, selectedGroupId])
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadUserAccessSummary() {
+      if (activeSection !== 'access' || !accessUserId) return
+      try {
+        await refreshUserAccessSummary(accessUserId)
+      } catch (error) {
+        if (!cancelled) setAccessError(error instanceof Error ? error.message : 'Could not load user access summary.')
+      }
+    }
+    void loadUserAccessSummary()
+    return () => {
+      cancelled = true
+    }
+  }, [accessUserId, activeSection])
+
   function updateDraftUser(user: BackendUser, patch: Partial<BackendUser & { password?: string }>) {
     setDraftUsers((current) => current.map((item) => (item.id === user.id ? { ...item, ...patch } : item)))
   }
 
   function updateDraftAsset(asset: BackendCatalogAsset, patch: Partial<BackendCatalogAsset>) {
     setDraftAssets((current) => current.map((item) => (item.id === asset.id ? { ...item, ...patch } : item)))
+  }
+
+  function updateDraftAccessGroup(group: BackendAccessGroup, patch: Partial<BackendAccessGroup>) {
+    setDraftAccessGroups((current) => current.map((item) => (item.id === group.id ? { ...item, ...patch } : item)))
   }
 
   async function submitNewUser() {
@@ -2952,26 +3139,225 @@ function AdminConsole({
     }
   }
 
+  async function refreshStorageSettings() {
+    setStorageAction('refreshing')
+    setStorageError(null)
+    setStorageMessage(null)
+    try {
+      await onRefreshStorage()
+      setStorageMessage('Storage status refreshed.')
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : 'Could not refresh storage status.')
+    } finally {
+      setStorageAction('idle')
+    }
+  }
+
+  async function testStorageSettingsDatabase() {
+    const databaseUrl = storageDatabaseUrl.trim()
+    if (!databaseUrl) {
+      setStorageError('Database URL is required.')
+      return
+    }
+    setStorageAction('testing')
+    setStorageError(null)
+    setStorageMessage(null)
+    try {
+      await onTestDatabase(databaseUrl)
+      setStorageMessage('Database connection test passed.')
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : 'Database connection test failed.')
+    } finally {
+      setStorageAction('idle')
+    }
+  }
+
+  async function configureStorageSettingsDatabase() {
+    const databaseUrl = storageDatabaseUrl.trim()
+    if (!databaseUrl) {
+      setStorageError('Database URL is required.')
+      return
+    }
+    setStorageAction('configuring')
+    setStorageError(null)
+    setStorageMessage(null)
+    try {
+      const nextStatus = await onConfigureDatabase(databaseUrl)
+      setStorageMessage(nextStatus.stateless ? 'Database is connected and ready for user migration.' : 'Database storage is active.')
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : 'Could not configure database storage.')
+    } finally {
+      setStorageAction('idle')
+    }
+  }
+
+  async function migrateStorageSettingsUsers() {
+    if (!window.confirm('Migrate cached users into the configured database? This requires the target database to have no users.')) return
+    setStorageAction('migrating')
+    setStorageError(null)
+    setStorageMessage(null)
+    try {
+      const response = await onMigrateStorageUsers()
+      setStorageMessage(`Migrated ${response.migratedUsers} user${response.migratedUsers === 1 ? '' : 's'} and switched to database storage.`)
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : 'Could not migrate users to database.')
+    } finally {
+      setStorageAction('idle')
+    }
+  }
+
+  async function reloadAccessGroups() {
+    const response = await fetchAccessGroups()
+    setAccessGroups(response.groups)
+    setDraftAccessGroups(response.groups)
+    if (response.groups.length && !selectedGroupId) setSelectedGroupId(response.groups[0].id)
+    if (response.groups.length && !accessGroupId) setAccessGroupId(response.groups[0].id)
+    if (!response.groups.some((group) => group.id === selectedGroupId)) {
+      setSelectedGroupId(response.groups[0]?.id ?? '')
+    }
+    if (!response.groups.some((group) => group.id === accessGroupId)) {
+      setAccessGroupId(response.groups[0]?.id ?? '')
+    }
+  }
+
+  async function submitNewAccessGroup() {
+    const name = newAccessGroup.name.trim()
+    if (!name) {
+      setAccessError('Group name is required.')
+      return
+    }
+    if (accessGroups.some((group) => group.name.trim().toLowerCase() === name.toLowerCase())) {
+      setAccessError('An access group with this name already exists.')
+      return
+    }
+    setAccessError(null)
+    try {
+      const response = await createAccessGroup({ ...newAccessGroup, name })
+      setNewAccessGroup({ name: '', description: '', oktaGroupName: '' })
+      await reloadAccessGroups()
+      setSelectedGroupId(response.group.id)
+      setAccessGroupId(response.group.id)
+    } catch (error) {
+      setAccessError(error instanceof Error ? error.message : 'Could not create access group.')
+    }
+  }
+
+  async function submitAccessGroupSave(group: BackendAccessGroup) {
+    const name = group.name.trim()
+    if (!name) {
+      setAccessError('Group name is required.')
+      return
+    }
+    if (draftAccessGroups.some((item) => item.id !== group.id && item.name.trim().toLowerCase() === name.toLowerCase())) {
+      setAccessError('An access group with this name already exists.')
+      return
+    }
+    setAccessError(null)
+    try {
+      await updateAccessGroup(group.id, {
+        name,
+        description: group.description,
+        oktaGroupName: group.oktaGroupName,
+      })
+      setEditingGroupId(null)
+      await reloadAccessGroups()
+    } catch (error) {
+      setAccessError(error instanceof Error ? error.message : 'Could not save access group.')
+    }
+  }
+
+  async function removeAccessGroup(groupId: string) {
+    if (!window.confirm('Delete this access group and remove its workspace/design grants?')) return
+    setAccessError(null)
+    try {
+      await deleteAccessGroup(groupId)
+      await reloadAccessGroups()
+      setGroupMembers([])
+      setWorkspaceGroupAccess((current) => current.filter((item) => item.groupId !== groupId))
+      setDesignGroupAccess((current) => current.filter((item) => item.groupId !== groupId))
+    } catch (error) {
+      setAccessError(error instanceof Error ? error.message : 'Could not delete access group.')
+    }
+  }
+
+  async function toggleAccessGroupMember(userId: string, checked: boolean) {
+    if (!selectedGroupId) return
+    const next = checked
+      ? Array.from(new Set([...groupMembers.map((member) => member.userId), userId]))
+      : groupMembers.map((member) => member.userId).filter((id) => id !== userId)
+    setAccessError(null)
+    try {
+      const response = await replaceAccessGroupMembers(selectedGroupId, next)
+      setGroupMembers(response.members)
+      await reloadAccessGroups()
+    } catch (error) {
+      setAccessError(error instanceof Error ? error.message : 'Could not update group membership.')
+    }
+  }
+
   async function submitAccessGrant() {
-    if (!accessWorkspaceId || !accessUserId) return
+    if (!accessWorkspaceId) return
+    if (accessSubject === 'user' && !accessUserId) return
+    if (accessSubject === 'group' && !accessGroupId) return
+    if (!accessGrantHasPermissions) {
+      setAccessError('Select at least one permission before saving a grant.')
+      return
+    }
     setAccessError(null)
     setAccessLoading(true)
     try {
       if (accessScope === 'workspace') {
-        const response = await grantWorkspaceAccess(accessWorkspaceId, { userId: accessUserId, ...workspaceAccessDraft })
-        setWorkspaceAccess((current) => {
-          const existing = current.filter((item) => item.userId !== response.access.userId)
-          return [...existing, response.access]
-        })
+        if (accessSubject === 'user') {
+          const response = await grantWorkspaceAccess(accessWorkspaceId, { userId: accessUserId, ...workspaceAccessDraft })
+          setWorkspaceAccess((current) => {
+            const existing = current.filter((item) => item.userId !== response.access.userId)
+            return [...existing, response.access]
+          })
+        } else {
+          const response = await grantWorkspaceGroupAccess(accessWorkspaceId, { groupId: accessGroupId, ...workspaceAccessDraft })
+          setWorkspaceGroupAccess((current) => {
+            const existing = current.filter((item) => item.groupId !== response.access.groupId)
+            return [...existing, response.access]
+          })
+        }
       } else if (accessDesignId) {
-        const response = await grantDesignAccess(accessWorkspaceId, accessDesignId, { userId: accessUserId, ...designAccessDraft })
-        setDesignAccess((current) => {
-          const existing = current.filter((item) => item.userId !== response.access.userId)
-          return [...existing, response.access]
-        })
+        if (accessSubject === 'user') {
+          const response = await grantDesignAccess(accessWorkspaceId, accessDesignId, { userId: accessUserId, ...designAccessDraft })
+          setDesignAccess((current) => {
+            const existing = current.filter((item) => item.userId !== response.access.userId)
+            return [...existing, response.access]
+          })
+        } else {
+          const response = await grantDesignGroupAccess(accessWorkspaceId, accessDesignId, { groupId: accessGroupId, ...designAccessDraft })
+          setDesignGroupAccess((current) => {
+            const existing = current.filter((item) => item.groupId !== response.access.groupId)
+            return [...existing, response.access]
+          })
+        }
       }
+      if (accessUserId) await refreshUserAccessSummary(accessUserId)
     } catch (error) {
       setAccessError(error instanceof Error ? error.message : 'Could not save access grant.')
+    } finally {
+      setAccessLoading(false)
+    }
+  }
+
+  async function revokeGroupAccessGrant(groupId: string) {
+    if (!accessWorkspaceId) return
+    setAccessError(null)
+    setAccessLoading(true)
+    try {
+      if (accessScope === 'workspace') {
+        await revokeWorkspaceGroupAccess(accessWorkspaceId, groupId)
+        setWorkspaceGroupAccess((current) => current.filter((item) => item.groupId !== groupId))
+      } else if (accessDesignId) {
+        await revokeDesignGroupAccess(accessWorkspaceId, accessDesignId, groupId)
+        setDesignGroupAccess((current) => current.filter((item) => item.groupId !== groupId))
+      }
+      if (accessUserId) await refreshUserAccessSummary(accessUserId)
+    } catch (error) {
+      setAccessError(error instanceof Error ? error.message : 'Could not revoke group access grant.')
     } finally {
       setAccessLoading(false)
     }
@@ -2989,10 +3375,25 @@ function AdminConsole({
         await revokeDesignAccess(accessWorkspaceId, accessDesignId, userId)
         setDesignAccess((current) => current.filter((item) => item.userId !== userId))
       }
+      await refreshUserAccessSummary(userId)
     } catch (error) {
       setAccessError(error instanceof Error ? error.message : 'Could not revoke access grant.')
     } finally {
       setAccessLoading(false)
+    }
+  }
+
+  async function refreshUserAccessSummary(userId = accessUserId) {
+    if (!userId) {
+      setUserAccessSummary([])
+      return
+    }
+    setUserAccessLoading(true)
+    try {
+      const response = await fetchUserAccessSummary(userId)
+      setUserAccessSummary(response.access)
+    } finally {
+      setUserAccessLoading(false)
     }
   }
 
@@ -3179,17 +3580,39 @@ function AdminConsole({
                 <section className="access-control-card">
                   <div className="admin-section-title">
                     <span>Grant access</span>
-                    <small>{selectedAccessUser ? selectedAccessUser.email : 'Choose a user'}</small>
+                    <small>
+                      {accessSubject === 'user'
+                        ? selectedAccessUser?.email || 'Choose a user'
+                        : selectedAccessGroup?.name || 'Choose a group'}
+                    </small>
+                  </div>
+                  <div className="access-scope-switch compact" aria-label="Access subject">
+                    <button className={accessSubject === 'user' ? 'active' : ''} type="button" onClick={() => setAccessSubject('user')}>
+                      User
+                    </button>
+                    <button className={accessSubject === 'group' ? 'active' : ''} type="button" onClick={() => setAccessSubject('group')}>
+                      Group
+                    </button>
                   </div>
                   <label className="field">
-                    <span>User</span>
-                    <select value={accessUserId} onChange={(event) => setAccessUserId(event.target.value)}>
-                      {grantableUsers.map((user) => (
-                        <option key={user.id} value={user.id}>
-                          {user.displayName} · {user.email}
-                        </option>
-                      ))}
-                    </select>
+                    <span>{accessSubject === 'user' ? 'User' : 'Group'}</span>
+                    {accessSubject === 'user' ? (
+                      <select value={accessUserId} onChange={(event) => setAccessUserId(event.target.value)}>
+                        {grantableUsers.map((user) => (
+                          <option key={user.id} value={user.id}>
+                            {user.displayName} · {user.email}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <select value={accessGroupId} onChange={(event) => setAccessGroupId(event.target.value)}>
+                        {accessGroups.map((group) => (
+                          <option key={group.id} value={group.id}>
+                            {group.name}{group.oktaGroupName ? ` · Okta: ${group.oktaGroupName}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                   </label>
                   <div className="permission-chip-grid">
                     {accessScope === 'workspace' ? (
@@ -3208,15 +3631,129 @@ function AdminConsole({
                       </>
                     )}
                   </div>
-                  <button className="primary-action full-width" type="button" disabled={accessLoading || !accessUserId || (accessScope === 'design' && !accessDesignId)} onClick={() => void submitAccessGrant()}>
+                  {!accessGrantHasPermissions ? <p className="form-help danger">Select at least one permission. Empty grants are not saved.</p> : null}
+                  {accessSubject === 'group' && !accessGroups.length ? (
+                    <p className="form-help danger">Create a group before saving group-based grants.</p>
+                  ) : null}
+                  <button
+                    className="primary-action full-width"
+                    type="button"
+                    disabled={
+                      accessLoading ||
+                      (accessSubject === 'user' ? !accessUserId : !accessGroupId) ||
+                      !accessGrantHasPermissions ||
+                      (accessScope === 'design' && !accessDesignId)
+                    }
+                    onClick={() => void submitAccessGrant()}
+                  >
                     <ShieldCheck size={16} /> Save grant
                   </button>
+                </section>
+
+                <section className="access-control-card access-groups-card">
+                  <div className="admin-section-title">
+                    <span>Groups</span>
+                    <small>Local groups can map to Okta group claim values.</small>
+                  </div>
+                  <div className="access-group-composer">
+                    <label className="field">
+                      <span>Group name</span>
+                      <input value={newAccessGroup.name} onChange={(event) => setNewAccessGroup((current) => ({ ...current, name: event.target.value }))} />
+                    </label>
+                    <label className="field">
+                      <span>Okta group claim value</span>
+                      <input
+                        placeholder="e.g. stratum-architects"
+                        value={newAccessGroup.oktaGroupName}
+                        onChange={(event) => setNewAccessGroup((current) => ({ ...current, oktaGroupName: event.target.value }))}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Description</span>
+                      <input value={newAccessGroup.description} onChange={(event) => setNewAccessGroup((current) => ({ ...current, description: event.target.value }))} />
+                    </label>
+                    <button className="secondary-action" type="button" onClick={() => void submitNewAccessGroup()}>
+                      <Users size={16} /> Create group
+                    </button>
+                  </div>
+
+                  <div className="access-groups-layout">
+                    <div className="access-group-list">
+                      {draftAccessGroups.length ? draftAccessGroups.map((group) => {
+                        const isEditing = editingGroupId === group.id
+                        return (
+                          <article className={`access-group-row ${selectedGroupId === group.id ? 'selected' : ''}`} key={group.id}>
+                            {isEditing ? (
+                              <div className="access-group-edit">
+                                <input value={group.name} onChange={(event) => updateDraftAccessGroup(group, { name: event.target.value })} />
+                                <input
+                                  placeholder="Okta group claim value"
+                                  value={group.oktaGroupName}
+                                  onChange={(event) => updateDraftAccessGroup(group, { oktaGroupName: event.target.value })}
+                                />
+                                <input value={group.description} onChange={(event) => updateDraftAccessGroup(group, { description: event.target.value })} />
+                              </div>
+                            ) : (
+                              <button type="button" onClick={() => setSelectedGroupId(group.id)}>
+                                <span><Users size={16} /></span>
+                                <div>
+                                  <strong>{group.name}</strong>
+                                  <small>{group.memberCount} member{group.memberCount === 1 ? '' : 's'}{group.oktaGroupName ? ` · Okta ${group.oktaGroupName}` : ''}</small>
+                                </div>
+                              </button>
+                            )}
+                            <div className="admin-row-actions compact">
+                              {isEditing ? (
+                                <button className="secondary-action" type="button" onClick={() => void submitAccessGroupSave(group)}>Save</button>
+                              ) : (
+                                <button className="secondary-action" type="button" onClick={() => setEditingGroupId(group.id)}>Edit</button>
+                              )}
+                              <button className="text-button danger" type="button" onClick={() => void removeAccessGroup(group.id)}>Delete</button>
+                            </div>
+                          </article>
+                        )
+                      }) : (
+                        <div className="analysis-empty">
+                          <strong>No groups yet</strong>
+                          <span>Create groups for teams, Okta claims, and reusable permission bundles.</span>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="access-member-card">
+                      <div className="admin-section-title">
+                        <span>{selectedGroup?.name || 'Select a group'}</span>
+                        <small>{selectedGroup?.oktaGroupName ? `Okta claim: ${selectedGroup.oktaGroupName}` : 'Manual membership'}</small>
+                      </div>
+                      <div className="access-member-list">
+                        {grantableUsers.map((user) => (
+                          <label key={user.id}>
+                            <input
+                              type="checkbox"
+                              disabled={!selectedGroupId}
+                              checked={selectedGroupUserIds.has(user.id)}
+                              onChange={(event) => void toggleAccessGroupMember(user.id, event.target.checked)}
+                            />
+                            <span>{initialsFor(user.displayName || user.email)}</span>
+                            <div>
+                              <strong>{user.displayName}</strong>
+                              <small>{user.email}</small>
+                            </div>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
                 </section>
               </div>
 
               {accessError ? <div className="admin-inline-error">{accessError}</div> : null}
 
               <div className="access-grant-list">
+                <div className="admin-section-title">
+                  <span>Direct user grants</span>
+                  <small>{accessRows.length} active</small>
+                </div>
                 {accessRows.length ? accessRows.map((grant) => {
                   const user = users.find((item) => item.id === grant.userId)
                   const permissions =
@@ -3257,6 +3794,89 @@ function AdminConsole({
                   </div>
                 )}
               </div>
+
+              <div className="access-grant-list">
+                <div className="admin-section-title">
+                  <span>Group grants</span>
+                  <small>{groupAccessRows.length} active</small>
+                </div>
+                {groupAccessRows.length ? groupAccessRows.map((grant) => {
+                  const group = accessGroups.find((item) => item.id === grant.groupId)
+                  const permissions =
+                    'canCreateDesign' in grant
+                      ? [
+                          grant.canRead ? 'Read' : '',
+                          grant.canCreateDesign ? 'Create designs' : '',
+                          grant.canManage ? 'Manage' : '',
+                        ].filter(Boolean)
+                      : [
+                          grant.canRead ? 'Read' : '',
+                          grant.canEdit ? 'Edit' : '',
+                          grant.canComment ? 'Comment' : '',
+                          grant.canReview ? 'Review' : '',
+                          grant.canManage ? 'Manage' : '',
+                        ].filter(Boolean)
+                  return (
+                    <article className="access-grant-row" key={`${grant.groupId}-${grant.updatedAt}`}>
+                      <div className="admin-user-identity">
+                        <span><Users size={18} /></span>
+                        <div>
+                          <strong>{group?.name || 'Unknown group'}</strong>
+                          <small>{group?.oktaGroupName ? `Okta claim ${group.oktaGroupName}` : group?.description || grant.groupId}</small>
+                        </div>
+                      </div>
+                      <div className="access-permission-list">
+                        {permissions.map((permission) => <span key={permission}>{permission}</span>)}
+                      </div>
+                      <button className="text-button danger" type="button" disabled={accessLoading} onClick={() => void revokeGroupAccessGrant(grant.groupId)}>
+                        Revoke
+                      </button>
+                    </article>
+                  )
+                }) : (
+                  <div className="analysis-empty">
+                    <strong>No group grants yet</strong>
+                    <span>Group grants let Okta-backed teams inherit access without per-user rules.</span>
+                  </div>
+                )}
+              </div>
+
+              <section className="access-user-summary-card">
+                <div className="admin-section-title">
+                  <span>User grant explorer</span>
+                  <small>{selectedAccessUser ? selectedAccessUser.email : 'Choose a user'}</small>
+                </div>
+                {userAccessLoading ? (
+                  <div className="analysis-empty">
+                    <strong>Loading grants</strong>
+                    <span>Checking explicit workspace and design access for this user.</span>
+                  </div>
+                ) : userAccessSummary.length ? (
+                  <div className="access-user-summary-list">
+                    {userAccessSummary.map((grant) => (
+                      <article className="access-user-summary-row" key={`${grant.scope}-${grant.workspaceId}-${grant.designId ?? 'workspace'}`}>
+                        <div>
+                          <strong>{grant.scope === 'workspace' ? grant.workspaceName : grant.designName}</strong>
+                          <small>
+                            {grant.scope === 'workspace'
+                              ? 'Workspace grant'
+                              : `${grant.workspaceName} / Design grant`}
+                          </small>
+                        </div>
+                        {grant.source === 'group' ? <small className="access-source-label">Via {grant.groupName || grant.groupId}</small> : null}
+                        <div className="access-permission-list">
+                          {grant.permissions.map((permission) => <span key={permission}>{permission}</span>)}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="analysis-empty">
+                    <strong>No user-specific grants</strong>
+                    <span>This user may still have access through role defaults, ownership, public designs, or workspace-level inheritance.</span>
+                  </div>
+                )}
+              </section>
             </div>
           ) : null}
 
@@ -3313,17 +3933,126 @@ function AdminConsole({
           ) : null}
 
           {activeSection === 'settings' ? (
-            <div className="admin-panel">
+            <div className="admin-panel storage-admin-panel">
               <div className="admin-panel-heading">
-                <span><Settings size={18} /></span>
+                <span><Database size={18} /></span>
                 <div>
-                  <strong>System settings</strong>
-                  <p>Reserved for deployment defaults, retention policy, export policy, and workspace templates.</p>
+                  <strong>Storage engine</strong>
+                  <p>Run Stratum with cache-only stateless storage or attach a persistent database.</p>
                 </div>
               </div>
-              <div className="analysis-empty">
-                <strong>Settings modules will land here</strong>
-                <span>This keeps future configuration out of the canvas and out of crowded one-page admin forms.</span>
+
+              <div className="storage-status-grid">
+                <article className={storageStatus?.stateless ? 'warning' : 'ready'}>
+                  <strong>{storageStatus?.stateless ? 'Stateless cache' : 'Database'}</strong>
+                  <span>Active storage mode</span>
+                </article>
+                <article className={storageStatus?.databaseConnected ? 'ready' : 'neutral'}>
+                  <strong>{storageStatus?.databaseConnected ? 'Connected' : 'Not connected'}</strong>
+                  <span>Database status</span>
+                </article>
+                <article>
+                  <strong>{storageStatus?.cacheUserCount ?? 0}</strong>
+                  <span>Cache users</span>
+                </article>
+                <article>
+                  <strong>{storageStatus?.databaseUserCount ?? 0}</strong>
+                  <span>Database users</span>
+                </article>
+              </div>
+
+              {storageStatus?.stateless ? (
+                <div className="storage-warning">
+                  <Database size={18} />
+                  <div>
+                    <strong>Stateless mode is active</strong>
+                    <span>{storageStatus.warning || 'Designs, users, and configuration live in process memory and are lost after backend restart.'}</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="storage-ready">
+                  <CheckCircle2 size={18} />
+                  <div>
+                    <strong>Persistent storage is active</strong>
+                    <span>Backend reads and writes are using the configured database repository.</span>
+                  </div>
+                </div>
+              )}
+
+              <div className="storage-workbench">
+                <section className="storage-card">
+                  <div className="admin-section-title">
+                    <span>Database connection</span>
+                    <small>PostgreSQL connection string</small>
+                  </div>
+                  <div className="storage-current-database">
+                    <span>Configured database</span>
+                    <strong>
+                      {storageStatus?.currentDatabaseUrl || storageStatus?.pendingDatabaseUrl || 'No database configured'}
+                    </strong>
+                    {storageStatus?.pendingDatabaseUrl ? <small>Pending migration</small> : null}
+                  </div>
+                  <label className="field">
+                    <span>Database URL</span>
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      placeholder="postgres://user:password@host:5432/stratum?sslmode=require"
+                      value={storageDatabaseUrl}
+                      onChange={(event) => setStorageDatabaseUrl(event.target.value)}
+                    />
+                  </label>
+                  <div className="storage-actions">
+                    <button className="secondary-action" type="button" disabled={storageAction !== 'idle'} onClick={() => void testStorageSettingsDatabase()}>
+                      <BadgeCheck size={16} /> {storageAction === 'testing' ? 'Testing...' : 'Test database'}
+                    </button>
+                    <button className="primary-action" type="button" disabled={storageAction !== 'idle'} onClick={() => void configureStorageSettingsDatabase()}>
+                      <Database size={16} /> {storageAction === 'configuring' ? 'Configuring...' : 'Configure database'}
+                    </button>
+                  </div>
+                  <p className="form-help">
+                    {storageStatus?.persistentConfigHint || 'Set DATABASE_URL in the deployment environment to keep database configuration across restarts.'}
+                  </p>
+                </section>
+
+                <section className="storage-card">
+                  <div className="admin-section-title">
+                    <span>User migration</span>
+                    <small>{storageStatus?.canMigrateUsers ? 'Ready' : 'Requires configured empty database'}</small>
+                  </div>
+                  <p className="form-help">
+                    Admin onboarding can start in stateless mode. After database validation, migrate cached users into the database and switch the active repository.
+                  </p>
+                  <button
+                    className="primary-action full-width"
+                    type="button"
+                    disabled={storageAction !== 'idle' || !storageStatus?.canMigrateUsers}
+                    onClick={() => void migrateStorageSettingsUsers()}
+                  >
+                    <Upload size={16} /> {storageAction === 'migrating' ? 'Migrating...' : 'Migrate users to database'}
+                  </button>
+                  <button className="secondary-action full-width" type="button" disabled={storageAction !== 'idle'} onClick={() => void refreshStorageSettings()}>
+                    <RotateCcw size={16} /> Refresh storage status
+                  </button>
+                </section>
+              </div>
+
+              {storageError ? <div className="admin-inline-error">{storageError}</div> : null}
+              {storageMessage ? <div className="admin-inline-success">{storageMessage}</div> : null}
+
+              <div className="admin-policy-grid">
+                <article>
+                  <strong>Stateless mode</strong>
+                  <span>Uses the in-process repository for quick trials and first admin setup. It is intentionally marked unsafe for restart persistence.</span>
+                </article>
+                <article>
+                  <strong>Database mode</strong>
+                  <span>Uses the same repository contract behind the application, so the rest of Stratum is storage-engine agnostic.</span>
+                </article>
+                <article>
+                  <strong>Migration scope</strong>
+                  <span>This first migration moves users. Workspace and design migration can be added to the same storage engine without changing UI contracts.</span>
+                </article>
               </div>
             </div>
           ) : null}
@@ -3900,272 +4629,6 @@ function AdminConsole({
   )
 }
 
-function reviewStatusLabel(status: BackendDesignReviewRequest['status']) {
-  if (status === 'changes_requested') return 'Changes requested'
-  if (status === 'approved') return 'Approved'
-  return 'Requested'
-}
-
-function ReviewWorkspace({
-  mode,
-  users,
-  activeUserId,
-  comments,
-  reviews,
-  selectedComponent,
-  selectedConnector,
-  commentDraft,
-  reviewSummaryDrafts,
-  isSaving,
-  error,
-  offline,
-  onCommentDraftChange,
-  onSubmitComment,
-  onRequestReview,
-  onReviewSummaryChange,
-  onCompleteReview,
-  onRefresh,
-}: {
-  mode: 'view' | 'comment'
-  users: BackendUser[]
-  activeUserId: string
-  comments: BackendDesignComment[]
-  reviews: BackendDesignReviewRequest[]
-  selectedComponent: DesignComponent | null
-  selectedConnector: DesignConnector | null
-  commentDraft: string
-  reviewSummaryDrafts: Record<string, string>
-  isSaving: boolean
-  error: string | null
-  offline: boolean
-  onCommentDraftChange: (value: string) => void
-  onSubmitComment: () => void
-  onRequestReview: () => void
-  onReviewSummaryChange: (reviewId: string, summary: string) => void
-  onCompleteReview: (reviewId: string, status: BackendDesignReviewRequest['status']) => void
-  onRefresh: () => void
-}) {
-  const selectedTarget = selectedComponent?.name || (selectedConnector ? 'selected connection' : 'whole design')
-
-  return (
-    <div className="review-workspace">
-      <div className="inspector-heading">
-        {mode === 'comment' ? <MessageSquare size={18} /> : <Eye size={18} />}
-        <div>
-          <strong>{mode === 'comment' ? 'Comment mode' : 'View mode'}</strong>
-          <span>Canvas is locked while reviews are captured</span>
-        </div>
-      </div>
-
-      {offline ? (
-        <div className="offline-notice">
-          <strong>Collaboration backend offline</strong>
-          <span>View mode still works. Start the backend to load or capture comments and review requests.</span>
-        </div>
-      ) : null}
-      {error ? <div className="analysis-error">{error}</div> : null}
-
-      <div className="review-actions">
-        <button className="primary-action full-width" type="button" onClick={onRequestReview} disabled={isSaving || offline}>
-          <UserPlus size={16} /> Request review
-        </button>
-        <button className="secondary-action compact-action" type="button" onClick={onRefresh} disabled={isSaving}>
-          Refresh
-        </button>
-      </div>
-
-      {mode === 'comment' ? (
-        <section className="review-card">
-          <div className="section-title">Add comment</div>
-          <span className="comment-target">Target: {selectedTarget}</span>
-          <textarea
-            value={commentDraft}
-            rows={4}
-            placeholder="Capture a question, decision, or review note..."
-            onChange={(event) => onCommentDraftChange(event.target.value)}
-          />
-          <button className="primary-action full-width" type="button" onClick={onSubmitComment} disabled={isSaving || offline || !commentDraft.trim()}>
-            <Send size={16} /> Add comment
-          </button>
-        </section>
-      ) : null}
-
-      <section className="review-card">
-        <div className="section-title">Review history</div>
-        {reviews.length ? (
-          <div className="activity-list">
-            {reviews.map((review) => {
-              const isAssignedToActiveUser = review.reviewerId === activeUserId && review.status === 'requested'
-              return (
-                <article className="activity-item" key={review.id}>
-                  <div>
-                    <strong>{userDisplayName(users, review.reviewerId)}</strong>
-                    <span className={`status-pill ${review.status}`}>{reviewStatusLabel(review.status)}</span>
-                  </div>
-                  {review.message ? <p>{review.message}</p> : null}
-                  {review.summary ? <p>{review.summary}</p> : null}
-                  <small>
-                    Requested by {userDisplayName(users, review.requestedBy)} · {new Date(review.updatedAt).toLocaleString()}
-                  </small>
-                  {isAssignedToActiveUser ? (
-                    <div className="review-response">
-                      <textarea
-                        rows={3}
-                        value={reviewSummaryDrafts[review.id] ?? review.summary}
-                        placeholder="Summarize your review..."
-                        onChange={(event) => onReviewSummaryChange(review.id, event.target.value)}
-                      />
-                      <div className="review-response-actions">
-                        <button className="secondary-action compact-action" type="button" onClick={() => onCompleteReview(review.id, 'changes_requested')} disabled={isSaving}>
-                          Request changes
-                        </button>
-                        <button className="primary-action" type="button" onClick={() => onCompleteReview(review.id, 'approved')} disabled={isSaving}>
-                          <CheckCircle2 size={16} /> Approve
-                        </button>
-                      </div>
-                    </div>
-                  ) : null}
-                </article>
-              )
-            })}
-          </div>
-        ) : (
-          <div className="analysis-empty">
-            <strong>No reviews yet</strong>
-            <span>Ask a teammate to review the current design when it is ready.</span>
-          </div>
-        )}
-      </section>
-
-      <section className="review-card">
-        <div className="section-title">Comments</div>
-        {comments.length ? (
-          <div className="activity-list">
-            {comments.map((comment) => (
-              <article className="activity-item" key={comment.id}>
-                <div>
-                  <strong>{userDisplayName(users, comment.authorId)}</strong>
-                  <span>{new Date(comment.createdAt).toLocaleString()}</span>
-                </div>
-                <p>{comment.body}</p>
-                {comment.componentId ? <small>Component: {comment.componentId}</small> : null}
-                {comment.connectorId ? <small>Connector: {comment.connectorId}</small> : null}
-              </article>
-            ))}
-          </div>
-        ) : (
-          <div className="analysis-empty">
-            <strong>No comments yet</strong>
-            <span>Switch to comment mode and capture feedback without changing the canvas.</span>
-          </div>
-        )}
-      </section>
-    </div>
-  )
-}
-
-function RequestReviewModal({
-  users,
-  activeUserId,
-  isSaving,
-  onCancel,
-  onRequest,
-}: {
-  users: BackendUser[]
-  activeUserId: string
-  isSaving: boolean
-  onCancel: () => void
-  onRequest: (reviewerId: string, message: string) => void
-}) {
-  const reviewers = users.filter((user) => user.id !== activeUserId)
-  const [reviewerId, setReviewerId] = useState(reviewers[0]?.id ?? '')
-  const [message, setMessage] = useState('')
-
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="request-review-modal" role="dialog" aria-modal="true" aria-labelledby="request-review-title">
-        <div className="modal-heading">
-          <p className="eyebrow">Request review</p>
-          <h2 id="request-review-title">Add a reviewer</h2>
-          <span>The reviewer gets a notification and can approve or request changes from view mode.</span>
-        </div>
-        <label className="field">
-          <span>Reviewer</span>
-          <select value={reviewerId} onChange={(event) => setReviewerId(event.target.value)}>
-            {reviewers.map((user) => (
-              <option key={user.id} value={user.id}>
-                {user.displayName} · {user.role}
-              </option>
-            ))}
-          </select>
-        </label>
-        <TextareaField label="Message" value={message} onChange={setMessage} />
-        <div className="modal-actions">
-          <button className="secondary-action" type="button" onClick={onCancel} disabled={isSaving}>
-            Cancel
-          </button>
-          <button className="primary-action" type="button" onClick={() => onRequest(reviewerId, message)} disabled={isSaving || !reviewerId}>
-            <UserPlus size={16} /> Request review
-          </button>
-        </div>
-      </section>
-    </div>
-  )
-}
-
-function NotificationsModal({
-  notifications,
-  users,
-  onMarkRead,
-  onClose,
-}: {
-  notifications: BackendNotification[]
-  users: BackendUser[]
-  onMarkRead: (notificationId: string) => void
-  onClose: () => void
-}) {
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="notifications-modal" role="dialog" aria-modal="true" aria-labelledby="notifications-title">
-        <div className="analysis-modal-header">
-          <div className="modal-heading">
-            <p className="eyebrow">Notifications</p>
-            <h2 id="notifications-title">Review activity</h2>
-            <span>Comments and review updates for the active dummy user.</span>
-          </div>
-          <button className="secondary-action" type="button" onClick={onClose}>
-            Close
-          </button>
-        </div>
-        <div className="activity-list notification-list">
-          {notifications.length ? (
-            notifications.map((notification) => (
-              <article className={`activity-item ${notification.read ? '' : 'unread'}`} key={notification.id}>
-                <div>
-                  <strong>{notification.title}</strong>
-                  <span>{new Date(notification.createdAt).toLocaleString()}</span>
-                </div>
-                <p>{notification.body}</p>
-                <small>For {userDisplayName(users, notification.userId)}</small>
-                {!notification.read ? (
-                  <button className="text-button" type="button" onClick={() => onMarkRead(notification.id)}>
-                    Mark read
-                  </button>
-                ) : null}
-              </article>
-            ))
-          ) : (
-            <div className="analysis-empty">
-              <strong>No notifications</strong>
-              <span>Review requests and comments will appear here.</span>
-            </div>
-          )}
-        </div>
-      </section>
-    </div>
-  )
-}
-
 function CopilotDraftModal({
   aiConnection,
   onClose,
@@ -4445,6 +4908,84 @@ function AnalysisModal({
   )
 }
 
+function SaveDesignModal({
+  mode,
+  remarks,
+  hasVersions,
+  isSaving,
+  onModeChange,
+  onRemarksChange,
+  onCancel,
+  onSave,
+}: {
+  mode: 'override' | 'new'
+  remarks: string
+  hasVersions: boolean
+  isSaving: boolean
+  onModeChange: (mode: 'override' | 'new') => void
+  onRemarksChange: (value: string) => void
+  onCancel: () => void
+  onSave: () => void
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="save-design-modal" role="dialog" aria-modal="true" aria-labelledby="save-design-title">
+        <div className="modal-heading">
+          <p className="eyebrow">Versioned save</p>
+          <h2 id="save-design-title">Save design</h2>
+          <span>Choose whether this save updates the current editable version or starts a new draft version.</span>
+        </div>
+        <div className="save-mode-options" role="radiogroup" aria-label="Save target">
+          <label className={mode === 'override' ? 'active' : ''}>
+            <input
+              type="radio"
+              name="save-version-mode"
+              value="override"
+              checked={mode === 'override'}
+              disabled={!hasVersions}
+              onChange={() => onModeChange('override')}
+            />
+            <span>
+              <strong>Override current version</strong>
+              <small>{hasVersions ? 'Save changes into the current draft/review version.' : 'Create a first version before overrides are available.'}</small>
+            </span>
+          </label>
+          <label className={mode === 'new' ? 'active' : ''}>
+            <input
+              type="radio"
+              name="save-version-mode"
+              value="new"
+              checked={mode === 'new'}
+              onChange={() => onModeChange('new')}
+            />
+            <span>
+              <strong>Create new version</strong>
+              <small>Snapshot the current design as a new draft version.</small>
+            </span>
+          </label>
+        </div>
+        <label className="field">
+          <span>Remarks optional</span>
+          <textarea
+            value={remarks}
+            onChange={(event) => onRemarksChange(event.target.value)}
+            placeholder="What changed in this save?"
+            rows={4}
+          />
+        </label>
+        <div className="modal-actions">
+          <button className="secondary-action" type="button" onClick={onCancel} disabled={isSaving}>
+            Cancel
+          </button>
+          <button className="primary-action" type="button" onClick={onSave} disabled={isSaving}>
+            <Save size={16} /> {isSaving ? 'Saving...' : 'Save design'}
+          </button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function ConnectorTypeModal({
   fromComponent,
   toComponent,
@@ -4488,6 +5029,7 @@ function JourneyPanel({
   design,
   activeJourneyId,
   activeStepIndex,
+  readOnly = false,
   onCreatePrimaryJourney,
   onSelectJourney,
   onChangeJourney,
@@ -4497,6 +5039,7 @@ function JourneyPanel({
   design: DesignDocument
   activeJourneyId: string | null
   activeStepIndex: number
+  readOnly?: boolean
   onCreatePrimaryJourney: () => void
   onSelectJourney: (journeyId: string) => void
   onChangeJourney: (journey: DesignJourney) => void
@@ -4531,7 +5074,7 @@ function JourneyPanel({
       </div>
 
       <div className="journey-toolbar">
-        <button className="primary-action full-width" type="button" onClick={onCreatePrimaryJourney}>
+        <button className="primary-action full-width" type="button" onClick={onCreatePrimaryJourney} disabled={readOnly}>
           <Route size={16} /> Generate primary journey
         </button>
       </div>
@@ -4551,11 +5094,12 @@ function JourneyPanel({
 
           {activeJourney ? (
             <div className="journey-editor">
-              <Field label="Journey title" value={activeJourney.title} onChange={(title) => updateActiveJourney({ title })} />
+              <Field label="Journey title" value={activeJourney.title} onChange={(title) => updateActiveJourney({ title })} disabled={readOnly} />
               <TextareaField
                 label="Journey summary"
                 value={activeJourney.description}
                 onChange={(description) => updateActiveJourney({ description })}
+                disabled={readOnly}
               />
 
               <div className="journey-stepper">
@@ -4589,6 +5133,7 @@ function JourneyPanel({
                     label="Step narration"
                     value={activeStep.description}
                     onChange={(description) => updateStep(activeStep.id, { description })}
+                    disabled={readOnly}
                   />
                 </div>
               ) : (
@@ -4612,7 +5157,7 @@ function JourneyPanel({
                 ))}
               </div>
 
-              <button className="text-button danger" type="button" onClick={() => onDeleteJourney(activeJourney.id)}>
+              <button className="text-button danger" type="button" onClick={() => onDeleteJourney(activeJourney.id)} disabled={readOnly}>
                 Delete journey
               </button>
             </div>
@@ -4751,10 +5296,12 @@ function RequirementPanel({
   design,
   onChange,
   compact = false,
+  readOnly = false,
 }: {
   design: DesignDocument
   onChange: (updater: (current: DesignDocument) => DesignDocument) => void
   compact?: boolean
+  readOnly?: boolean
 }) {
   const brief = createEmptyRequirementBrief(design.requirementBrief)
   return (
@@ -4769,6 +5316,7 @@ function RequirementPanel({
       <TextareaField
         label="Use case"
         value={brief.useCase}
+        disabled={readOnly}
         onChange={(value) =>
           onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, useCase: value } }))
         }
@@ -4776,6 +5324,7 @@ function RequirementPanel({
       <TextareaField
         label="Functional requirements"
         value={brief.functionalRequirements}
+        disabled={readOnly}
         onChange={(value) =>
           onChange((current) => ({
             ...current,
@@ -4786,6 +5335,7 @@ function RequirementPanel({
       <NumberField
         label="Target RPS"
         value={brief.targetRps}
+        disabled={readOnly}
         onChange={(targetRps) =>
           onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, targetRps } }))
         }
@@ -4793,6 +5343,7 @@ function RequirementPanel({
       <Field
         label="Availability"
         value={brief.availabilityRequirement}
+        disabled={readOnly}
         onChange={(availabilityRequirement) =>
           onChange((current) => ({
             ...current,
@@ -4803,11 +5354,13 @@ function RequirementPanel({
       <Field
         label="SLA"
         value={brief.sla}
+        disabled={readOnly}
         onChange={(sla) => onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, sla } }))}
       />
       <TextareaField
         label="Consistency requirements"
         value={brief.consistencyNotes}
+        disabled={readOnly}
         onChange={(value) =>
           onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, consistencyNotes: value } }))
         }
@@ -4815,6 +5368,7 @@ function RequirementPanel({
       <TextareaField
         label="Non-functional requirements"
         value={brief.nonFunctionalRequirements}
+        disabled={readOnly}
         onChange={(value) =>
           onChange((current) => ({
             ...current,
@@ -4825,6 +5379,7 @@ function RequirementPanel({
       <TextareaField
         label="Traffic notes"
         value={brief.trafficNotes}
+        disabled={readOnly}
         onChange={(value) =>
           onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, trafficNotes: value } }))
         }
@@ -4832,6 +5387,7 @@ function RequirementPanel({
       <TextareaField
         label="Primary actors"
         value={brief.primaryActors}
+        disabled={readOnly}
         onChange={(value) =>
           onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, primaryActors: value } }))
         }
@@ -4839,6 +5395,7 @@ function RequirementPanel({
       <TextareaField
         label="Problem statement"
         value={brief.problemStatement}
+        disabled={readOnly}
         onChange={(value) =>
           onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, problemStatement: value } }))
         }
@@ -4846,55 +5403,11 @@ function RequirementPanel({
       <TextareaField
         label="Open questions"
         value={brief.openQuestions}
+        disabled={readOnly}
         onChange={(value) =>
           onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, openQuestions: value } }))
         }
       />
-    </div>
-  )
-}
-
-function ConfirmDeleteModal({
-  target,
-  isDeleting,
-  onCancel,
-  onConfirm,
-}: {
-  target: DeleteTarget
-  isDeleting: boolean
-  onCancel: () => void
-  onConfirm: () => void
-}) {
-  const isWorkspace = target.kind === 'workspace'
-  const name = isWorkspace
-    ? target.workspace.name
-    : target.design.name || target.design.document.title || 'Untitled design'
-  const title = isWorkspace ? 'Delete workspace?' : 'Delete design?'
-  const detail = isWorkspace
-    ? 'This workspace is empty. Deleting it cannot be undone.'
-    : 'This will delete the design and its saved versions. This action cannot be undone.'
-
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="confirm-delete-modal" role="dialog" aria-modal="true" aria-labelledby="delete-title">
-        <div className="modal-heading">
-          <p className="eyebrow">Confirm delete</p>
-          <h2 id="delete-title">{title}</h2>
-          <span>{detail}</span>
-        </div>
-        <div className="delete-summary">
-          <strong>{name}</strong>
-          <span>{isWorkspace ? 'Workspace' : 'Design'}</span>
-        </div>
-        <div className="modal-actions">
-          <button className="secondary-action" type="button" onClick={onCancel} disabled={isDeleting}>
-            Cancel
-          </button>
-          <button className="danger-action" type="button" onClick={onConfirm} disabled={isDeleting}>
-            <Trash2 size={16} /> {isDeleting ? 'Deleting...' : 'Delete'}
-          </button>
-        </div>
-      </section>
     </div>
   )
 }
@@ -5032,782 +5545,5 @@ function DesignAnalysisBase({ design, docs }: { design: DesignDocument; docs: Ba
         ))}
       </div>
     </div>
-  )
-}
-
-function HomeScreen({
-  workspaces,
-  designs,
-  activeWorkspaceId,
-  newWorkspaceName,
-  error,
-  action,
-  onWorkspaceNameChange,
-  onSelectWorkspace,
-  onCreateWorkspace,
-  onDeleteWorkspace,
-  onOpenDesign,
-  onDeleteDesign,
-  onNewDesign,
-  onRefresh,
-}: {
-  workspaces: BackendWorkspace[]
-  designs: BackendDesign[]
-  activeWorkspaceId: string
-  newWorkspaceName: string
-  error: string | null
-  action: 'workspace' | 'design' | 'delete-workspace' | 'delete-design' | null
-  onWorkspaceNameChange: (value: string) => void
-  onSelectWorkspace: (workspaceId: string) => void
-  onCreateWorkspace: () => void | Promise<void>
-  onDeleteWorkspace: (workspace: BackendWorkspace) => void
-  onOpenDesign: (design: BackendDesign) => void
-  onDeleteDesign: (design: BackendDesign) => void
-  onNewDesign: () => void | Promise<void>
-  onRefresh: () => void
-}) {
-  const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId)
-  const isCreatingWorkspace = action === 'workspace'
-  const isCreatingDesign = action === 'design'
-  const canDeleteActiveWorkspace = activeWorkspaceId !== defaultWorkspace.id && designs.length === 0
-
-  return (
-    <main className="home-shell">
-      <section className="home-hero">
-        <div>
-          <p className="eyebrow">Architecture canvas</p>
-          <h1>Design, structure, and evolve system architecture.</h1>
-          <p>
-            Create workspaces for design explorations, open diagrams like a board, and save each design as structured
-            architecture code ready for versioning and evaluation.
-          </p>
-        </div>
-      </section>
-
-      {error ? (
-        <div className="home-error">
-          <span>{error}</span>
-          <button onClick={onRefresh}>Retry</button>
-        </div>
-      ) : null}
-
-      <section className="home-grid">
-        <aside className="workspace-panel">
-          <div className="home-section-title">Workspaces</div>
-          <div className="workspace-list">
-            {workspaces.map((workspace) => (
-              <div
-                className={`workspace-card ${workspace.id === activeWorkspaceId ? 'active' : ''}`}
-                key={workspace.id}
-              >
-                <button type="button" className="workspace-card-main" onClick={() => onSelectWorkspace(workspace.id)}>
-                  <strong>{workspace.name}</strong>
-                  <span>{workspace.id === 'guest-workspace' ? 'Default workspace' : 'Workspace'}</span>
-                </button>
-                {workspace.id === activeWorkspaceId && canDeleteActiveWorkspace ? (
-                  <button
-                    type="button"
-                    className="icon-danger-button"
-                    aria-label={`Delete ${workspace.name}`}
-                    onClick={() => onDeleteWorkspace(workspace)}
-                  >
-                    <Trash2 size={15} />
-                  </button>
-                ) : null}
-              </div>
-            ))}
-          </div>
-          <form
-            className="create-workspace"
-            onSubmit={(event) => {
-              event.preventDefault()
-              void onCreateWorkspace()
-            }}
-          >
-            <input
-              value={newWorkspaceName}
-              placeholder="New workspace name"
-              aria-label="New workspace name"
-              onChange={(event) => onWorkspaceNameChange(event.target.value)}
-            />
-            <button type="submit" disabled={isCreatingWorkspace}>
-              <FolderPlus size={16} /> {isCreatingWorkspace ? 'Creating...' : 'Create'}
-            </button>
-          </form>
-        </aside>
-
-        <section className="designs-panel">
-          <div className="designs-panel-heading">
-            <div>
-              <div className="home-section-title">Designs</div>
-              <h2>{activeWorkspace?.name ?? 'Workspace'}</h2>
-            </div>
-            <button className="secondary-action" type="button" disabled={isCreatingDesign} onClick={() => void onNewDesign()}>
-              <FilePlus2 size={16} /> {isCreatingDesign ? 'Creating...' : 'New design'}
-            </button>
-          </div>
-
-          {designs.length ? (
-            <div className="home-design-grid">
-              {designs.map((backendDesign) => (
-                <article className="home-design-card" key={backendDesign.id}>
-                  <button type="button" className="home-design-open" onClick={() => onOpenDesign(backendDesign)}>
-                    <div className="design-card-preview">
-                      <span>{backendDesign.document.components.length}</span>
-                      <small>components</small>
-                    </div>
-                    <strong>{backendDesign.name || backendDesign.document.title || 'Untitled design'}</strong>
-                    <span>
-                      v{backendDesign.versionNumber ?? 1} • {new Date(backendDesign.updatedAt).toLocaleString()}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className="icon-danger-button design-delete-button"
-                    aria-label={`Delete ${backendDesign.name || backendDesign.document.title || 'design'}`}
-                    onClick={() => onDeleteDesign(backendDesign)}
-                  >
-                    <Trash2 size={15} />
-                  </button>
-                </article>
-              ))}
-            </div>
-          ) : (
-            <div className="empty-designs">
-              <strong>No designs yet</strong>
-              <span>Create the first design in this workspace.</span>
-              <button className="primary-action" type="button" disabled={isCreatingDesign} onClick={() => void onNewDesign()}>
-                <FilePlus2 size={18} /> {isCreatingDesign ? 'Creating...' : 'Create design'}
-              </button>
-            </div>
-          )}
-        </section>
-      </section>
-    </main>
-  )
-}
-
-function ComponentInspector({
-  component,
-  currentDesignId,
-  workspaceDesigns,
-  catalogAssets,
-  onChange,
-  onDelete,
-  onOpenLinkedDesign,
-  onCreateCatalogAsset,
-}: {
-  component: DesignComponent
-  currentDesignId: string
-  workspaceDesigns: BackendDesign[]
-  catalogAssets: BackendCatalogAsset[]
-  onChange: (component: DesignComponent) => void
-  onDelete: () => void
-  onOpenLinkedDesign: (design: BackendDesign) => void
-  onCreateCatalogAsset: (input: {
-    name: string
-    type: string
-    owner?: string
-    description?: string
-    criticality?: string
-    tags?: string[]
-  }) => Promise<BackendCatalogAsset>
-}) {
-  const [catalogError, setCatalogError] = useState<string | null>(null)
-
-  if (component.type === 'design.link') {
-    return (
-      <LinkedDesignInspector
-        component={component}
-        currentDesignId={currentDesignId}
-        workspaceDesigns={workspaceDesigns}
-        onChange={onChange}
-        onDelete={onDelete}
-        onOpenLinkedDesign={onOpenLinkedDesign}
-      />
-    )
-  }
-
-  const linkedAsset = component.metadata.enterpriseAsset
-    ? catalogAssets.find((asset) => asset.id === component.metadata.enterpriseAsset?.assetId)
-    : null
-  const exactDuplicateCandidates = catalogAssets.filter(
-    (asset) => normalizedCatalogLabel(asset.name) === normalizedCatalogLabel(component.name),
-  )
-  const duplicateCandidates = catalogAssets.filter((asset) => isPotentialCatalogMatch(component.name, asset.name))
-
-  async function promoteToCatalog() {
-    setCatalogError(null)
-    try {
-      const created = await onCreateCatalogAsset({
-        name: component.name,
-        type: component.type,
-        owner: component.owner,
-        description: component.purpose,
-        criticality: component.criticality,
-      })
-      linkCatalogAsset(created)
-    } catch (error) {
-      setCatalogError(error instanceof Error ? error.message : 'Could not add component to catalog.')
-    }
-  }
-
-  function linkCatalogAsset(asset: BackendCatalogAsset) {
-    onChange({
-      ...component,
-      name: component.name.trim() ? component.name : asset.name,
-      owner: component.owner.trim() ? component.owner : asset.owner,
-      criticality: (asset.criticality || component.criticality) as DesignComponent['criticality'],
-      metadata: {
-        ...component.metadata,
-        enterpriseAsset: {
-          assetId: asset.id,
-          name: asset.name,
-          type: asset.type,
-          owner: asset.owner,
-          criticality: asset.criticality,
-          linkedAt: new Date().toISOString(),
-        },
-      },
-    })
-  }
-
-  function unlinkCatalogAsset() {
-    const metadata = { ...component.metadata }
-    delete metadata.enterpriseAsset
-    onChange({ ...component, metadata })
-  }
-
-  return (
-    <div className="inspector">
-      <div className="inspector-heading">
-        {component.type.startsWith('data.') ? <Database size={18} /> : <Server size={18} />}
-        <div>
-          <strong>{component.name}</strong>
-          <span>{component.type}</span>
-        </div>
-        <button className="text-button danger" type="button" onClick={onDelete}>
-          Delete
-        </button>
-      </div>
-
-      <Field label="Name" value={component.name} onChange={(name) => onChange({ ...component, name })} />
-      <div className="inspector-group enterprise-link-card">
-        <div className="section-title">Enterprise Catalog</div>
-        {component.metadata.enterpriseAsset ? (
-          <div className="catalog-link-summary">
-            <span className="shared-entity-badge">Shared entity</span>
-            <strong>{linkedAsset?.name ?? component.metadata.enterpriseAsset.name}</strong>
-            <small>
-              {linkedAsset
-                ? `${linkedAsset.usedInDesignCount} linked design${linkedAsset.usedInDesignCount === 1 ? '' : 's'}`
-                : 'Catalog asset not visible or deleted'}
-            </small>
-            <button className="text-button" type="button" onClick={unlinkCatalogAsset}>
-              Unlink from catalog
-            </button>
-          </div>
-        ) : (
-          <>
-            {duplicateCandidates.length ? (
-              <div className="catalog-suggestions">
-                <strong>Possible existing asset</strong>
-                {duplicateCandidates.map((asset) => (
-                  <button className="catalog-suggestion" type="button" key={asset.id} onClick={() => linkCatalogAsset(asset)}>
-                    <span>{asset.name}</span>
-                    <small>{asset.type} • {asset.usedInDesignCount} use{asset.usedInDesignCount === 1 ? '' : 's'}</small>
-                  </button>
-                ))}
-              </div>
-            ) : null}
-            <label className="field">
-              <span>Link existing asset</span>
-              <select
-                value=""
-                onChange={(event) => {
-                  const asset = catalogAssets.find((item) => item.id === event.target.value)
-                  if (asset) linkCatalogAsset(asset)
-                }}
-              >
-                <option value="">Choose from catalog...</option>
-                {catalogAssets.map((asset) => (
-                  <option key={asset.id} value={asset.id}>
-                    {asset.name} ({asset.type})
-                  </option>
-                ))}
-              </select>
-            </label>
-            {catalogError ? <div className="admin-inline-error">{catalogError}</div> : null}
-            <button
-              className="command"
-              type="button"
-              disabled={!component.name.trim() || exactDuplicateCandidates.length > 0}
-              onClick={() => void promoteToCatalog()}
-              title={exactDuplicateCandidates.length ? 'Link the existing catalog asset instead of creating a duplicate.' : 'Create catalog asset'}
-            >
-              <FilePlus2 size={16} /> Add to catalog
-            </button>
-          </>
-        )}
-      </div>
-      <Field label="Owner" value={component.owner} onChange={(owner) => onChange({ ...component, owner })} />
-      <TextareaField
-        label="Purpose"
-        value={component.purpose}
-        onChange={(purpose) => onChange({ ...component, purpose })}
-      />
-      <div className="inspector-group">
-        <div className="section-title">Notes</div>
-        <button
-          className="command"
-          onClick={() =>
-            onChange({
-              ...component,
-              notes: [
-                ...component.notes,
-                {
-                  id: `note_${crypto.randomUUID()}`,
-                  body: '',
-                  tone: 'neutral',
-                },
-              ],
-            })
-          }
-        >
-          <MessageSquarePlus size={16} /> Add note
-        </button>
-        {component.notes.map((note) => (
-          <div className={`note-editor ${note.tone}`} key={note.id}>
-            <select
-              value={note.tone}
-              onChange={(event) =>
-                onChange({
-                  ...component,
-                  notes: component.notes.map((item) =>
-                    item.id === note.id ? { ...item, tone: event.target.value as typeof note.tone } : item,
-                  ),
-                })
-              }
-            >
-              <option value="neutral">Neutral</option>
-              <option value="risk">Risk</option>
-              <option value="decision">Decision</option>
-              <option value="question">Question</option>
-            </select>
-            <textarea
-              value={note.body}
-              placeholder="Add context, risk, decision, or reviewer question..."
-              onChange={(event) =>
-                onChange({
-                  ...component,
-                  notes: component.notes.map((item) => (item.id === note.id ? { ...item, body: event.target.value } : item)),
-                })
-              }
-              rows={3}
-            />
-            <button
-              className="text-button danger"
-              onClick={() => onChange({ ...component, notes: component.notes.filter((item) => item.id !== note.id) })}
-            >
-              Remove
-            </button>
-          </div>
-        ))}
-      </div>
-      <label className="field">
-        <span>Criticality</span>
-        <select
-          value={component.criticality}
-          onChange={(event) => onChange({ ...component, criticality: event.target.value as DesignComponent['criticality'] })}
-        >
-          <option value="low">Low</option>
-          <option value="medium">Medium</option>
-          <option value="high">High</option>
-          <option value="critical">Critical</option>
-        </select>
-      </label>
-
-      <div className="inspector-group">
-        <div className="section-title">Evaluation</div>
-        <NumberField
-          label="Expected QPS"
-          value={component.metadata.expectedQps ?? null}
-          onChange={(expectedQps) => onChange({ ...component, metadata: { ...component.metadata, expectedQps } })}
-        />
-        <NumberField
-          label="Latency budget ms"
-          value={component.metadata.latencyBudgetMs ?? null}
-          onChange={(latencyBudgetMs) => onChange({ ...component, metadata: { ...component.metadata, latencyBudgetMs } })}
-        />
-      </div>
-
-      {component.type === 'data.redis' && <RedisInspector component={component} onChange={onChange} />}
-    </div>
-  )
-}
-
-function LinkedDesignInspector({
-  component,
-  currentDesignId,
-  workspaceDesigns,
-  onChange,
-  onDelete,
-  onOpenLinkedDesign,
-}: {
-  component: DesignComponent
-  currentDesignId: string
-  workspaceDesigns: BackendDesign[]
-  onChange: (component: DesignComponent) => void
-  onDelete: () => void
-  onOpenLinkedDesign: (design: BackendDesign) => void
-}) {
-  const linkableDesigns = workspaceDesigns.filter((design) => design.id !== currentDesignId)
-  const linkedDesign = component.metadata.linkedDesign
-  const linkedBackendDesign = linkedDesign
-    ? workspaceDesigns.find((design) => design.id === linkedDesign.designId && design.workspaceId === linkedDesign.workspaceId)
-    : null
-  const currentLinkedTitle = linkedBackendDesign
-    ? linkedBackendDesign.name || linkedBackendDesign.document.title || 'Untitled design'
-    : linkedDesign?.title
-
-  useEffect(() => {
-    if (!linkedDesign || !linkedBackendDesign) return
-    const title = linkedBackendDesign.name || linkedBackendDesign.document.title || 'Untitled design'
-    if (
-      linkedDesign.title === title &&
-      linkedDesign.access === linkedBackendDesign.access &&
-      linkedDesign.updatedAt === linkedBackendDesign.updatedAt
-    ) {
-      return
-    }
-    onChange({
-      ...component,
-      metadata: {
-        ...component.metadata,
-        linkedDesign: {
-          workspaceId: linkedBackendDesign.workspaceId,
-          designId: linkedBackendDesign.id,
-          title,
-          access: linkedBackendDesign.access,
-          updatedAt: linkedBackendDesign.updatedAt,
-        },
-      },
-    })
-  }, [component, linkedBackendDesign, linkedDesign, onChange])
-
-  function updateLinkedDesign(designId: string) {
-    if (!designId) {
-      const metadata = { ...component.metadata }
-      delete metadata.linkedDesign
-      onChange({ ...component, metadata })
-      return
-    }
-    const target = workspaceDesigns.find((design) => design.id === designId)
-    if (!target) return
-    const title = target.name || target.document.title || 'Untitled design'
-    onChange({
-      ...component,
-      name: component.name === 'Linked Design' || component.name.trim() === '' ? title : component.name,
-      metadata: {
-        ...component.metadata,
-        linkedDesign: {
-          workspaceId: target.workspaceId,
-          designId: target.id,
-          title,
-          access: target.access,
-          updatedAt: target.updatedAt,
-        },
-      },
-    })
-  }
-
-  return (
-    <div className="inspector linked-design-inspector">
-      <div className="inspector-heading">
-        <LayoutDashboard size={18} />
-        <div>
-          <strong>{component.name || 'Linked Design'}</strong>
-          <span>Reference to another design</span>
-        </div>
-        <button className="text-button danger" type="button" onClick={onDelete}>
-          Delete
-        </button>
-      </div>
-
-      <Field label="Label" value={component.name} onChange={(name) => onChange({ ...component, name })} />
-
-      <div className="inspector-group">
-        <div className="section-title">Target</div>
-        <label className="field">
-          <span>Target design</span>
-          <select value={linkedDesign?.designId ?? ''} onChange={(event) => updateLinkedDesign(event.target.value)}>
-            <option value="">Choose a design...</option>
-            {linkableDesigns.map((design) => (
-              <option key={design.id} value={design.id}>
-                {design.name || design.document.title || 'Untitled design'}
-              </option>
-            ))}
-          </select>
-        </label>
-        {linkedDesign ? (
-          <>
-            <Field label="Title" value={currentLinkedTitle ?? 'Unavailable design'} onChange={() => undefined} disabled />
-            <Field
-              label="Access"
-              value={linkedBackendDesign?.access ?? `${linkedDesign.access} (not visible)`}
-              onChange={() => undefined}
-              disabled
-            />
-            <Field
-              label="Last synced"
-              value={new Date(linkedBackendDesign?.updatedAt ?? linkedDesign.updatedAt).toLocaleString()}
-              onChange={() => undefined}
-              disabled
-            />
-            <button
-              className="command"
-              type="button"
-              disabled={!linkedBackendDesign}
-              onClick={() => linkedBackendDesign && onOpenLinkedDesign(linkedBackendDesign)}
-            >
-              <LayoutDashboard size={16} /> Open linked design
-            </button>
-          </>
-        ) : (
-          <div className="analysis-empty compact-empty">
-            <strong>No target selected</strong>
-            <span>Links are limited to designs visible in this workspace.</span>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function ConnectorInspector({
-  connector,
-  onChange,
-  onDelete,
-}: {
-  connector: DesignConnector
-  onChange: (connector: DesignConnector) => void
-  onDelete: () => void
-}) {
-  return (
-    <div className="inspector">
-      <div className="inspector-heading">
-        <ChevronsLeftRight size={18} />
-        <div>
-          <strong>{connector.type.replaceAll('_', ' ')}</strong>
-          <span>Connector</span>
-        </div>
-        <button className="text-button danger" type="button" onClick={onDelete}>
-          Delete
-        </button>
-      </div>
-
-      <SelectField
-        label="Type"
-        value={connector.type}
-        values={['synchronous', 'asynchronous_event', 'batch_transfer', 'cache_read', 'cache_write', 'model_call', 'observability_signal']}
-        onChange={(type) => onChange({ ...connector, type: type as ConnectorType })}
-      />
-      <Field label="Protocol" value={connector.protocol} onChange={(protocol) => onChange({ ...connector, protocol })} />
-      <NumberField
-        label="Timeout ms"
-        value={connector.timeoutMs}
-        onChange={(timeoutMs) => onChange({ ...connector, timeoutMs })}
-      />
-      <Field
-        label="Consistency"
-        value={connector.consistencyExpectation}
-        onChange={(consistencyExpectation) => onChange({ ...connector, consistencyExpectation })}
-      />
-      <TextareaField label="Notes" value={connector.notes} onChange={(notes) => onChange({ ...connector, notes })} />
-      <label className="field checkbox-field">
-        <span>Animated flow</span>
-        <input
-          type="checkbox"
-          checked={connector.animated}
-          onChange={(event) => onChange({ ...connector, animated: event.target.checked })}
-        />
-      </label>
-    </div>
-  )
-}
-
-function RedisInspector({
-  component,
-  onChange,
-}: {
-  component: DesignComponent
-  onChange: (component: DesignComponent) => void
-}) {
-  const redis = component.metadata.redis
-  if (!redis) return null
-  const currentRedis: RedisMetadata = redis
-
-  function updateRedis(patch: Partial<RedisMetadata>) {
-    onChange({ ...component, metadata: { ...component.metadata, redis: { ...currentRedis, ...patch } } })
-  }
-
-  return (
-    <div className="inspector-group">
-      <div className="section-title">Redis Details</div>
-      <SelectField
-        label="Usage"
-        value={redis.usage}
-        values={['unknown', 'cache', 'session_store', 'rate_limiter', 'pub_sub', 'lock_manager']}
-        onChange={(usage) => updateRedis({ usage: usage as typeof redis.usage })}
-      />
-      <SelectField
-        label="Cluster mode"
-        value={redis.clusterMode}
-        values={['unknown', 'enabled', 'disabled']}
-        onChange={(clusterMode) => updateRedis({ clusterMode: clusterMode as typeof redis.clusterMode })}
-      />
-      <SelectField
-        label="Replication"
-        value={redis.replication}
-        values={['unknown', 'none', 'primary_replica', 'multi_az', 'cross_region']}
-        onChange={(replication) => updateRedis({ replication: replication as typeof redis.replication })}
-      />
-      <SelectField
-        label="Persistence"
-        value={redis.persistence}
-        values={['unknown', 'none', 'rdb', 'aof', 'rdb_aof', 'managed_default']}
-        onChange={(persistence) => updateRedis({ persistence: persistence as typeof redis.persistence })}
-      />
-      <SelectField
-        label="Eviction policy"
-        value={redis.evictionPolicy}
-        values={['unknown', 'noeviction', 'allkeys_lru', 'volatile_lru', 'allkeys_lfu', 'volatile_ttl']}
-        onChange={(evictionPolicy) => updateRedis({ evictionPolicy: evictionPolicy as typeof redis.evictionPolicy })}
-      />
-      <SelectField
-        label="Consistency"
-        value={redis.consistencyExpectation}
-        values={['unknown', 'best_effort_cache', 'read_after_write', 'strong_for_locking', 'eventual']}
-        onChange={(consistencyExpectation) =>
-          updateRedis({ consistencyExpectation: consistencyExpectation as typeof redis.consistencyExpectation })
-        }
-      />
-      <SelectField
-        label="Failover"
-        value={redis.failoverBehavior}
-        values={['unknown', 'automatic', 'manual', 'data_loss_possible']}
-        onChange={(failoverBehavior) => updateRedis({ failoverBehavior: failoverBehavior as typeof redis.failoverBehavior })}
-      />
-      <SelectField
-        label="Backup/restore"
-        value={redis.backupRestore}
-        values={['unknown', 'configured', 'not_required', 'missing']}
-        onChange={(backupRestore) => updateRedis({ backupRestore: backupRestore as typeof redis.backupRestore })}
-      />
-      <NumberField
-        label="Memory limit GB"
-        value={redis.memoryLimitGb}
-        onChange={(memoryLimitGb) => updateRedis({ memoryLimitGb })}
-      />
-      <NumberField label="Redis QPS" value={redis.expectedQps} onChange={(expectedQps) => updateRedis({ expectedQps })} />
-      <SelectField
-        label="Hot key risk"
-        value={redis.hotKeyRisk}
-        values={['unknown', 'low', 'medium', 'high']}
-        onChange={(hotKeyRisk) => updateRedis({ hotKeyRisk: hotKeyRisk as typeof redis.hotKeyRisk })}
-      />
-    </div>
-  )
-}
-
-function StructuredView({ design }: { design: DesignDocument }) {
-  return (
-    <div className="inspector structured">
-      <div className="inspector-heading">
-        <Braces size={18} />
-        <div>
-          <strong>Structured JSON</strong>
-          <span>Semantic model plus React Flow layout</span>
-        </div>
-      </div>
-      <pre>{JSON.stringify(toExportableDesign(design), null, 2)}</pre>
-    </div>
-  )
-}
-
-function Field({
-  label,
-  value,
-  onChange,
-  disabled = false,
-  type = 'text',
-}: {
-  label: string
-  value: string
-  onChange: (value: string) => void
-  disabled?: boolean
-  type?: string
-}) {
-  return (
-    <label className="field">
-      <span>{label}</span>
-      <input type={type} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
-    </label>
-  )
-}
-
-function TextareaField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
-  return (
-    <label className="field">
-      <span>{label}</span>
-      <textarea value={value} onChange={(event) => onChange(event.target.value)} rows={4} />
-    </label>
-  )
-}
-
-function NumberField({
-  label,
-  value,
-  onChange,
-}: {
-  label: string
-  value: number | null
-  onChange: (value: number | null) => void
-}) {
-  return (
-    <label className="field">
-      <span>{label}</span>
-      <input
-        type="number"
-        min="0"
-        value={value ?? ''}
-        onChange={(event) => onChange(event.target.value === '' ? null : Number(event.target.value))}
-      />
-    </label>
-  )
-}
-
-function SelectField({
-  label,
-  value,
-  values,
-  onChange,
-}: {
-  label: string
-  value: string
-  values: string[]
-  onChange: (value: string) => void
-}) {
-  return (
-    <label className="field">
-      <span>{label}</span>
-      <select value={value} onChange={(event) => onChange(event.target.value)}>
-        {values.map((item) => (
-          <option key={item} value={item}>
-            {item.replaceAll('_', ' ')}
-          </option>
-        ))}
-      </select>
-    </label>
   )
 }

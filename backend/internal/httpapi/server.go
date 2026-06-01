@@ -14,29 +14,55 @@ import (
 	"os"
 	urlpath "path"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/system-design-evaluator/backend/internal/analysis"
+	"github.com/system-design-evaluator/backend/internal/app"
 	"github.com/system-design-evaluator/backend/internal/config"
 	"github.com/system-design-evaluator/backend/internal/domain"
+	"github.com/system-design-evaluator/backend/internal/policy"
 	"github.com/system-design-evaluator/backend/internal/realtime"
+	"github.com/system-design-evaluator/backend/internal/store"
 )
 
 type Server struct {
-	cfg config.Config
-	hub *realtime.Hub
-	log *slog.Logger
-	mux *http.ServeMux
+	cfg      config.Config
+	hub      *realtime.Hub
+	storage  *store.StorageEngine
+	services app.Services
+	authz    policy.Authorizer
+	log      *slog.Logger
+	mux      *http.ServeMux
 }
 
-func NewServer(cfg config.Config, hub *realtime.Hub, log *slog.Logger) *Server {
+func NewServer(cfg config.Config, hub *realtime.Hub, log *slog.Logger, storageEngine ...*store.StorageEngine) *Server {
+	var storage *store.StorageEngine
+	if len(storageEngine) > 0 {
+		storage = storageEngine[0]
+	}
+	var provider app.RepositoryProvider
+	if storage != nil {
+		provider = storage
+	} else if hub != nil {
+		provider = app.StaticRepositoryProvider{Repo: hub.Repository()}
+	} else {
+		provider = app.StaticRepositoryProvider{}
+	}
+	var storageBackend app.StorageBackend
+	if storage != nil {
+		storageBackend = storage
+	}
 	server := &Server{
-		cfg: cfg,
-		hub: hub,
-		log: log,
-		mux: http.NewServeMux(),
+		cfg:      cfg,
+		hub:      hub,
+		storage:  storage,
+		services: app.NewServices(provider, storageBackend),
+		authz:    policy.NewAuthorizer(provider),
+		log:      log,
+		mux:      http.NewServeMux(),
 	}
 	server.routes()
 	return server
@@ -49,6 +75,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /ws", s.handleWorkspaceSocket)
+	s.mux.HandleFunc("GET /api/storage/status", s.handleStorageStatus)
 	s.mux.HandleFunc("GET /api/setup/status", s.handleSetupStatus)
 	s.mux.HandleFunc("POST /api/setup/first-admin", s.handleCreateFirstAdmin)
 	s.mux.HandleFunc("POST /api/setup/admin-password", s.handleSetInitialAdminPassword)
@@ -65,6 +92,17 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PATCH /api/admin/ai-provider", s.handleUpdateAIProviderConfig)
 	s.mux.HandleFunc("GET /api/admin/mcp", s.handleGetMCPConfig)
 	s.mux.HandleFunc("PATCH /api/admin/mcp", s.handleUpdateMCPConfig)
+	s.mux.HandleFunc("GET /api/admin/storage", s.handleAdminStorageStatus)
+	s.mux.HandleFunc("POST /api/admin/storage/test", s.handleTestDatabaseStorage)
+	s.mux.HandleFunc("PATCH /api/admin/storage/database", s.handleConfigureDatabaseStorage)
+	s.mux.HandleFunc("POST /api/admin/storage/migrate-users", s.handleMigrateStorageUsers)
+	s.mux.HandleFunc("GET /api/admin/access/users/{userID}", s.handleListUserAccess)
+	s.mux.HandleFunc("GET /api/admin/access/groups", s.handleListAccessGroups)
+	s.mux.HandleFunc("POST /api/admin/access/groups", s.handleCreateAccessGroup)
+	s.mux.HandleFunc("PATCH /api/admin/access/groups/{groupID}", s.handleUpdateAccessGroup)
+	s.mux.HandleFunc("DELETE /api/admin/access/groups/{groupID}", s.handleDeleteAccessGroup)
+	s.mux.HandleFunc("GET /api/admin/access/groups/{groupID}/members", s.handleListAccessGroupMembers)
+	s.mux.HandleFunc("PUT /api/admin/access/groups/{groupID}/members", s.handleReplaceAccessGroupMembers)
 	s.mux.HandleFunc("GET /api/catalog/assets", s.handleListCatalogAssets)
 	s.mux.HandleFunc("POST /api/catalog/assets", s.handleCreateCatalogAsset)
 	s.mux.HandleFunc("PATCH /api/admin/catalog/assets/{assetID}", s.handleUpdateCatalogAsset)
@@ -78,6 +116,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/access", s.handleListWorkspaceAccess)
 	s.mux.HandleFunc("POST /api/workspaces/{workspaceID}/access", s.handleGrantWorkspaceAccess)
 	s.mux.HandleFunc("DELETE /api/workspaces/{workspaceID}/access/{userID}", s.handleRevokeWorkspaceAccess)
+	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/group-access", s.handleListWorkspaceGroupAccess)
+	s.mux.HandleFunc("POST /api/workspaces/{workspaceID}/group-access", s.handleGrantWorkspaceGroupAccess)
+	s.mux.HandleFunc("DELETE /api/workspaces/{workspaceID}/group-access/{groupID}", s.handleRevokeWorkspaceGroupAccess)
 	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/designs", s.handleListDesigns)
 	s.mux.HandleFunc("POST /api/workspaces/{workspaceID}/designs", s.handleCreateDesign)
 	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/designs/{designID}", s.handleGetDesign)
@@ -86,9 +127,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/designs/{designID}/access", s.handleListDesignAccess)
 	s.mux.HandleFunc("POST /api/workspaces/{workspaceID}/designs/{designID}/access", s.handleGrantDesignAccess)
 	s.mux.HandleFunc("DELETE /api/workspaces/{workspaceID}/designs/{designID}/access/{userID}", s.handleRevokeDesignAccess)
+	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/designs/{designID}/group-access", s.handleListDesignGroupAccess)
+	s.mux.HandleFunc("POST /api/workspaces/{workspaceID}/designs/{designID}/group-access", s.handleGrantDesignGroupAccess)
+	s.mux.HandleFunc("DELETE /api/workspaces/{workspaceID}/designs/{designID}/group-access/{groupID}", s.handleRevokeDesignGroupAccess)
 	s.mux.HandleFunc("PUT /api/workspaces/{workspaceID}/designs/{designID}/document", s.handleSaveDesignDocument)
 	s.mux.HandleFunc("POST /api/workspaces/{workspaceID}/designs/{designID}/analysis", s.handleAnalyzeDesign)
 	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/designs/{designID}/versions", s.handleListDesignVersions)
+	s.mux.HandleFunc("POST /api/workspaces/{workspaceID}/designs/{designID}/versions", s.handleCreateDesignVersion)
+	s.mux.HandleFunc("PATCH /api/workspaces/{workspaceID}/designs/{designID}/versions/{versionID}", s.handleUpdateDesignVersionStatus)
+	s.mux.HandleFunc("DELETE /api/workspaces/{workspaceID}/designs/{designID}/versions/{versionID}", s.handleDeleteDesignVersion)
 	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/designs/{designID}/docs", s.handleListDesignDocs)
 	s.mux.HandleFunc("POST /api/workspaces/{workspaceID}/designs/{designID}/docs", s.handleCreateDesignDoc)
 	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}", s.handleGetDesignDoc)
@@ -108,6 +155,84 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) storageStatus(ctx context.Context) store.StorageStatus {
+	return s.services.Storage.Status(ctx)
+}
+
+func (s *Server) handleStorageStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"storage": s.storageStatus(r.Context())})
+}
+
+func (s *Server) handleAdminStorageStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"storage": s.storageStatus(r.Context())})
+}
+
+func (s *Server) handleTestDatabaseStorage(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	var body struct {
+		DatabaseURL string `json:"databaseUrl"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := s.services.Storage.TestDatabase(r.Context(), body.DatabaseURL); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "storage": s.storageStatus(r.Context())})
+}
+
+func (s *Server) handleConfigureDatabaseStorage(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	var body struct {
+		DatabaseURL string `json:"databaseUrl"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	status, err := s.services.Storage.ConfigureDatabase(r.Context(), body.DatabaseURL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.hub.SetRepository(s.storage.Repository())
+	writeJSON(w, http.StatusOK, map[string]any{"storage": status})
+}
+
+func (s *Server) handleMigrateStorageUsers(w http.ResponseWriter, r *http.Request) {
+	user, err := s.currentUser(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "session is required")
+		return
+	}
+	if !policy.RoleAllows(user.Role, "admin") {
+		writeError(w, http.StatusForbidden, "admin role is required")
+		return
+	}
+	status, migrated, err := s.services.Storage.MigrateUsersToDatabase(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.hub.SetRepository(s.storage.Repository())
+	token, err := s.services.Identity.CreateSession(r.Context(), user.ID, s.sessionExpiresAt())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.setSessionCookie(w, r, token)
+	writeJSON(w, http.StatusOK, map[string]any{"storage": status, "migratedUsers": migrated})
 }
 
 func (s *Server) handleStaticAssets(w http.ResponseWriter, r *http.Request) {
@@ -140,11 +265,11 @@ func (s *Server) handleWorkspaceSocket(w http.ResponseWriter, r *http.Request) {
 	if workspaceID == "" {
 		workspaceID = domain.GuestWorkspaceID
 	}
-	if _, err := s.hub.Repository().GetWorkspace(r.Context(), workspaceID); err != nil {
+	if _, err := s.services.Workspaces.Get(r.Context(), workspaceID); err != nil {
 		http.Error(w, "workspace not found", http.StatusNotFound)
 		return
 	}
-	if !s.canAccessWorkspace(r.Context(), user, workspaceID, workspacePermissionRead) {
+	if !s.canAccessWorkspace(r.Context(), user, workspaceID, policy.WorkspaceRead) {
 		http.Error(w, "workspace read access is required", http.StatusForbidden)
 		return
 	}
@@ -166,7 +291,7 @@ func (s *Server) handleWorkspaceSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := realtime.NewClient(conn, s.hub, s.log, workspaceID, user.ID, roleAllows(user.Role, "admin"))
+	client := realtime.NewClient(conn, s.hub, s.log, workspaceID, user.ID, user.Role, policy.RoleAllows(user.Role, "admin"))
 	payload, err := json.Marshal(realtime.WorkspaceSnapshotPayload{Snapshot: snapshot})
 	if err != nil {
 		s.log.Error("failed to encode workspace snapshot", "error", err)
@@ -181,17 +306,21 @@ func (s *Server) handleWorkspaceSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
-	users, err := s.hub.Repository().ListUsers(r.Context())
+	users, err := s.services.Identity.ListUsers(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	passwordSetupRequired, err := s.hub.Repository().PasswordSetupRequired(r.Context())
+	passwordSetupRequired, err := s.services.Identity.PasswordSetupRequired(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"requiresSetup": len(users) == 0, "requiresPasswordSetup": passwordSetupRequired})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"requiresSetup":         len(users) == 0,
+		"requiresPasswordSetup": passwordSetupRequired,
+		"storage":               s.storageStatus(r.Context()),
+	})
 }
 
 func (s *Server) handleCreateFirstAdmin(w http.ResponseWriter, r *http.Request) {
@@ -204,12 +333,12 @@ func (s *Server) handleCreateFirstAdmin(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	user, err := s.hub.Repository().CreateFirstAdmin(r.Context(), body.DisplayName, body.Email, body.Password)
+	user, err := s.services.Identity.CreateFirstAdmin(r.Context(), body.DisplayName, body.Email, body.Password)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	token, err := s.hub.Repository().CreateSession(r.Context(), user.ID, s.sessionExpiresAt())
+	token, err := s.services.Identity.CreateSession(r.Context(), user.ID, s.sessionExpiresAt())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -227,12 +356,12 @@ func (s *Server) handleSetInitialAdminPassword(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	user, err := s.hub.Repository().SetInitialAdminPassword(r.Context(), body.Email, body.Password)
+	user, err := s.services.Identity.SetInitialAdminPassword(r.Context(), body.Email, body.Password)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	token, err := s.hub.Repository().CreateSession(r.Context(), user.ID, s.sessionExpiresAt())
+	token, err := s.services.Identity.CreateSession(r.Context(), user.ID, s.sessionExpiresAt())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -250,12 +379,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	user, err := s.hub.Repository().AuthenticateUser(r.Context(), body.Email, body.Password)
+	user, err := s.services.Identity.Authenticate(r.Context(), body.Email, body.Password)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
-	token, err := s.hub.Repository().CreateSession(r.Context(), user.ID, s.sessionExpiresAt())
+	token, err := s.services.Identity.CreateSession(r.Context(), user.ID, s.sessionExpiresAt())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -267,7 +396,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	token := sessionToken(r)
 	if token != "" {
-		_ = s.hub.Repository().DeleteSession(r.Context(), token)
+		_ = s.services.Identity.DeleteSession(r.Context(), token)
 	}
 	s.clearSessionCookie(w, r)
 	w.WriteHeader(http.StatusNoContent)
@@ -276,7 +405,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleProfile(w http.ResponseWriter, r *http.Request) {
 	user, err := s.currentUser(r)
 	if err != nil {
-		users, listErr := s.hub.Repository().ListUsers(r.Context())
+		users, listErr := s.services.Identity.ListUsers(r.Context())
 		if listErr != nil {
 			writeError(w, http.StatusInternalServerError, listErr.Error())
 			return
@@ -288,7 +417,18 @@ func (s *Server) handleProfile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"setupRequired": true})
 		return
 	}
-	writeJSON(w, http.StatusOK, user)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":          user.ID,
+		"displayName": user.DisplayName,
+		"email":       user.Email,
+		"role":        user.Role,
+		"status":      user.Status,
+		"lastSeenAt":  user.LastSeenAt,
+		"createdAt":   user.CreatedAt,
+		"updatedAt":   user.UpdatedAt,
+		"passwordSet": user.PasswordSet,
+		"storage":     s.storageStatus(r.Context()),
+	})
 }
 
 func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
@@ -296,7 +436,7 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "session is required")
 		return
 	}
-	users, err := s.hub.Repository().ListUsers(r.Context())
+	users, err := s.services.Identity.ListUsers(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -318,7 +458,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	user, err := s.hub.Repository().CreateUser(r.Context(), body.DisplayName, body.Email, body.Role, body.Password)
+	user, err := s.services.Identity.CreateUser(r.Context(), body.DisplayName, body.Email, body.Role, body.Password)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -341,7 +481,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	user, err := s.hub.Repository().UpdateUser(r.Context(), r.PathValue("userID"), body.DisplayName, body.Email, body.Role, body.Status, body.Password)
+	user, err := s.services.Identity.UpdateUser(r.Context(), r.PathValue("userID"), body.DisplayName, body.Email, body.Role, body.Status, body.Password)
 	if err != nil {
 		writeError(w, statusForDeleteError(err), err.Error())
 		return
@@ -353,7 +493,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	if err := s.hub.Repository().DeleteUser(r.Context(), r.PathValue("userID")); err != nil {
+	if err := s.services.Identity.DeleteUser(r.Context(), r.PathValue("userID")); err != nil {
 		writeError(w, statusForDeleteError(err), err.Error())
 		return
 	}
@@ -364,7 +504,7 @@ func (s *Server) handleGetSignInConfig(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	config, err := s.hub.Repository().GetSignInConfig(r.Context())
+	config, err := s.services.Identity.GetSignInConfig(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -396,7 +536,7 @@ func (s *Server) handleUpdateSignInConfig(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	config, err := s.hub.Repository().UpdateSignInConfig(r.Context(), domain.SignInConfig{
+	config, err := s.services.Identity.UpdateSignInConfig(r.Context(), domain.SignInConfig{
 		LocalPasswordEnabled:  body.LocalPasswordEnabled,
 		SSOEnabled:            body.SSOEnabled,
 		Provider:              body.Provider,
@@ -422,7 +562,7 @@ func (s *Server) handleGetAIProviderConfig(w http.ResponseWriter, r *http.Reques
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	config, err := s.hub.Repository().GetAIProviderConfig(r.Context())
+	config, err := s.services.Identity.GetAIProviderConfig(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -447,7 +587,7 @@ func (s *Server) handleUpdateAIProviderConfig(w http.ResponseWriter, r *http.Req
 	}
 	verifyKey := strings.TrimSpace(body.APIKey)
 	if body.Enabled && verifyKey == "" {
-		current, err := s.hub.Repository().GetAIProviderConfigWithSecret(r.Context())
+		current, err := s.services.Identity.GetAIProviderConfigWithSecret(r.Context())
 		if err == nil {
 			verifyKey = current.APIKey
 		}
@@ -458,7 +598,7 @@ func (s *Server) handleUpdateAIProviderConfig(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
-	config, err := s.hub.Repository().UpdateAIProviderConfig(r.Context(), domain.AIProviderConfig{
+	config, err := s.services.Identity.UpdateAIProviderConfig(r.Context(), domain.AIProviderConfig{
 		Enabled:  body.Enabled,
 		Provider: body.Provider,
 		Model:    body.Model,
@@ -475,7 +615,7 @@ func (s *Server) handleGetMCPConfig(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	config, err := s.hub.Repository().GetMCPConfig(r.Context())
+	config, err := s.services.Identity.GetMCPConfig(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -501,7 +641,7 @@ func (s *Server) handleUpdateMCPConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	config, err := s.hub.Repository().UpdateMCPConfig(r.Context(), domain.MCPConfig{
+	config, err := s.services.Identity.UpdateMCPConfig(r.Context(), domain.MCPConfig{
 		Enabled:             body.Enabled,
 		EndpointPath:        body.EndpointPath,
 		ReadCatalog:         body.ReadCatalog,
@@ -523,7 +663,7 @@ func (s *Server) handleListCatalogAssets(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusUnauthorized, "session is required")
 		return
 	}
-	assets, err := s.hub.Repository().ListCatalogAssets(r.Context(), r.URL.Query().Get("query"))
+	assets, err := s.services.Catalog.ListAssets(r.Context(), r.URL.Query().Get("query"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -549,7 +689,7 @@ func (s *Server) handleCreateCatalogAsset(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	asset, err := s.hub.Repository().CreateCatalogAsset(r.Context(), domain.CatalogAsset{
+	asset, err := s.services.Catalog.CreateAsset(r.Context(), domain.CatalogAsset{
 		Name:        body.Name,
 		Type:        body.Type,
 		Owner:       body.Owner,
@@ -583,7 +723,7 @@ func (s *Server) handleUpdateCatalogAsset(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	asset, err := s.hub.Repository().UpdateCatalogAsset(r.Context(), r.PathValue("assetID"), domain.CatalogAsset{
+	asset, err := s.services.Catalog.UpdateAsset(r.Context(), r.PathValue("assetID"), domain.CatalogAsset{
 		Name:        body.Name,
 		Type:        body.Type,
 		Owner:       body.Owner,
@@ -603,7 +743,7 @@ func (s *Server) handleDeleteCatalogAsset(w http.ResponseWriter, r *http.Request
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	if err := s.hub.Repository().DeleteCatalogAsset(r.Context(), r.PathValue("assetID")); err != nil {
+	if err := s.services.Catalog.DeleteAsset(r.Context(), r.PathValue("assetID")); err != nil {
 		writeError(w, statusForCatalogError(err), err.Error())
 		return
 	}
@@ -616,7 +756,7 @@ func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusOK, map[string]any{"notifications": []domain.Notification{}})
 		return
 	}
-	notifications, err := s.hub.Repository().ListNotifications(r.Context(), user.ID)
+	notifications, err := s.services.Identity.ListNotifications(r.Context(), user.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -630,7 +770,7 @@ func (s *Server) handleMarkNotificationRead(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusUnauthorized, "user is required")
 		return
 	}
-	if err := s.hub.Repository().MarkNotificationRead(r.Context(), user.ID, r.PathValue("notificationID")); err != nil {
+	if err := s.services.Identity.MarkNotificationRead(r.Context(), user.ID, r.PathValue("notificationID")); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
@@ -925,14 +1065,14 @@ func (s *Server) handleListWorkspaces(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "session is required")
 		return
 	}
-	workspaces, err := s.hub.Repository().ListWorkspaces(r.Context())
+	workspaces, err := s.services.Workspaces.List(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	filtered := make([]domain.Workspace, 0, len(workspaces))
 	for _, workspace := range workspaces {
-		if s.canAccessWorkspace(r.Context(), user, workspace.ID, workspacePermissionRead) {
+		if s.canAccessWorkspace(r.Context(), user, workspace.ID, policy.WorkspaceRead) {
 			filtered = append(filtered, workspace)
 		}
 	}
@@ -951,12 +1091,12 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	workspace, err := s.hub.Repository().CreateWorkspace(r.Context(), body.Name)
+	workspace, err := s.services.Workspaces.Create(r.Context(), body.Name)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_, _ = s.hub.Repository().GrantWorkspaceAccess(r.Context(), domain.WorkspaceAccess{
+	_, _ = s.services.ACL.GrantWorkspaceAccess(r.Context(), domain.WorkspaceAccess{
 		WorkspaceID:     workspace.ID,
 		UserID:          user.ID,
 		CanRead:         true,
@@ -968,10 +1108,10 @@ func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
-	if _, ok := s.requireWorkspaceAccess(w, r, workspaceID, workspacePermissionManage); !ok {
+	if _, ok := s.requireWorkspaceAccess(w, r, workspaceID, policy.WorkspaceManage); !ok {
 		return
 	}
-	if err := s.hub.Repository().DeleteWorkspace(r.Context(), workspaceID); err != nil {
+	if err := s.services.Workspaces.Delete(r.Context(), workspaceID); err != nil {
 		writeError(w, statusForDeleteError(err), err.Error())
 		return
 	}
@@ -980,10 +1120,10 @@ func (s *Server) handleDeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListWorkspaceAccess(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
-	if _, ok := s.requireWorkspaceAccess(w, r, workspaceID, workspacePermissionManage); !ok {
+	if _, ok := s.requireWorkspaceAccess(w, r, workspaceID, policy.WorkspaceManage); !ok {
 		return
 	}
-	access, err := s.hub.Repository().ListWorkspaceAccess(r.Context(), workspaceID)
+	access, err := s.services.ACL.ListWorkspaceAccess(r.Context(), workspaceID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -993,7 +1133,7 @@ func (s *Server) handleListWorkspaceAccess(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) handleGrantWorkspaceAccess(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
-	if _, ok := s.requireWorkspaceAccess(w, r, workspaceID, workspacePermissionManage); !ok {
+	if _, ok := s.requireWorkspaceAccess(w, r, workspaceID, policy.WorkspaceManage); !ok {
 		return
 	}
 	var body struct {
@@ -1006,7 +1146,11 @@ func (s *Server) handleGrantWorkspaceAccess(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	access, err := s.hub.Repository().GrantWorkspaceAccess(r.Context(), domain.WorkspaceAccess{
+	if !body.CanRead && !body.CanCreateDesign && !body.CanManage {
+		writeError(w, http.StatusBadRequest, "at least one workspace permission is required")
+		return
+	}
+	access, err := s.services.ACL.GrantWorkspaceAccess(r.Context(), domain.WorkspaceAccess{
 		WorkspaceID:     workspaceID,
 		UserID:          body.UserID,
 		CanRead:         body.CanRead,
@@ -1022,30 +1166,350 @@ func (s *Server) handleGrantWorkspaceAccess(w http.ResponseWriter, r *http.Reque
 
 func (s *Server) handleRevokeWorkspaceAccess(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
-	if _, ok := s.requireWorkspaceAccess(w, r, workspaceID, workspacePermissionManage); !ok {
+	if _, ok := s.requireWorkspaceAccess(w, r, workspaceID, policy.WorkspaceManage); !ok {
 		return
 	}
-	if err := s.hub.Repository().RevokeWorkspaceAccess(r.Context(), workspaceID, r.PathValue("userID")); err != nil {
+	if err := s.services.ACL.RevokeWorkspaceAccess(r.Context(), workspaceID, r.PathValue("userID")); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleListAccessGroups(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	groups, err := s.services.ACL.ListGroups(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"groups": groups})
+}
+
+func (s *Server) handleCreateAccessGroup(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	var body struct {
+		Name          string `json:"name"`
+		Description   string `json:"description"`
+		OktaGroupName string `json:"oktaGroupName"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	group, err := s.services.ACL.CreateGroup(r.Context(), domain.AccessGroup{
+		Name:          body.Name,
+		Description:   body.Description,
+		OktaGroupName: body.OktaGroupName,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"group": group})
+}
+
+func (s *Server) handleUpdateAccessGroup(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	var body struct {
+		Name          string `json:"name"`
+		Description   string `json:"description"`
+		OktaGroupName string `json:"oktaGroupName"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	group, err := s.services.ACL.UpdateGroup(r.Context(), r.PathValue("groupID"), domain.AccessGroup{
+		Name:          body.Name,
+		Description:   body.Description,
+		OktaGroupName: body.OktaGroupName,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"group": group})
+}
+
+func (s *Server) handleDeleteAccessGroup(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if err := s.services.ACL.DeleteGroup(r.Context(), r.PathValue("groupID")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleListAccessGroupMembers(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	members, err := s.services.ACL.ListGroupMembers(r.Context(), r.PathValue("groupID"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"members": members})
+}
+
+func (s *Server) handleReplaceAccessGroupMembers(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	var body struct {
+		UserIDs []string `json:"userIds"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	members, err := s.services.ACL.ReplaceGroupMembers(r.Context(), r.PathValue("groupID"), body.UserIDs)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"members": members})
+}
+
+func (s *Server) handleListWorkspaceGroupAccess(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	if _, ok := s.requireWorkspaceAccess(w, r, workspaceID, policy.WorkspaceManage); !ok {
+		return
+	}
+	access, err := s.services.ACL.ListWorkspaceGroupAccess(r.Context(), workspaceID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"access": access})
+}
+
+func (s *Server) handleGrantWorkspaceGroupAccess(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	if _, ok := s.requireWorkspaceAccess(w, r, workspaceID, policy.WorkspaceManage); !ok {
+		return
+	}
+	var body struct {
+		GroupID         string `json:"groupId"`
+		CanRead         bool   `json:"canRead"`
+		CanCreateDesign bool   `json:"canCreateDesign"`
+		CanManage       bool   `json:"canManage"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if !body.CanRead && !body.CanCreateDesign && !body.CanManage {
+		writeError(w, http.StatusBadRequest, "at least one workspace permission is required")
+		return
+	}
+	access, err := s.services.ACL.GrantWorkspaceGroupAccess(r.Context(), domain.WorkspaceGroupAccess{
+		WorkspaceID:     workspaceID,
+		GroupID:         body.GroupID,
+		CanRead:         body.CanRead,
+		CanCreateDesign: body.CanCreateDesign,
+		CanManage:       body.CanManage,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"access": access})
+}
+
+func (s *Server) handleRevokeWorkspaceGroupAccess(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	if _, ok := s.requireWorkspaceAccess(w, r, workspaceID, policy.WorkspaceManage); !ok {
+		return
+	}
+	if err := s.services.ACL.RevokeWorkspaceGroupAccess(r.Context(), workspaceID, r.PathValue("groupID")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleListUserAccess(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	userID := strings.TrimSpace(r.PathValue("userID"))
+	if userID == "" {
+		writeError(w, http.StatusBadRequest, "user id is required")
+		return
+	}
+	workspaces, err := s.services.Workspaces.List(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	type accessSummary struct {
+		Scope         string    `json:"scope"`
+		UserID        string    `json:"userId"`
+		GroupID       string    `json:"groupId,omitempty"`
+		GroupName     string    `json:"groupName,omitempty"`
+		Source        string    `json:"source"`
+		WorkspaceID   string    `json:"workspaceId"`
+		WorkspaceName string    `json:"workspaceName"`
+		DesignID      string    `json:"designId,omitempty"`
+		DesignName    string    `json:"designName,omitempty"`
+		Permissions   []string  `json:"permissions"`
+		UpdatedAt     time.Time `json:"updatedAt"`
+	}
+
+	summaries := []accessSummary{}
+	groupIDs, err := s.services.ACL.ListUserGroupIDs(r.Context(), userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	userGroupSet := accessStringSet(groupIDs)
+	groups, err := s.services.ACL.ListGroups(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	groupNames := map[string]string{}
+	for _, group := range groups {
+		groupNames[group.ID] = group.Name
+	}
+	for _, workspace := range workspaces {
+		workspaceAccess, err := s.services.ACL.ListWorkspaceAccess(r.Context(), workspace.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, access := range workspaceAccess {
+			if access.UserID != userID {
+				continue
+			}
+			permissions := workspacePermissionLabels(access)
+			if len(permissions) == 0 {
+				continue
+			}
+			summaries = append(summaries, accessSummary{
+				Scope:         "workspace",
+				UserID:        access.UserID,
+				Source:        "user",
+				WorkspaceID:   access.WorkspaceID,
+				WorkspaceName: workspace.Name,
+				Permissions:   permissions,
+				UpdatedAt:     access.UpdatedAt,
+			})
+		}
+		workspaceGroupAccess, err := s.services.ACL.ListWorkspaceGroupAccess(r.Context(), workspace.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, access := range workspaceGroupAccess {
+			if _, ok := userGroupSet[access.GroupID]; !ok {
+				continue
+			}
+			permissions := workspaceGroupPermissionLabels(access)
+			if len(permissions) == 0 {
+				continue
+			}
+			summaries = append(summaries, accessSummary{
+				Scope:         "workspace",
+				UserID:        userID,
+				GroupID:       access.GroupID,
+				GroupName:     groupNames[access.GroupID],
+				Source:        "group",
+				WorkspaceID:   access.WorkspaceID,
+				WorkspaceName: workspace.Name,
+				Permissions:   permissions,
+				UpdatedAt:     access.UpdatedAt,
+			})
+		}
+
+		designs, err := s.services.Designs.List(r.Context(), workspace.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, design := range designs {
+			designAccess, err := s.services.ACL.ListDesignAccess(r.Context(), workspace.ID, design.ID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			for _, access := range designAccess {
+				if access.UserID != userID {
+					continue
+				}
+				permissions := designPermissionLabels(access)
+				if len(permissions) == 0 {
+					continue
+				}
+				summaries = append(summaries, accessSummary{
+					Scope:         "design",
+					UserID:        access.UserID,
+					Source:        "user",
+					WorkspaceID:   access.WorkspaceID,
+					WorkspaceName: workspace.Name,
+					DesignID:      access.DesignID,
+					DesignName:    design.Name,
+					Permissions:   permissions,
+					UpdatedAt:     access.UpdatedAt,
+				})
+			}
+			designGroupAccess, err := s.services.ACL.ListDesignGroupAccess(r.Context(), workspace.ID, design.ID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			for _, access := range designGroupAccess {
+				if _, ok := userGroupSet[access.GroupID]; !ok {
+					continue
+				}
+				permissions := designGroupPermissionLabels(access)
+				if len(permissions) == 0 {
+					continue
+				}
+				summaries = append(summaries, accessSummary{
+					Scope:         "design",
+					UserID:        userID,
+					GroupID:       access.GroupID,
+					GroupName:     groupNames[access.GroupID],
+					Source:        "group",
+					WorkspaceID:   access.WorkspaceID,
+					WorkspaceName: workspace.Name,
+					DesignID:      access.DesignID,
+					DesignName:    design.Name,
+					Permissions:   permissions,
+					UpdatedAt:     access.UpdatedAt,
+				})
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"access": summaries})
+}
+
 func (s *Server) handleListDesigns(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
-	user, ok := s.requireWorkspaceAccess(w, r, workspaceID, workspacePermissionRead)
+	user, ok := s.requireWorkspaceAccess(w, r, workspaceID, policy.WorkspaceRead)
 	if !ok {
 		return
 	}
-	designs, err := s.hub.Repository().ListDesigns(r.Context(), workspaceID)
+	designs, err := s.services.Designs.List(r.Context(), workspaceID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	filtered := make([]domain.Design, 0, len(designs))
 	for _, design := range designs {
-		if s.canAccessDesign(r.Context(), user, design, designPermissionRead) {
+		if s.canAccessDesign(r.Context(), user, design, policy.DesignRead) {
 			filtered = append(filtered, design)
 		}
 	}
@@ -1054,7 +1518,7 @@ func (s *Server) handleListDesigns(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateDesign(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
-	user, ok := s.requireWorkspaceAccess(w, r, workspaceID, workspacePermissionCreateDesign)
+	user, ok := s.requireWorkspaceAccess(w, r, workspaceID, policy.WorkspaceCreateDesign)
 	if !ok {
 		return
 	}
@@ -1066,12 +1530,12 @@ func (s *Server) handleCreateDesign(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	design, err := s.hub.Repository().CreateDesign(r.Context(), workspaceID, body.Name, body.Document, user.ID)
+	design, err := s.services.Designs.Create(r.Context(), workspaceID, body.Name, body.Document, user.ID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_, _ = s.hub.Repository().GrantDesignAccess(r.Context(), domain.DesignAccess{
+	_, _ = s.services.ACL.GrantDesignAccess(r.Context(), domain.DesignAccess{
 		WorkspaceID: design.WorkspaceID,
 		DesignID:    design.ID,
 		UserID:      user.ID,
@@ -1087,7 +1551,7 @@ func (s *Server) handleCreateDesign(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetDesign(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
-	_, design, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionRead)
+	_, design, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignRead)
 	if !ok {
 		return
 	}
@@ -1097,10 +1561,10 @@ func (s *Server) handleGetDesign(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDeleteDesign(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
-	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionManage); !ok {
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignManage); !ok {
 		return
 	}
-	if err := s.hub.Repository().DeleteDesign(r.Context(), workspaceID, designID); err != nil {
+	if err := s.services.Designs.Delete(r.Context(), workspaceID, designID); err != nil {
 		writeError(w, statusForDeleteError(err), err.Error())
 		return
 	}
@@ -1110,7 +1574,7 @@ func (s *Server) handleDeleteDesign(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpdateDesignMetadata(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
-	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionManage); !ok {
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignManage); !ok {
 		return
 	}
 	var body struct {
@@ -1121,7 +1585,7 @@ func (s *Server) handleUpdateDesignMetadata(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	design, err := s.hub.Repository().UpdateDesignMetadata(r.Context(), workspaceID, designID, body.Name, body.Access)
+	design, err := s.services.Designs.UpdateMetadata(r.Context(), workspaceID, designID, body.Name, body.Access)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1132,10 +1596,10 @@ func (s *Server) handleUpdateDesignMetadata(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleListDesignAccess(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
-	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionManage); !ok {
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignManage); !ok {
 		return
 	}
-	access, err := s.hub.Repository().ListDesignAccess(r.Context(), workspaceID, designID)
+	access, err := s.services.ACL.ListDesignAccess(r.Context(), workspaceID, designID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1146,7 +1610,7 @@ func (s *Server) handleListDesignAccess(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleGrantDesignAccess(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
-	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionManage); !ok {
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignManage); !ok {
 		return
 	}
 	var body struct {
@@ -1161,7 +1625,11 @@ func (s *Server) handleGrantDesignAccess(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	access, err := s.hub.Repository().GrantDesignAccess(r.Context(), domain.DesignAccess{
+	if !body.CanRead && !body.CanEdit && !body.CanComment && !body.CanReview && !body.CanManage {
+		writeError(w, http.StatusBadRequest, "at least one design permission is required")
+		return
+	}
+	access, err := s.services.ACL.GrantDesignAccess(r.Context(), domain.DesignAccess{
 		WorkspaceID: workspaceID,
 		DesignID:    designID,
 		UserID:      body.UserID,
@@ -1181,10 +1649,76 @@ func (s *Server) handleGrantDesignAccess(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleRevokeDesignAccess(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
-	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionManage); !ok {
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignManage); !ok {
 		return
 	}
-	if err := s.hub.Repository().RevokeDesignAccess(r.Context(), workspaceID, designID, r.PathValue("userID")); err != nil {
+	if err := s.services.ACL.RevokeDesignAccess(r.Context(), workspaceID, designID, r.PathValue("userID")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleListDesignGroupAccess(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	designID := r.PathValue("designID")
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignManage); !ok {
+		return
+	}
+	access, err := s.services.ACL.ListDesignGroupAccess(r.Context(), workspaceID, designID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"access": access})
+}
+
+func (s *Server) handleGrantDesignGroupAccess(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	designID := r.PathValue("designID")
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignManage); !ok {
+		return
+	}
+	var body struct {
+		GroupID    string `json:"groupId"`
+		CanRead    bool   `json:"canRead"`
+		CanEdit    bool   `json:"canEdit"`
+		CanComment bool   `json:"canComment"`
+		CanReview  bool   `json:"canReview"`
+		CanManage  bool   `json:"canManage"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if !body.CanRead && !body.CanEdit && !body.CanComment && !body.CanReview && !body.CanManage {
+		writeError(w, http.StatusBadRequest, "at least one design permission is required")
+		return
+	}
+	access, err := s.services.ACL.GrantDesignGroupAccess(r.Context(), domain.DesignGroupAccess{
+		WorkspaceID: workspaceID,
+		DesignID:    designID,
+		GroupID:     body.GroupID,
+		CanRead:     body.CanRead,
+		CanEdit:     body.CanEdit,
+		CanComment:  body.CanComment,
+		CanReview:   body.CanReview,
+		CanManage:   body.CanManage,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"access": access})
+}
+
+func (s *Server) handleRevokeDesignGroupAccess(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	designID := r.PathValue("designID")
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignManage); !ok {
+		return
+	}
+	if err := s.services.ACL.RevokeDesignGroupAccess(r.Context(), workspaceID, designID, r.PathValue("groupID")); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -1194,13 +1728,14 @@ func (s *Server) handleRevokeDesignAccess(w http.ResponseWriter, r *http.Request
 func (s *Server) handleSaveDesignDocument(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
-	_, existing, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionEdit)
+	_, existing, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignEdit)
 	if !ok {
 		return
 	}
 	var body struct {
 		Document       json.RawMessage `json:"document"`
 		CanvasSnapshot json.RawMessage `json:"canvasSnapshot"`
+		VersionRemarks string          `json:"versionRemarks"`
 	}
 	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -1218,13 +1753,14 @@ func (s *Server) handleSaveDesignDocument(w http.ResponseWriter, r *http.Request
 		Title:          existing.Title,
 		Document:       body.Document,
 		CanvasSnapshot: existing.CanvasSnapshot,
+		VersionRemarks: strings.TrimSpace(body.VersionRemarks),
 		CreatedBy:      existing.CreatedBy,
 		CreatedAt:      existing.CreatedAt,
 	}
 	if domain.ValidCanvasSnapshot(body.CanvasSnapshot) {
 		design.CanvasSnapshot = body.CanvasSnapshot
 	}
-	updated, err := s.hub.Repository().UpsertDesign(r.Context(), design)
+	updated, err := s.services.Designs.Upsert(r.Context(), design)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1235,10 +1771,10 @@ func (s *Server) handleSaveDesignDocument(w http.ResponseWriter, r *http.Request
 func (s *Server) handleListDesignVersions(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
-	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionRead); !ok {
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignRead); !ok {
 		return
 	}
-	versions, err := s.hub.Repository().ListDesignVersions(r.Context(), workspaceID, designID)
+	versions, err := s.services.Versions.List(r.Context(), workspaceID, designID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
@@ -1246,20 +1782,78 @@ func (s *Server) handleListDesignVersions(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{"versions": versions})
 }
 
-func (s *Server) handleAnalyzeDesign(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleCreateDesignVersion(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
-	_, design, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionReview)
+	user, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignEdit)
 	if !ok {
 		return
 	}
-
-	report, err := analysis.New().Analyze(design.Document)
+	var body struct {
+		Remarks string `json:"remarks"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+	}
+	version, err := s.services.Versions.Create(r.Context(), workspaceID, designID, user.ID, strings.TrimSpace(body.Remarks))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if aiConfig, err := s.hub.Repository().GetAIProviderConfigWithSecret(r.Context()); err == nil && aiConfig.Enabled && strings.TrimSpace(aiConfig.APIKey) != "" {
+	writeJSON(w, http.StatusCreated, map[string]any{"version": version})
+}
+
+func (s *Server) handleUpdateDesignVersionStatus(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	designID := r.PathValue("designID")
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignManage); !ok {
+		return
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	version, err := s.services.Versions.UpdateStatus(r.Context(), workspaceID, designID, r.PathValue("versionID"), body.Status)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"version": version})
+}
+
+func (s *Server) handleDeleteDesignVersion(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	designID := r.PathValue("designID")
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignManage); !ok {
+		return
+	}
+	if err := s.services.Versions.Delete(r.Context(), workspaceID, designID, r.PathValue("versionID")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleAnalyzeDesign(w http.ResponseWriter, r *http.Request) {
+	workspaceID := r.PathValue("workspaceID")
+	designID := r.PathValue("designID")
+	_, design, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignReview)
+	if !ok {
+		return
+	}
+
+	report, err := s.services.Analysis.AnalyzeDocument(design.Document)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if aiConfig, err := s.services.Identity.GetAIProviderConfigWithSecret(r.Context()); err == nil && aiConfig.Enabled && strings.TrimSpace(aiConfig.APIKey) != "" {
 		review, err := runAIAnalysis(r.Context(), aiConfig, design.Document, report, s.cfg.AllowPrivateAIProviderURLs)
 		if err != nil {
 			review = analysis.AIReview{
@@ -1278,10 +1872,10 @@ func (s *Server) handleAnalyzeDesign(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListDesignDocs(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
-	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionRead); !ok {
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignRead); !ok {
 		return
 	}
-	docs, err := s.hub.Repository().ListDesignDocs(r.Context(), workspaceID, designID)
+	docs, err := s.services.Docs.List(r.Context(), workspaceID, designID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
@@ -1293,10 +1887,10 @@ func (s *Server) handleGetDesignDoc(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
 	docID := r.PathValue("docID")
-	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionRead); !ok {
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignRead); !ok {
 		return
 	}
-	doc, err := s.hub.Repository().GetDesignDoc(r.Context(), workspaceID, designID, docID)
+	doc, err := s.services.Docs.Get(r.Context(), workspaceID, designID, docID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
@@ -1307,7 +1901,7 @@ func (s *Server) handleGetDesignDoc(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCreateDesignDoc(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
-	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionEdit); !ok {
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignEdit); !ok {
 		return
 	}
 	var body struct {
@@ -1319,7 +1913,7 @@ func (s *Server) handleCreateDesignDoc(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	doc, err := s.hub.Repository().CreateDesignDoc(r.Context(), workspaceID, designID, body.Title, body.Body, body.Format)
+	doc, err := s.services.Docs.Create(r.Context(), workspaceID, designID, body.Title, body.Body, body.Format)
 	if err != nil {
 		writeError(w, statusForDeleteError(err), err.Error())
 		return
@@ -1331,10 +1925,10 @@ func (s *Server) handleUpdateDesignDoc(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
 	docID := r.PathValue("docID")
-	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionEdit); !ok {
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignEdit); !ok {
 		return
 	}
-	existing, err := s.hub.Repository().GetDesignDoc(r.Context(), workspaceID, designID, docID)
+	existing, err := s.services.Docs.Get(r.Context(), workspaceID, designID, docID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
@@ -1360,7 +1954,7 @@ func (s *Server) handleUpdateDesignDoc(w http.ResponseWriter, r *http.Request) {
 	if body.Format != nil {
 		format = *body.Format
 	}
-	doc, err := s.hub.Repository().UpdateDesignDoc(r.Context(), workspaceID, designID, docID, title, docBody, format)
+	doc, err := s.services.Docs.Update(r.Context(), workspaceID, designID, docID, title, docBody, format)
 	if err != nil {
 		writeError(w, statusForDeleteError(err), err.Error())
 		return
@@ -1372,10 +1966,10 @@ func (s *Server) handleDeleteDesignDoc(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
 	docID := r.PathValue("docID")
-	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionEdit); !ok {
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignEdit); !ok {
 		return
 	}
-	if err := s.hub.Repository().DeleteDesignDoc(r.Context(), workspaceID, designID, docID); err != nil {
+	if err := s.services.Docs.Delete(r.Context(), workspaceID, designID, docID); err != nil {
 		writeError(w, statusForDeleteError(err), err.Error())
 		return
 	}
@@ -1385,10 +1979,10 @@ func (s *Server) handleDeleteDesignDoc(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListDesignComments(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
-	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionRead); !ok {
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignRead); !ok {
 		return
 	}
-	comments, err := s.hub.Repository().ListDesignComments(r.Context(), workspaceID, designID)
+	comments, err := s.services.Reviews.ListComments(r.Context(), workspaceID, designID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
@@ -1399,7 +1993,7 @@ func (s *Server) handleListDesignComments(w http.ResponseWriter, r *http.Request
 func (s *Server) handleCreateDesignComment(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
-	user, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionComment)
+	user, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignComment)
 	if !ok {
 		return
 	}
@@ -1412,7 +2006,7 @@ func (s *Server) handleCreateDesignComment(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	comment, err := s.hub.Repository().CreateDesignComment(r.Context(), workspaceID, designID, user.ID, body.Body, body.ComponentID, body.ConnectorID)
+	comment, err := s.services.Reviews.CreateComment(r.Context(), workspaceID, designID, user.ID, body.Body, body.ComponentID, body.ConnectorID)
 	if err != nil {
 		writeError(w, statusForDeleteError(err), err.Error())
 		return
@@ -1423,10 +2017,10 @@ func (s *Server) handleCreateDesignComment(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleListDesignReviews(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
-	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionRead); !ok {
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignRead); !ok {
 		return
 	}
-	reviews, err := s.hub.Repository().ListDesignReviewRequests(r.Context(), workspaceID, designID)
+	reviews, err := s.services.Reviews.ListReviews(r.Context(), workspaceID, designID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
@@ -1437,31 +2031,37 @@ func (s *Server) handleListDesignReviews(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleCreateDesignReview(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
-	user, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionReview)
+	user, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignReview)
 	if !ok {
 		return
 	}
 	var body struct {
-		ReviewerID string `json:"reviewerId"`
-		Message    string `json:"message"`
+		VersionID   string   `json:"versionId"`
+		ReviewerID  string   `json:"reviewerId"`
+		ReviewerIDs []string `json:"reviewerIds"`
+		Message     string   `json:"message"`
 	}
 	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	review, err := s.hub.Repository().CreateDesignReviewRequest(r.Context(), workspaceID, designID, user.ID, body.ReviewerID, body.Message)
+	reviewerIDs := body.ReviewerIDs
+	if len(reviewerIDs) == 0 && strings.TrimSpace(body.ReviewerID) != "" {
+		reviewerIDs = []string{body.ReviewerID}
+	}
+	reviews, err := s.services.Reviews.CreateReviews(r.Context(), workspaceID, designID, body.VersionID, user.ID, reviewerIDs, body.Message)
 	if err != nil {
 		writeError(w, statusForDeleteError(err), err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"review": review})
+	writeJSON(w, http.StatusCreated, map[string]any{"reviews": reviews})
 }
 
 func (s *Server) handleUpdateDesignReview(w http.ResponseWriter, r *http.Request) {
 	workspaceID := r.PathValue("workspaceID")
 	designID := r.PathValue("designID")
 	reviewID := r.PathValue("reviewID")
-	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, designPermissionReview); !ok {
+	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignReview); !ok {
 		return
 	}
 	var body struct {
@@ -1472,7 +2072,7 @@ func (s *Server) handleUpdateDesignReview(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	review, err := s.hub.Repository().UpdateDesignReviewRequest(r.Context(), workspaceID, designID, reviewID, body.Status, body.Summary)
+	review, err := s.services.Reviews.UpdateReview(r.Context(), workspaceID, designID, reviewID, body.Status, body.Summary)
 	if err != nil {
 		writeError(w, statusForDeleteError(err), err.Error())
 		return
@@ -1505,7 +2105,7 @@ func (s *Server) recoverPanic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				s.log.Error("panic recovered", "method", r.Method, "path", r.URL.Path, "error", recovered)
+				s.log.Error("panic recovered", "method", r.Method, "path", r.URL.Path, "error", recovered, "stack", string(debug.Stack()))
 				writeError(w, http.StatusInternalServerError, "internal server error")
 			}
 		}()
@@ -1527,6 +2127,9 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, target any) error {
+	if maxBytes <= 0 {
+		maxBytes = 4 << 20
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
@@ -1589,10 +2192,7 @@ func (s *Server) currentUser(r *http.Request) (domain.User, error) {
 }
 
 func (s *Server) userFromToken(ctx context.Context, token string) (domain.User, error) {
-	if token == "" {
-		return domain.User{}, errors.New("session is required")
-	}
-	return s.hub.Repository().GetUserBySessionToken(ctx, token)
+	return s.services.Identity.UserBySessionToken(ctx, token)
 }
 
 func sessionToken(r *http.Request) string {
@@ -1655,7 +2255,7 @@ func (s *Server) requireRole(w http.ResponseWriter, r *http.Request, minimumRole
 		writeError(w, http.StatusUnauthorized, "session is required")
 		return domain.User{}, false
 	}
-	if !roleAllows(user.Role, minimumRole) {
+	if !policy.RoleAllows(user.Role, minimumRole) {
 		writeError(w, http.StatusForbidden, minimumRole+" role is required")
 		return domain.User{}, false
 	}
@@ -1669,17 +2269,6 @@ func (s *Server) requireSession(w http.ResponseWriter, r *http.Request) bool {
 	}
 	return true
 }
-
-const (
-	workspacePermissionRead         = "read"
-	workspacePermissionCreateDesign = "create_design"
-	workspacePermissionManage       = "manage"
-	designPermissionRead            = "read"
-	designPermissionEdit            = "edit"
-	designPermissionComment         = "comment"
-	designPermissionReview          = "review"
-	designPermissionManage          = "manage"
-)
 
 func (s *Server) requireWorkspaceAccess(w http.ResponseWriter, r *http.Request, workspaceID string, permission string) (domain.User, bool) {
 	user, err := s.currentUser(r)
@@ -1700,7 +2289,7 @@ func (s *Server) requireDesignAccess(w http.ResponseWriter, r *http.Request, wor
 		writeError(w, http.StatusUnauthorized, "session is required")
 		return domain.User{}, domain.Design{}, false
 	}
-	design, err := s.hub.Repository().GetDesign(r.Context(), workspaceID, designID)
+	design, err := s.services.Designs.Get(r.Context(), workspaceID, designID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return domain.User{}, domain.Design{}, false
@@ -1713,102 +2302,90 @@ func (s *Server) requireDesignAccess(w http.ResponseWriter, r *http.Request, wor
 }
 
 func (s *Server) canAccessWorkspace(ctx context.Context, user domain.User, workspaceID string, permission string) bool {
-	if roleAllows(user.Role, "admin") {
-		return true
-	}
-	entries, err := s.hub.Repository().ListWorkspaceAccess(ctx, workspaceID)
-	if err != nil {
-		return false
-	}
-	if len(entries) == 0 {
-		return roleAllows(user.Role, "architect")
-	}
-	for _, entry := range entries {
-		if entry.UserID == user.ID && workspaceAccessAllows(entry, permission) {
-			return true
-		}
-	}
-	return false
+	return s.authz.CanAccessWorkspace(ctx, user, workspaceID, permission)
 }
 
 func (s *Server) canAccessDesign(ctx context.Context, user domain.User, design domain.Design, permission string) bool {
-	if roleAllows(user.Role, "admin") || design.CreatedBy == user.ID {
-		return true
+	return s.authz.CanAccessDesign(ctx, user, design, permission)
+}
+
+func workspacePermissionLabels(access domain.WorkspaceAccess) []string {
+	permissions := []string{}
+	if access.CanRead {
+		permissions = append(permissions, "Read")
 	}
-	if permission == designPermissionRead && strings.EqualFold(design.Access, "public") {
-		return true
+	if access.CanCreateDesign {
+		permissions = append(permissions, "Create designs")
 	}
-	if s.canAccessWorkspace(ctx, user, design.WorkspaceID, workspacePermissionManage) {
-		return true
+	if access.CanManage {
+		permissions = append(permissions, "Manage")
 	}
-	if permission == designPermissionRead && strings.EqualFold(design.Access, "workspace") && s.canAccessWorkspace(ctx, user, design.WorkspaceID, workspacePermissionRead) {
-		return true
+	return permissions
+}
+
+func workspaceGroupPermissionLabels(access domain.WorkspaceGroupAccess) []string {
+	permissions := []string{}
+	if access.CanRead {
+		permissions = append(permissions, "Read")
 	}
-	entries, err := s.hub.Repository().ListDesignAccess(ctx, design.WorkspaceID, design.ID)
-	if err != nil {
-		return false
+	if access.CanCreateDesign {
+		permissions = append(permissions, "Create designs")
 	}
-	for _, entry := range entries {
-		if entry.UserID == user.ID && designAccessAllows(entry, permission) {
-			return true
+	if access.CanManage {
+		permissions = append(permissions, "Manage")
+	}
+	return permissions
+}
+
+func designPermissionLabels(access domain.DesignAccess) []string {
+	permissions := []string{}
+	if access.CanRead {
+		permissions = append(permissions, "Read")
+	}
+	if access.CanEdit {
+		permissions = append(permissions, "Edit")
+	}
+	if access.CanComment {
+		permissions = append(permissions, "Comment")
+	}
+	if access.CanReview {
+		permissions = append(permissions, "Review")
+	}
+	if access.CanManage {
+		permissions = append(permissions, "Manage")
+	}
+	return permissions
+}
+
+func designGroupPermissionLabels(access domain.DesignGroupAccess) []string {
+	permissions := []string{}
+	if access.CanRead {
+		permissions = append(permissions, "Read")
+	}
+	if access.CanEdit {
+		permissions = append(permissions, "Edit")
+	}
+	if access.CanComment {
+		permissions = append(permissions, "Comment")
+	}
+	if access.CanReview {
+		permissions = append(permissions, "Review")
+	}
+	if access.CanManage {
+		permissions = append(permissions, "Manage")
+	}
+	return permissions
+}
+
+func accessStringSet(values []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			set[value] = struct{}{}
 		}
 	}
-	return false
-}
-
-func workspaceAccessAllows(access domain.WorkspaceAccess, permission string) bool {
-	if access.CanManage {
-		return true
-	}
-	switch permission {
-	case workspacePermissionRead:
-		return access.CanRead || access.CanCreateDesign
-	case workspacePermissionCreateDesign:
-		return access.CanCreateDesign
-	case workspacePermissionManage:
-		return access.CanManage
-	default:
-		return false
-	}
-}
-
-func designAccessAllows(access domain.DesignAccess, permission string) bool {
-	if access.CanManage {
-		return true
-	}
-	switch permission {
-	case designPermissionRead:
-		return access.CanRead || access.CanEdit || access.CanComment || access.CanReview
-	case designPermissionEdit:
-		return access.CanEdit
-	case designPermissionComment:
-		return access.CanComment || access.CanEdit || access.CanReview
-	case designPermissionReview:
-		return access.CanReview || access.CanEdit
-	case designPermissionManage:
-		return access.CanManage
-	default:
-		return false
-	}
-}
-
-func roleAllows(actualRole string, minimumRole string) bool {
-	return roleRank(actualRole) >= roleRank(minimumRole)
-}
-
-func roleRank(role string) int {
-	switch strings.TrimSpace(strings.ToLower(role)) {
-	case "admin":
-		return 4
-	case "architect":
-		return 3
-	case "reviewer":
-		return 2
-	case "member":
-		return 1
-	default:
-		return 0
-	}
+	return set
 }
 
 func isAllowedOrigin(origin string, allowedOrigins []string) bool {

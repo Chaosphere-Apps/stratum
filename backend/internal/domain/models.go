@@ -94,6 +94,32 @@ type WorkspaceAccess struct {
 	UpdatedAt       time.Time `json:"updatedAt"`
 }
 
+type AccessGroup struct {
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	Description   string    `json:"description"`
+	OktaGroupName string    `json:"oktaGroupName"`
+	MemberCount   int       `json:"memberCount"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+}
+
+type AccessGroupMember struct {
+	GroupID string    `json:"groupId"`
+	UserID  string    `json:"userId"`
+	AddedAt time.Time `json:"addedAt"`
+}
+
+type WorkspaceGroupAccess struct {
+	WorkspaceID     string    `json:"workspaceId"`
+	GroupID         string    `json:"groupId"`
+	CanRead         bool      `json:"canRead"`
+	CanCreateDesign bool      `json:"canCreateDesign"`
+	CanManage       bool      `json:"canManage"`
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
+}
+
 type Design struct {
 	ID             string          `json:"id"`
 	WorkspaceID    string          `json:"workspaceId"`
@@ -103,6 +129,7 @@ type Design struct {
 	Document       json.RawMessage `json:"document"`
 	CanvasSnapshot json.RawMessage `json:"canvasSnapshot,omitempty"`
 	VersionNumber  int             `json:"versionNumber"`
+	VersionRemarks string          `json:"-"`
 	CreatedBy      string          `json:"createdBy"`
 	CreatedAt      time.Time       `json:"createdAt"`
 	UpdatedAt      time.Time       `json:"updatedAt"`
@@ -121,15 +148,31 @@ type DesignAccess struct {
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
+type DesignGroupAccess struct {
+	WorkspaceID string    `json:"workspaceId"`
+	DesignID    string    `json:"designId"`
+	GroupID     string    `json:"groupId"`
+	CanRead     bool      `json:"canRead"`
+	CanEdit     bool      `json:"canEdit"`
+	CanComment  bool      `json:"canComment"`
+	CanReview   bool      `json:"canReview"`
+	CanManage   bool      `json:"canManage"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
 type DesignVersion struct {
 	ID             string          `json:"id"`
 	DesignID       string          `json:"designId"`
 	WorkspaceID    string          `json:"workspaceId"`
 	VersionNumber  int             `json:"versionNumber"`
+	Status         string          `json:"status"`
+	Remarks        string          `json:"remarks"`
 	Document       json.RawMessage `json:"document"`
 	CanvasSnapshot json.RawMessage `json:"canvasSnapshot,omitempty"`
 	CreatedBy      string          `json:"createdBy"`
 	CreatedAt      time.Time       `json:"createdAt"`
+	UpdatedAt      time.Time       `json:"updatedAt"`
 }
 
 type DesignDoc struct {
@@ -156,17 +199,19 @@ type DesignComment struct {
 }
 
 type DesignReviewRequest struct {
-	ID          string     `json:"id"`
-	WorkspaceID string     `json:"workspaceId"`
-	DesignID    string     `json:"designId"`
-	RequestedBy string     `json:"requestedBy"`
-	ReviewerID  string     `json:"reviewerId"`
-	Status      string     `json:"status"`
-	Message     string     `json:"message"`
-	Summary     string     `json:"summary"`
-	CreatedAt   time.Time  `json:"createdAt"`
-	UpdatedAt   time.Time  `json:"updatedAt"`
-	CompletedAt *time.Time `json:"completedAt,omitempty"`
+	ID            string     `json:"id"`
+	WorkspaceID   string     `json:"workspaceId"`
+	DesignID      string     `json:"designId"`
+	VersionID     string     `json:"versionId"`
+	VersionNumber int        `json:"versionNumber"`
+	RequestedBy   string     `json:"requestedBy"`
+	ReviewerID    string     `json:"reviewerId"`
+	Status        string     `json:"status"`
+	Message       string     `json:"message"`
+	Summary       string     `json:"summary"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	UpdatedAt     time.Time  `json:"updatedAt"`
+	CompletedAt   *time.Time `json:"completedAt,omitempty"`
 }
 
 type Notification struct {

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/system-design-evaluator/backend/internal/domain"
+	"github.com/system-design-evaluator/backend/internal/lifecycle"
 )
 
 type PostgresRepository struct {
@@ -35,6 +36,10 @@ func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRe
 
 func (r *PostgresRepository) Close() {
 	r.pool.Close()
+}
+
+func (r *PostgresRepository) Ping(ctx context.Context) error {
+	return r.pool.Ping(ctx)
 }
 
 func (r *PostgresRepository) migrate(ctx context.Context) error {
@@ -67,14 +72,21 @@ CREATE TABLE IF NOT EXISTS design_versions (
 	design_id TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
 	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
 	version_number INTEGER NOT NULL,
+	status TEXT NOT NULL DEFAULT 'draft',
+	remarks TEXT NOT NULL DEFAULT '',
 	document TEXT NOT NULL,
 	canvas_snapshot TEXT,
 	created_by TEXT NOT NULL,
 	created_at TIMESTAMPTZ NOT NULL,
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 	UNIQUE(design_id, version_number)
 );
 
+ALTER TABLE design_versions ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'draft';
+ALTER TABLE design_versions ADD COLUMN IF NOT EXISTS remarks TEXT NOT NULL DEFAULT '';
+ALTER TABLE design_versions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 CREATE INDEX IF NOT EXISTS idx_design_versions_design_version ON design_versions(design_id, version_number DESC);
+CREATE INDEX IF NOT EXISTS idx_design_versions_status ON design_versions(design_id, status);
 
 CREATE TABLE IF NOT EXISTS design_docs (
 	id TEXT PRIMARY KEY,
@@ -109,6 +121,26 @@ ALTER TABLE users ALTER COLUMN last_seen_at SET NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_users_role_status ON users(role, status);
 
+CREATE TABLE IF NOT EXISTS access_groups (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL UNIQUE,
+	description TEXT NOT NULL DEFAULT '',
+	okta_group_name TEXT NOT NULL DEFAULT '',
+	created_at TIMESTAMPTZ NOT NULL,
+	updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_access_groups_okta ON access_groups(okta_group_name);
+
+CREATE TABLE IF NOT EXISTS access_group_members (
+	group_id TEXT NOT NULL REFERENCES access_groups(id) ON DELETE CASCADE,
+	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	added_at TIMESTAMPTZ NOT NULL,
+	PRIMARY KEY (group_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_access_group_members_user ON access_group_members(user_id);
+
 CREATE TABLE IF NOT EXISTS workspace_access (
 	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
 	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -121,6 +153,19 @@ CREATE TABLE IF NOT EXISTS workspace_access (
 );
 
 CREATE INDEX IF NOT EXISTS idx_workspace_access_user ON workspace_access(user_id);
+
+CREATE TABLE IF NOT EXISTS workspace_group_access (
+	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+	group_id TEXT NOT NULL REFERENCES access_groups(id) ON DELETE CASCADE,
+	can_read BOOLEAN NOT NULL DEFAULT FALSE,
+	can_create_design BOOLEAN NOT NULL DEFAULT FALSE,
+	can_manage BOOLEAN NOT NULL DEFAULT FALSE,
+	created_at TIMESTAMPTZ NOT NULL,
+	updated_at TIMESTAMPTZ NOT NULL,
+	PRIMARY KEY (workspace_id, group_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_group_access_group ON workspace_group_access(group_id);
 
 CREATE TABLE IF NOT EXISTS design_access (
 	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -137,6 +182,22 @@ CREATE TABLE IF NOT EXISTS design_access (
 );
 
 CREATE INDEX IF NOT EXISTS idx_design_access_user ON design_access(user_id);
+
+CREATE TABLE IF NOT EXISTS design_group_access (
+	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+	design_id TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+	group_id TEXT NOT NULL REFERENCES access_groups(id) ON DELETE CASCADE,
+	can_read BOOLEAN NOT NULL DEFAULT FALSE,
+	can_edit BOOLEAN NOT NULL DEFAULT FALSE,
+	can_comment BOOLEAN NOT NULL DEFAULT FALSE,
+	can_review BOOLEAN NOT NULL DEFAULT FALSE,
+	can_manage BOOLEAN NOT NULL DEFAULT FALSE,
+	created_at TIMESTAMPTZ NOT NULL,
+	updated_at TIMESTAMPTZ NOT NULL,
+	PRIMARY KEY (workspace_id, design_id, group_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_design_group_access_group ON design_group_access(group_id);
 
 CREATE TABLE IF NOT EXISTS auth_sessions (
 	token_hash TEXT PRIMARY KEY,
@@ -230,6 +291,8 @@ CREATE TABLE IF NOT EXISTS design_review_requests (
 	id TEXT PRIMARY KEY,
 	workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
 	design_id TEXT NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+	version_id TEXT NOT NULL DEFAULT '',
+	version_number INTEGER NOT NULL DEFAULT 0,
 	requested_by TEXT NOT NULL,
 	reviewer_id TEXT NOT NULL,
 	status TEXT NOT NULL,
@@ -240,8 +303,11 @@ CREATE TABLE IF NOT EXISTS design_review_requests (
 	completed_at TIMESTAMPTZ
 );
 
+ALTER TABLE design_review_requests ADD COLUMN IF NOT EXISTS version_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE design_review_requests ADD COLUMN IF NOT EXISTS version_number INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_design_review_requests_design_updated ON design_review_requests(workspace_id, design_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_design_review_requests_reviewer_updated ON design_review_requests(reviewer_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_design_review_requests_version ON design_review_requests(workspace_id, design_id, version_id);
 
 CREATE TABLE IF NOT EXISTS notifications (
 	id TEXT PRIMARY KEY,
@@ -479,7 +545,7 @@ ON CONFLICT (id) DO NOTHING
 		Access:        "private",
 		Title:         name,
 		Document:      storedDocument,
-		VersionNumber: 1,
+		VersionNumber: 0,
 		CreatedBy:     createdBy,
 		CreatedAt:     now,
 		UpdatedAt:     now,
@@ -489,12 +555,6 @@ ON CONFLICT (id) DO NOTHING
 INSERT INTO designs (id, workspace_id, name, access, title, document, canvas_snapshot, version_number, created_by, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8, $9, $10)
 `, design.ID, design.WorkspaceID, design.Name, design.Access, design.Title, string(design.Document), design.VersionNumber, design.CreatedBy, design.CreatedAt, design.UpdatedAt); err != nil {
-		return domain.Design{}, err
-	}
-	if _, err := tx.Exec(ctx, `
-INSERT INTO design_versions (id, design_id, workspace_id, version_number, document, canvas_snapshot, created_by, created_at)
-VALUES ($1, $2, $3, $4, $5, NULL, $6, $7)
-`, fmt.Sprintf("%s_v1", design.ID), design.ID, design.WorkspaceID, design.VersionNumber, string(design.Document), design.CreatedBy, now); err != nil {
 		return domain.Design{}, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE workspaces SET updated_at = $1 WHERE id = $2`, now, workspaceID); err != nil {
@@ -555,14 +615,13 @@ func (r *PostgresRepository) UpsertDesign(ctx context.Context, design domain.Des
 
 	now := r.clock().UTC()
 	existing, err := selectDesignForUpdate(ctx, tx, design.WorkspaceID, design.ID)
-	versionNumber := 1
 	if err == nil {
 		design.CreatedAt = existing.CreatedAt
 		design.CreatedBy = existing.CreatedBy
 		design.Name = existing.Name
 		design.Access = existing.Access
 		design.Title = existing.Title
-		versionNumber = existing.VersionNumber + 1
+		design.VersionNumber = existing.VersionNumber
 	} else if errors.Is(err, pgx.ErrNoRows) {
 		if design.CreatedBy == "" {
 			design.CreatedBy = r.firstUserID(ctx)
@@ -574,17 +633,17 @@ func (r *PostgresRepository) UpsertDesign(ctx context.Context, design domain.Des
 			design.Access = "private"
 		}
 		design.CreatedAt = now
+		design.VersionNumber = 0
 	} else {
 		return domain.Design{}, err
 	}
 	if design.Title == "" {
 		design.Title = design.Name
 	}
-	design.VersionNumber = versionNumber
 	design.UpdatedAt = now
 
 	canvasSnapshot := nullableJSONText(design.CanvasSnapshot)
-	if versionNumber == 1 {
+	if err != nil && errors.Is(err, pgx.ErrNoRows) {
 		if design.WorkspaceID == domain.GuestWorkspaceID {
 			if _, err := tx.Exec(ctx, `
 INSERT INTO workspaces (id, name, created_at, updated_at)
@@ -610,14 +669,20 @@ WHERE workspace_id = $5 AND id = $6
 	if err != nil {
 		return domain.Design{}, err
 	}
-
-	versionID := fmt.Sprintf("%s_v%d", design.ID, design.VersionNumber)
-	if _, err := tx.Exec(ctx, `
-INSERT INTO design_versions (id, design_id, workspace_id, version_number, document, canvas_snapshot, created_by, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-`, versionID, design.ID, design.WorkspaceID, design.VersionNumber, string(design.Document), canvasSnapshot, design.CreatedBy, now); err != nil {
-		return domain.Design{}, err
+	if design.VersionNumber > 0 {
+		if _, err := tx.Exec(ctx, `
+UPDATE design_versions
+SET status = 'draft',
+	document = $1,
+	canvas_snapshot = $2,
+	remarks = CASE WHEN $3 <> '' THEN $3 ELSE remarks END,
+	updated_at = $4
+WHERE workspace_id = $5 AND design_id = $6 AND version_number = $7 AND status <> 'live'
+`, string(design.Document), canvasSnapshot, strings.TrimSpace(design.VersionRemarks), now, design.WorkspaceID, design.ID, design.VersionNumber); err != nil {
+			return domain.Design{}, err
+		}
 	}
+
 	if _, err := tx.Exec(ctx, `UPDATE workspaces SET updated_at = $1 WHERE id = $2`, now, design.WorkspaceID); err != nil {
 		return domain.Design{}, err
 	}
@@ -656,7 +721,7 @@ func (r *PostgresRepository) ListDesignVersions(ctx context.Context, workspaceID
 		return nil, err
 	}
 	rows, err := r.pool.Query(ctx, `
-SELECT id, design_id, workspace_id, version_number, document, canvas_snapshot, created_by, created_at
+SELECT id, design_id, workspace_id, version_number, status, remarks, document, canvas_snapshot, created_by, created_at, updated_at
 FROM design_versions
 WHERE workspace_id = $1 AND design_id = $2
 ORDER BY version_number DESC
@@ -675,6 +740,173 @@ ORDER BY version_number DESC
 		versions = append(versions, version)
 	}
 	return versions, rows.Err()
+}
+
+func (r *PostgresRepository) CreateDesignVersion(ctx context.Context, workspaceID string, designID string, createdBy string, remarks string) (domain.DesignVersion, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.DesignVersion{}, err
+	}
+	defer rollback(ctx, tx)
+
+	design, err := selectDesignForUpdate(ctx, tx, workspaceID, designID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.DesignVersion{}, errors.New("design not found")
+	}
+	if err != nil {
+		return domain.DesignVersion{}, err
+	}
+	if strings.TrimSpace(createdBy) == "" {
+		createdBy = design.CreatedBy
+	}
+
+	var versionNumber int
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(version_number), 0) + 1 FROM design_versions WHERE workspace_id = $1 AND design_id = $2`, workspaceID, designID).Scan(&versionNumber); err != nil {
+		return domain.DesignVersion{}, err
+	}
+	now := r.clock().UTC()
+	versionID := fmt.Sprintf("%s_v%d", design.ID, versionNumber)
+	row := tx.QueryRow(ctx, `
+INSERT INTO design_versions (id, design_id, workspace_id, version_number, status, remarks, document, canvas_snapshot, created_by, created_at, updated_at)
+VALUES ($1, $2, $3, $4, 'draft', $5, $6, $7, $8, $9, $9)
+RETURNING id, design_id, workspace_id, version_number, status, remarks, document, canvas_snapshot, created_by, created_at, updated_at
+`, versionID, design.ID, design.WorkspaceID, versionNumber, strings.TrimSpace(remarks), string(design.Document), nullableJSONText(design.CanvasSnapshot), createdBy, now)
+	version, err := scanDesignVersion(row)
+	if err != nil {
+		return domain.DesignVersion{}, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE designs SET version_number = $1, updated_at = $2 WHERE workspace_id = $3 AND id = $4`, versionNumber, now, workspaceID, designID); err != nil {
+		return domain.DesignVersion{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.DesignVersion{}, err
+	}
+	return version, nil
+}
+
+func (r *PostgresRepository) UpdateDesignVersionStatus(ctx context.Context, workspaceID string, designID string, versionID string, status string) (domain.DesignVersion, error) {
+	requestedStatus := status
+	status = NormalizeDesignVersionStatus(status)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.DesignVersion{}, err
+	}
+	defer rollback(ctx, tx)
+
+	if _, err := selectDesignForUpdate(ctx, tx, workspaceID, designID); errors.Is(err, pgx.ErrNoRows) {
+		return domain.DesignVersion{}, errors.New("design not found")
+	} else if err != nil {
+		return domain.DesignVersion{}, err
+	}
+	var currentStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM design_versions WHERE workspace_id = $1 AND design_id = $2 AND id = $3`, workspaceID, designID, versionID).Scan(&currentStatus); errors.Is(err, pgx.ErrNoRows) {
+		return domain.DesignVersion{}, errors.New("version not found")
+	} else if err != nil {
+		return domain.DesignVersion{}, err
+	}
+	if err := ValidateDesignVersionStatusTransition(currentStatus, requestedStatus); err != nil {
+		return domain.DesignVersion{}, err
+	}
+	now := r.clock().UTC()
+	version, err := updateDesignVersionStatusTx(ctx, tx, workspaceID, designID, versionID, status, now)
+	if err != nil {
+		return domain.DesignVersion{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.DesignVersion{}, err
+	}
+	return version, nil
+}
+
+func (r *PostgresRepository) DeleteDesignVersion(ctx context.Context, workspaceID string, designID string, versionID string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer rollback(ctx, tx)
+
+	if _, err := selectDesignForUpdate(ctx, tx, workspaceID, designID); errors.Is(err, pgx.ErrNoRows) {
+		return errors.New("design not found")
+	} else if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+DELETE FROM design_review_requests
+WHERE workspace_id = $1 AND design_id = $2 AND version_id = $3
+`, workspaceID, designID, versionID); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `
+DELETE FROM design_versions
+WHERE workspace_id = $1 AND design_id = $2 AND id = $3
+`, workspaceID, designID, versionID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errors.New("version not found")
+	}
+	now := r.clock().UTC()
+	if _, err := tx.Exec(ctx, `
+UPDATE designs
+SET version_number = COALESCE((
+	SELECT MAX(version_number)
+	FROM design_versions
+	WHERE workspace_id = $1 AND design_id = $2
+), 0), updated_at = $3
+WHERE workspace_id = $1 AND id = $2
+`, workspaceID, designID, now); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func resolveDesignVersionTx(ctx context.Context, tx pgx.Tx, workspaceID string, designID string, versionID string, fallbackVersionNumber int) (domain.DesignVersion, error) {
+	versionID = strings.TrimSpace(versionID)
+	var row pgx.Row
+	if versionID != "" {
+		row = tx.QueryRow(ctx, `
+SELECT id, design_id, workspace_id, version_number, status, remarks, document, canvas_snapshot, created_by, created_at, updated_at
+FROM design_versions
+WHERE workspace_id = $1 AND design_id = $2 AND id = $3
+`, workspaceID, designID, versionID)
+	} else if fallbackVersionNumber > 0 {
+		row = tx.QueryRow(ctx, `
+SELECT id, design_id, workspace_id, version_number, status, remarks, document, canvas_snapshot, created_by, created_at, updated_at
+FROM design_versions
+WHERE workspace_id = $1 AND design_id = $2 AND version_number = $3
+`, workspaceID, designID, fallbackVersionNumber)
+	} else {
+		return domain.DesignVersion{}, errors.New("design version is required before requesting review")
+	}
+	version, err := scanDesignVersion(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.DesignVersion{}, errors.New("version not found")
+	}
+	return version, err
+}
+
+func updateDesignVersionStatusTx(ctx context.Context, tx pgx.Tx, workspaceID string, designID string, versionID string, status string, now time.Time) (domain.DesignVersion, error) {
+	if status == "live" {
+		if _, err := tx.Exec(ctx, `
+UPDATE design_versions
+SET status = 'reviewed', updated_at = $1
+WHERE workspace_id = $2 AND design_id = $3 AND status = 'live' AND id <> $4
+`, now, workspaceID, designID, versionID); err != nil {
+			return domain.DesignVersion{}, err
+		}
+	}
+	row := tx.QueryRow(ctx, `
+UPDATE design_versions
+SET status = $1, updated_at = $2
+WHERE workspace_id = $3 AND design_id = $4 AND id = $5
+RETURNING id, design_id, workspace_id, version_number, status, remarks, document, canvas_snapshot, created_by, created_at, updated_at
+`, status, now, workspaceID, designID, versionID)
+	version, err := scanDesignVersion(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.DesignVersion{}, errors.New("version not found")
+	}
+	return version, err
 }
 
 func (r *PostgresRepository) ListDesignDocs(ctx context.Context, workspaceID string, designID string) ([]domain.DesignDoc, error) {
@@ -789,6 +1021,188 @@ func (r *PostgresRepository) DeleteDesignDoc(ctx context.Context, workspaceID st
 	return nil
 }
 
+func (r *PostgresRepository) ListAccessGroups(ctx context.Context) ([]domain.AccessGroup, error) {
+	rows, err := r.pool.Query(ctx, `
+SELECT g.id, g.name, g.description, g.okta_group_name, COUNT(m.user_id), g.created_at, g.updated_at
+FROM access_groups g
+LEFT JOIN access_group_members m ON m.group_id = g.id
+GROUP BY g.id
+ORDER BY lower(g.name)
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	groups := []domain.AccessGroup{}
+	for rows.Next() {
+		group, err := scanAccessGroup(rows)
+		if err != nil {
+			return nil, err
+		}
+		groups = append(groups, group)
+	}
+	return groups, rows.Err()
+}
+
+func (r *PostgresRepository) CreateAccessGroup(ctx context.Context, group domain.AccessGroup) (domain.AccessGroup, error) {
+	name := strings.TrimSpace(group.Name)
+	if name == "" {
+		return domain.AccessGroup{}, errors.New("group name is required")
+	}
+	now := r.clock().UTC()
+	groupID := fmt.Sprintf("grp_%d", now.UnixNano())
+	row := r.pool.QueryRow(ctx, `
+INSERT INTO access_groups (id, name, description, okta_group_name, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $5)
+RETURNING id, name, description, okta_group_name, 0, created_at, updated_at
+`, groupID, name, strings.TrimSpace(group.Description), strings.TrimSpace(group.OktaGroupName), now)
+	return scanAccessGroup(row)
+}
+
+func (r *PostgresRepository) UpdateAccessGroup(ctx context.Context, groupID string, group domain.AccessGroup) (domain.AccessGroup, error) {
+	name := strings.TrimSpace(group.Name)
+	if name == "" {
+		return domain.AccessGroup{}, errors.New("group name is required")
+	}
+	now := r.clock().UTC()
+	row := r.pool.QueryRow(ctx, `
+WITH updated AS (
+	UPDATE access_groups
+	SET name = $1, description = $2, okta_group_name = $3, updated_at = $4
+	WHERE id = $5
+	RETURNING id, name, description, okta_group_name, created_at, updated_at
+)
+SELECT updated.id, updated.name, updated.description, updated.okta_group_name, COUNT(m.user_id), updated.created_at, updated.updated_at
+FROM updated
+LEFT JOIN access_group_members m ON m.group_id = updated.id
+GROUP BY updated.id, updated.name, updated.description, updated.okta_group_name, updated.created_at, updated.updated_at
+`, name, strings.TrimSpace(group.Description), strings.TrimSpace(group.OktaGroupName), now, strings.TrimSpace(groupID))
+	updated, err := scanAccessGroup(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.AccessGroup{}, errors.New("group not found")
+	}
+	return updated, err
+}
+
+func (r *PostgresRepository) DeleteAccessGroup(ctx context.Context, groupID string) error {
+	tag, err := r.pool.Exec(ctx, `DELETE FROM access_groups WHERE id = $1`, strings.TrimSpace(groupID))
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errors.New("group not found")
+	}
+	return nil
+}
+
+func (r *PostgresRepository) ListAccessGroupMembers(ctx context.Context, groupID string) ([]domain.AccessGroupMember, error) {
+	groupID = strings.TrimSpace(groupID)
+	var exists bool
+	if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM access_groups WHERE id = $1)`, groupID).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, errors.New("group not found")
+	}
+	rows, err := r.pool.Query(ctx, `
+SELECT group_id, user_id, added_at
+FROM access_group_members
+WHERE group_id = $1
+ORDER BY user_id
+`, groupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	members := []domain.AccessGroupMember{}
+	for rows.Next() {
+		member, err := scanAccessGroupMember(rows)
+		if err != nil {
+			return nil, err
+		}
+		members = append(members, member)
+	}
+	return members, rows.Err()
+}
+
+func (r *PostgresRepository) ReplaceAccessGroupMembers(ctx context.Context, groupID string, userIDs []string) ([]domain.AccessGroupMember, error) {
+	groupID = strings.TrimSpace(groupID)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer rollback(ctx, tx)
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM access_groups WHERE id = $1)`, groupID).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, errors.New("group not found")
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM access_group_members WHERE group_id = $1`, groupID); err != nil {
+		return nil, err
+	}
+	now := r.clock().UTC()
+	for _, userID := range userIDs {
+		userID = strings.TrimSpace(userID)
+		if userID == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `
+INSERT INTO access_group_members (group_id, user_id, added_at)
+VALUES ($1, $2, $3)
+ON CONFLICT (group_id, user_id) DO NOTHING
+`, groupID, userID, now); err != nil {
+			return nil, err
+		}
+	}
+	rows, err := tx.Query(ctx, `
+SELECT group_id, user_id, added_at
+FROM access_group_members
+WHERE group_id = $1
+ORDER BY user_id
+`, groupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	members := []domain.AccessGroupMember{}
+	for rows.Next() {
+		member, err := scanAccessGroupMember(rows)
+		if err != nil {
+			return nil, err
+		}
+		members = append(members, member)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE access_groups SET updated_at = $1 WHERE id = $2`, now, groupID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return members, nil
+}
+
+func (r *PostgresRepository) ListUserAccessGroupIDs(ctx context.Context, userID string) ([]string, error) {
+	rows, err := r.pool.Query(ctx, `SELECT group_id FROM access_group_members WHERE user_id = $1 ORDER BY group_id`, strings.TrimSpace(userID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	groupIDs := []string{}
+	for rows.Next() {
+		var groupID string
+		if err := rows.Scan(&groupID); err != nil {
+			return nil, err
+		}
+		groupIDs = append(groupIDs, groupID)
+	}
+	return groupIDs, rows.Err()
+}
+
 func (r *PostgresRepository) ListWorkspaceAccess(ctx context.Context, workspaceID string) ([]domain.WorkspaceAccess, error) {
 	rows, err := r.pool.Query(ctx, `
 SELECT workspace_id, user_id, can_read, can_create_design, can_manage, created_at, updated_at
@@ -830,6 +1244,50 @@ RETURNING workspace_id, user_id, can_read, can_create_design, can_manage, create
 
 func (r *PostgresRepository) RevokeWorkspaceAccess(ctx context.Context, workspaceID string, userID string) error {
 	_, err := r.pool.Exec(ctx, `DELETE FROM workspace_access WHERE workspace_id = $1 AND user_id = $2`, strings.TrimSpace(workspaceID), strings.TrimSpace(userID))
+	return err
+}
+
+func (r *PostgresRepository) ListWorkspaceGroupAccess(ctx context.Context, workspaceID string) ([]domain.WorkspaceGroupAccess, error) {
+	rows, err := r.pool.Query(ctx, `
+SELECT workspace_id, group_id, can_read, can_create_design, can_manage, created_at, updated_at
+FROM workspace_group_access
+WHERE workspace_id = $1
+ORDER BY group_id
+`, strings.TrimSpace(workspaceID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	access := []domain.WorkspaceGroupAccess{}
+	for rows.Next() {
+		entry, err := scanWorkspaceGroupAccess(rows)
+		if err != nil {
+			return nil, err
+		}
+		access = append(access, entry)
+	}
+	return access, rows.Err()
+}
+
+func (r *PostgresRepository) GrantWorkspaceGroupAccess(ctx context.Context, access domain.WorkspaceGroupAccess) (domain.WorkspaceGroupAccess, error) {
+	access.WorkspaceID = strings.TrimSpace(access.WorkspaceID)
+	access.GroupID = strings.TrimSpace(access.GroupID)
+	if access.WorkspaceID == "" || access.GroupID == "" {
+		return domain.WorkspaceGroupAccess{}, errors.New("workspace id and group id are required")
+	}
+	now := r.clock().UTC()
+	row := r.pool.QueryRow(ctx, `
+INSERT INTO workspace_group_access (workspace_id, group_id, can_read, can_create_design, can_manage, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $6)
+ON CONFLICT (workspace_id, group_id)
+DO UPDATE SET can_read = EXCLUDED.can_read, can_create_design = EXCLUDED.can_create_design, can_manage = EXCLUDED.can_manage, updated_at = EXCLUDED.updated_at
+RETURNING workspace_id, group_id, can_read, can_create_design, can_manage, created_at, updated_at
+`, access.WorkspaceID, access.GroupID, access.CanRead, access.CanCreateDesign, access.CanManage, now)
+	return scanWorkspaceGroupAccess(row)
+}
+
+func (r *PostgresRepository) RevokeWorkspaceGroupAccess(ctx context.Context, workspaceID string, groupID string) error {
+	_, err := r.pool.Exec(ctx, `DELETE FROM workspace_group_access WHERE workspace_id = $1 AND group_id = $2`, strings.TrimSpace(workspaceID), strings.TrimSpace(groupID))
 	return err
 }
 
@@ -875,6 +1333,51 @@ RETURNING workspace_id, design_id, user_id, can_read, can_edit, can_comment, can
 
 func (r *PostgresRepository) RevokeDesignAccess(ctx context.Context, workspaceID string, designID string, userID string) error {
 	_, err := r.pool.Exec(ctx, `DELETE FROM design_access WHERE workspace_id = $1 AND design_id = $2 AND user_id = $3`, strings.TrimSpace(workspaceID), strings.TrimSpace(designID), strings.TrimSpace(userID))
+	return err
+}
+
+func (r *PostgresRepository) ListDesignGroupAccess(ctx context.Context, workspaceID string, designID string) ([]domain.DesignGroupAccess, error) {
+	rows, err := r.pool.Query(ctx, `
+SELECT workspace_id, design_id, group_id, can_read, can_edit, can_comment, can_review, can_manage, created_at, updated_at
+FROM design_group_access
+WHERE workspace_id = $1 AND design_id = $2
+ORDER BY group_id
+`, strings.TrimSpace(workspaceID), strings.TrimSpace(designID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	access := []domain.DesignGroupAccess{}
+	for rows.Next() {
+		entry, err := scanDesignGroupAccess(rows)
+		if err != nil {
+			return nil, err
+		}
+		access = append(access, entry)
+	}
+	return access, rows.Err()
+}
+
+func (r *PostgresRepository) GrantDesignGroupAccess(ctx context.Context, access domain.DesignGroupAccess) (domain.DesignGroupAccess, error) {
+	access.WorkspaceID = strings.TrimSpace(access.WorkspaceID)
+	access.DesignID = strings.TrimSpace(access.DesignID)
+	access.GroupID = strings.TrimSpace(access.GroupID)
+	if access.WorkspaceID == "" || access.DesignID == "" || access.GroupID == "" {
+		return domain.DesignGroupAccess{}, errors.New("workspace id, design id, and group id are required")
+	}
+	now := r.clock().UTC()
+	row := r.pool.QueryRow(ctx, `
+INSERT INTO design_group_access (workspace_id, design_id, group_id, can_read, can_edit, can_comment, can_review, can_manage, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+ON CONFLICT (workspace_id, design_id, group_id)
+DO UPDATE SET can_read = EXCLUDED.can_read, can_edit = EXCLUDED.can_edit, can_comment = EXCLUDED.can_comment, can_review = EXCLUDED.can_review, can_manage = EXCLUDED.can_manage, updated_at = EXCLUDED.updated_at
+RETURNING workspace_id, design_id, group_id, can_read, can_edit, can_comment, can_review, can_manage, created_at, updated_at
+`, access.WorkspaceID, access.DesignID, access.GroupID, access.CanRead, access.CanEdit, access.CanComment, access.CanReview, access.CanManage, now)
+	return scanDesignGroupAccess(row)
+}
+
+func (r *PostgresRepository) RevokeDesignGroupAccess(ctx context.Context, workspaceID string, designID string, groupID string) error {
+	_, err := r.pool.Exec(ctx, `DELETE FROM design_group_access WHERE workspace_id = $1 AND design_id = $2 AND group_id = $3`, strings.TrimSpace(workspaceID), strings.TrimSpace(designID), strings.TrimSpace(groupID))
 	return err
 }
 
@@ -1080,6 +1583,61 @@ func (r *PostgresRepository) CreateUser(ctx context.Context, displayName string,
 		return domain.User{}, err
 	}
 	return user, nil
+}
+
+func (r *PostgresRepository) ImportUsers(ctx context.Context, users []domain.User) (int, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer rollback(ctx, tx)
+
+	var count int
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+		return 0, err
+	}
+	if count > 0 {
+		return 0, errors.New("database already has users")
+	}
+	now := r.clock().UTC()
+	for _, user := range users {
+		user.ID = strings.TrimSpace(user.ID)
+		user.DisplayName = strings.TrimSpace(user.DisplayName)
+		user.Email = strings.ToLower(strings.TrimSpace(user.Email))
+		user.Role = normalizedUserRole(user.Role)
+		user.Status = normalizedUserStatus(user.Status)
+		if user.ID == "" || user.DisplayName == "" || user.Email == "" {
+			return 0, errors.New("all migrated users require id, display name, and email")
+		}
+		if user.CreatedAt.IsZero() {
+			user.CreatedAt = now
+		}
+		if user.UpdatedAt.IsZero() {
+			user.UpdatedAt = now
+		}
+		if user.LastSeenAt.IsZero() {
+			user.LastSeenAt = user.UpdatedAt
+		}
+		if !user.PasswordSet {
+			user.PasswordHash = ""
+		}
+		if _, err := tx.Exec(ctx, `
+INSERT INTO users (id, display_name, email, password_hash, role, status, last_seen_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+`, user.ID, user.DisplayName, user.Email, user.PasswordHash, user.Role, user.Status, user.LastSeenAt, user.CreatedAt, user.UpdatedAt); err != nil {
+			if isUniqueViolation(err, "users_email_key") {
+				return 0, errors.New("a user with this email already exists")
+			}
+			return 0, err
+		}
+	}
+	if err := ensureDefaultSignInConfig(ctx, tx, now); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return len(users), nil
 }
 
 func (r *PostgresRepository) UpdateUser(ctx context.Context, userID string, displayName string, email string, role string, status string, password string) (domain.User, error) {
@@ -1451,7 +2009,7 @@ func (r *PostgresRepository) ListDesignReviewRequests(ctx context.Context, works
 		return nil, err
 	}
 	rows, err := r.pool.Query(ctx, `
-SELECT id, workspace_id, design_id, requested_by, reviewer_id, status, message, summary, created_at, updated_at, completed_at
+SELECT id, workspace_id, design_id, version_id, version_number, requested_by, reviewer_id, status, message, summary, created_at, updated_at, completed_at
 FROM design_review_requests
 WHERE workspace_id = $1 AND design_id = $2
 ORDER BY updated_at DESC
@@ -1472,64 +2030,93 @@ ORDER BY updated_at DESC
 	return reviews, rows.Err()
 }
 
-func (r *PostgresRepository) CreateDesignReviewRequest(ctx context.Context, workspaceID string, designID string, requestedBy string, reviewerID string, message string) (domain.DesignReviewRequest, error) {
-	reviewerID = strings.TrimSpace(reviewerID)
-	if reviewerID == "" {
-		return domain.DesignReviewRequest{}, errors.New("reviewer id is required")
+func (r *PostgresRepository) CreateDesignReviewRequests(ctx context.Context, workspaceID string, designID string, versionID string, requestedBy string, reviewerIDs []string, message string) ([]domain.DesignReviewRequest, error) {
+	reviewerIDs = normalizeReviewerIDs(reviewerIDs)
+	if len(reviewerIDs) == 0 {
+		return nil, errors.New("at least one reviewer id is required")
 	}
-	reviewer, err := r.GetUser(ctx, reviewerID)
-	if err != nil {
-		return domain.DesignReviewRequest{}, err
-	}
-	reviewerID = reviewer.ID
 	if requestedBy == "" {
 		requestedBy = r.firstUserID(ctx)
 	}
 	requester, err := r.GetUser(ctx, requestedBy)
 	if err != nil {
-		return domain.DesignReviewRequest{}, err
+		return nil, err
 	}
 	requestedBy = requester.ID
 
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return domain.DesignReviewRequest{}, err
+		return nil, err
 	}
 	defer rollback(ctx, tx)
 
 	design, err := selectDesignForUpdate(ctx, tx, workspaceID, designID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.DesignReviewRequest{}, errors.New("design not found")
+		return nil, errors.New("design not found")
 	}
 	if err != nil {
-		return domain.DesignReviewRequest{}, err
+		return nil, err
 	}
 
 	now := r.clock().UTC()
-	review := domain.DesignReviewRequest{
-		ID:          fmt.Sprintf("review_%d", now.UnixNano()),
-		WorkspaceID: workspaceID,
-		DesignID:    designID,
-		RequestedBy: requestedBy,
-		ReviewerID:  reviewerID,
-		Status:      "requested",
-		Message:     strings.TrimSpace(message),
-		CreatedAt:   now,
-		UpdatedAt:   now,
+	version, err := resolveDesignVersionTx(ctx, tx, workspaceID, designID, versionID, design.VersionNumber)
+	if err != nil {
+		return nil, err
 	}
-	if _, err := tx.Exec(ctx, `
-INSERT INTO design_review_requests (id, workspace_id, design_id, requested_by, reviewer_id, status, message, summary, created_at, updated_at, completed_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, '', $8, $8, NULL)
-`, review.ID, review.WorkspaceID, review.DesignID, review.RequestedBy, review.ReviewerID, review.Status, review.Message, now); err != nil {
-		return domain.DesignReviewRequest{}, err
+	reviews := make([]domain.DesignReviewRequest, 0, len(reviewerIDs))
+	for index, reviewerID := range reviewerIDs {
+		reviewer, err := r.GetUser(ctx, reviewerID)
+		if err != nil {
+			return nil, err
+		}
+		reviewerID = reviewer.ID
+		existingRow := tx.QueryRow(ctx, `
+SELECT id, workspace_id, design_id, version_id, version_number, requested_by, reviewer_id, status, message, summary, created_at, updated_at, completed_at
+FROM design_review_requests
+WHERE workspace_id = $1 AND design_id = $2 AND version_id = $3 AND reviewer_id = $4
+`, workspaceID, designID, version.ID, reviewerID)
+		existing, scanErr := scanDesignReviewRequest(existingRow)
+		if scanErr == nil {
+			reviews = append(reviews, existing)
+			continue
+		}
+		if !errors.Is(scanErr, pgx.ErrNoRows) {
+			return nil, scanErr
+		}
+		review := domain.DesignReviewRequest{
+			ID:            fmt.Sprintf("review_%d_%d", now.UnixNano(), index),
+			WorkspaceID:   workspaceID,
+			DesignID:      designID,
+			VersionID:     version.ID,
+			VersionNumber: version.VersionNumber,
+			RequestedBy:   requestedBy,
+			ReviewerID:    reviewerID,
+			Status:        "requested",
+			Message:       strings.TrimSpace(message),
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		}
+		if _, err := tx.Exec(ctx, `
+INSERT INTO design_review_requests (id, workspace_id, design_id, version_id, version_number, requested_by, reviewer_id, status, message, summary, created_at, updated_at, completed_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, '', $10, $10, NULL)
+`, review.ID, review.WorkspaceID, review.DesignID, review.VersionID, review.VersionNumber, review.RequestedBy, review.ReviewerID, review.Status, review.Message, now); err != nil {
+			return nil, err
+		}
+		if err := insertNotification(ctx, tx, notificationFor(reviewerID, workspaceID, designID, "review_requested", "Review requested", requester.DisplayName+" requested your review on "+design.Name, now)); err != nil {
+			return nil, err
+		}
+		reviews = append(reviews, review)
 	}
-	if err := insertNotification(ctx, tx, notificationFor(reviewerID, workspaceID, designID, "review_requested", "Review requested", requester.DisplayName+" requested your review on "+design.Name, now)); err != nil {
-		return domain.DesignReviewRequest{}, err
+	nextStatus := lifecycle.StatusAfterReviewRequest(version.Status)
+	if nextStatus != version.Status {
+		if _, err := updateDesignVersionStatusTx(ctx, tx, workspaceID, designID, version.ID, nextStatus, now); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return domain.DesignReviewRequest{}, err
+		return nil, err
 	}
-	return review, nil
+	return reviews, nil
 }
 
 func (r *PostgresRepository) UpdateDesignReviewRequest(ctx context.Context, workspaceID string, designID string, reviewID string, status string, summary string) (domain.DesignReviewRequest, error) {
@@ -1548,7 +2135,7 @@ func (r *PostgresRepository) UpdateDesignReviewRequest(ctx context.Context, work
 	}
 
 	row := tx.QueryRow(ctx, `
-SELECT id, workspace_id, design_id, requested_by, reviewer_id, status, message, summary, created_at, updated_at, completed_at
+SELECT id, workspace_id, design_id, version_id, version_number, requested_by, reviewer_id, status, message, summary, created_at, updated_at, completed_at
 FROM design_review_requests
 WHERE workspace_id = $1 AND design_id = $2 AND id = $3
 FOR UPDATE
@@ -1575,11 +2162,16 @@ FOR UPDATE
 UPDATE design_review_requests
 SET status = $1, summary = $2, updated_at = $3, completed_at = $4
 WHERE workspace_id = $5 AND design_id = $6 AND id = $7
-RETURNING id, workspace_id, design_id, requested_by, reviewer_id, status, message, summary, created_at, updated_at, completed_at
+RETURNING id, workspace_id, design_id, version_id, version_number, requested_by, reviewer_id, status, message, summary, created_at, updated_at, completed_at
 `, nextStatus, strings.TrimSpace(summary), now, completedAt, workspaceID, designID, reviewID)
 	review, err := scanDesignReviewRequest(row)
 	if err != nil {
 		return domain.DesignReviewRequest{}, err
+	}
+	if nextStatus == "approved" && review.VersionID != "" {
+		if err := markVersionReviewedIfApprovedTx(ctx, tx, workspaceID, designID, review.VersionID, now); err != nil {
+			return domain.DesignReviewRequest{}, err
+		}
 	}
 	if design.CreatedBy != "" && design.CreatedBy != review.ReviewerID {
 		if err := insertNotification(ctx, tx, notificationFor(design.CreatedBy, workspaceID, designID, "review_updated", "Review updated", reviewer.DisplayName+" marked review as "+strings.ReplaceAll(nextStatus, "_", " "), now)); err != nil {
@@ -1590,6 +2182,37 @@ RETURNING id, workspace_id, design_id, requested_by, reviewer_id, status, messag
 		return domain.DesignReviewRequest{}, err
 	}
 	return review, nil
+}
+
+func markVersionReviewedIfApprovedTx(ctx context.Context, tx pgx.Tx, workspaceID string, designID string, versionID string, now time.Time) error {
+	var incompleteCount int
+	if err := tx.QueryRow(ctx, `
+SELECT COUNT(*)
+FROM design_review_requests
+WHERE workspace_id = $1 AND design_id = $2 AND version_id = $3 AND status <> 'approved'
+`, workspaceID, designID, versionID).Scan(&incompleteCount); err != nil {
+		return err
+	}
+	if incompleteCount != 0 {
+		return nil
+	}
+	var reviewCount int
+	if err := tx.QueryRow(ctx, `
+SELECT COUNT(*)
+FROM design_review_requests
+WHERE workspace_id = $1 AND design_id = $2 AND version_id = $3
+`, workspaceID, designID, versionID).Scan(&reviewCount); err != nil {
+		return err
+	}
+	if reviewCount == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `
+UPDATE design_versions
+SET status = 'reviewed', updated_at = $1
+WHERE workspace_id = $2 AND design_id = $3 AND id = $4 AND status = 'pending_review'
+`, now, workspaceID, designID, versionID)
+	return err
 }
 
 func (r *PostgresRepository) ListNotifications(ctx context.Context, userID string) ([]domain.Notification, error) {
@@ -1806,10 +2429,13 @@ func scanDesignVersion(row rowScanner) (domain.DesignVersion, error) {
 		&version.DesignID,
 		&version.WorkspaceID,
 		&version.VersionNumber,
+		&version.Status,
+		&version.Remarks,
 		&document,
 		&canvasSnapshot,
 		&version.CreatedBy,
 		&version.CreatedAt,
+		&version.UpdatedAt,
 	)
 	if err != nil {
 		return domain.DesignVersion{}, err
@@ -1909,12 +2535,63 @@ func scanWorkspaceAccess(row rowScanner) (domain.WorkspaceAccess, error) {
 	return access, err
 }
 
+func scanAccessGroup(row rowScanner) (domain.AccessGroup, error) {
+	var group domain.AccessGroup
+	err := row.Scan(
+		&group.ID,
+		&group.Name,
+		&group.Description,
+		&group.OktaGroupName,
+		&group.MemberCount,
+		&group.CreatedAt,
+		&group.UpdatedAt,
+	)
+	return group, err
+}
+
+func scanAccessGroupMember(row rowScanner) (domain.AccessGroupMember, error) {
+	var member domain.AccessGroupMember
+	err := row.Scan(&member.GroupID, &member.UserID, &member.AddedAt)
+	return member, err
+}
+
+func scanWorkspaceGroupAccess(row rowScanner) (domain.WorkspaceGroupAccess, error) {
+	var access domain.WorkspaceGroupAccess
+	err := row.Scan(
+		&access.WorkspaceID,
+		&access.GroupID,
+		&access.CanRead,
+		&access.CanCreateDesign,
+		&access.CanManage,
+		&access.CreatedAt,
+		&access.UpdatedAt,
+	)
+	return access, err
+}
+
 func scanDesignAccess(row rowScanner) (domain.DesignAccess, error) {
 	var access domain.DesignAccess
 	err := row.Scan(
 		&access.WorkspaceID,
 		&access.DesignID,
 		&access.UserID,
+		&access.CanRead,
+		&access.CanEdit,
+		&access.CanComment,
+		&access.CanReview,
+		&access.CanManage,
+		&access.CreatedAt,
+		&access.UpdatedAt,
+	)
+	return access, err
+}
+
+func scanDesignGroupAccess(row rowScanner) (domain.DesignGroupAccess, error) {
+	var access domain.DesignGroupAccess
+	err := row.Scan(
+		&access.WorkspaceID,
+		&access.DesignID,
+		&access.GroupID,
 		&access.CanRead,
 		&access.CanEdit,
 		&access.CanComment,
@@ -1963,6 +2640,8 @@ func scanDesignReviewRequest(row rowScanner) (domain.DesignReviewRequest, error)
 		&review.ID,
 		&review.WorkspaceID,
 		&review.DesignID,
+		&review.VersionID,
+		&review.VersionNumber,
 		&review.RequestedBy,
 		&review.ReviewerID,
 		&review.Status,

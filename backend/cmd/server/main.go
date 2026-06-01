@@ -20,16 +20,16 @@ func main() {
 	log := config.Logger()
 
 	startupCtx, cancelStartup := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	repo, closeRepo, err := store.NewRepository(startupCtx, cfg.DatabaseURL)
+	storageEngine, err := store.NewStorageEngine(startupCtx, cfg.DatabaseURL)
 	cancelStartup()
 	if err != nil {
-		log.Error("repository init failed", slog.Any("error", err))
+		log.Error("storage engine init failed", slog.Any("error", err))
 		os.Exit(1)
 	}
-	defer closeRepo()
+	defer storageEngine.Close()
 
-	hub := realtime.NewHub(repo, log)
-	api := httpapi.NewServer(cfg, hub, log)
+	hub := realtime.NewHub(storageEngine.Repository(), log)
+	api := httpapi.NewServer(cfg, hub, log, storageEngine)
 
 	server := &http.Server{
 		Addr:              cfg.Addr,

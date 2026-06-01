@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/system-design-evaluator/backend/internal/domain"
+	"github.com/system-design-evaluator/backend/internal/lifecycle"
 )
 
 type WorkspaceRepository interface {
@@ -24,6 +25,9 @@ type DesignRepository interface {
 	UpsertDesign(ctx context.Context, design domain.Design) (domain.Design, error)
 	DeleteDesign(ctx context.Context, workspaceID string, designID string) error
 	ListDesignVersions(ctx context.Context, workspaceID string, designID string) ([]domain.DesignVersion, error)
+	CreateDesignVersion(ctx context.Context, workspaceID string, designID string, createdBy string, remarks string) (domain.DesignVersion, error)
+	UpdateDesignVersionStatus(ctx context.Context, workspaceID string, designID string, versionID string, status string) (domain.DesignVersion, error)
+	DeleteDesignVersion(ctx context.Context, workspaceID string, designID string, versionID string) error
 }
 
 type DesignDocRepository interface {
@@ -57,19 +61,32 @@ type CollaborationRepository interface {
 	ListDesignComments(ctx context.Context, workspaceID string, designID string) ([]domain.DesignComment, error)
 	CreateDesignComment(ctx context.Context, workspaceID string, designID string, authorID string, body string, componentID string, connectorID string) (domain.DesignComment, error)
 	ListDesignReviewRequests(ctx context.Context, workspaceID string, designID string) ([]domain.DesignReviewRequest, error)
-	CreateDesignReviewRequest(ctx context.Context, workspaceID string, designID string, requestedBy string, reviewerID string, message string) (domain.DesignReviewRequest, error)
+	CreateDesignReviewRequests(ctx context.Context, workspaceID string, designID string, versionID string, requestedBy string, reviewerIDs []string, message string) ([]domain.DesignReviewRequest, error)
 	UpdateDesignReviewRequest(ctx context.Context, workspaceID string, designID string, reviewID string, status string, summary string) (domain.DesignReviewRequest, error)
 	ListNotifications(ctx context.Context, userID string) ([]domain.Notification, error)
 	MarkNotificationRead(ctx context.Context, userID string, notificationID string) error
 }
 
 type AccessRepository interface {
+	ListAccessGroups(ctx context.Context) ([]domain.AccessGroup, error)
+	CreateAccessGroup(ctx context.Context, group domain.AccessGroup) (domain.AccessGroup, error)
+	UpdateAccessGroup(ctx context.Context, groupID string, group domain.AccessGroup) (domain.AccessGroup, error)
+	DeleteAccessGroup(ctx context.Context, groupID string) error
+	ListAccessGroupMembers(ctx context.Context, groupID string) ([]domain.AccessGroupMember, error)
+	ReplaceAccessGroupMembers(ctx context.Context, groupID string, userIDs []string) ([]domain.AccessGroupMember, error)
+	ListUserAccessGroupIDs(ctx context.Context, userID string) ([]string, error)
 	ListWorkspaceAccess(ctx context.Context, workspaceID string) ([]domain.WorkspaceAccess, error)
 	GrantWorkspaceAccess(ctx context.Context, access domain.WorkspaceAccess) (domain.WorkspaceAccess, error)
 	RevokeWorkspaceAccess(ctx context.Context, workspaceID string, userID string) error
+	ListWorkspaceGroupAccess(ctx context.Context, workspaceID string) ([]domain.WorkspaceGroupAccess, error)
+	GrantWorkspaceGroupAccess(ctx context.Context, access domain.WorkspaceGroupAccess) (domain.WorkspaceGroupAccess, error)
+	RevokeWorkspaceGroupAccess(ctx context.Context, workspaceID string, groupID string) error
 	ListDesignAccess(ctx context.Context, workspaceID string, designID string) ([]domain.DesignAccess, error)
 	GrantDesignAccess(ctx context.Context, access domain.DesignAccess) (domain.DesignAccess, error)
 	RevokeDesignAccess(ctx context.Context, workspaceID string, designID string, userID string) error
+	ListDesignGroupAccess(ctx context.Context, workspaceID string, designID string) ([]domain.DesignGroupAccess, error)
+	GrantDesignGroupAccess(ctx context.Context, access domain.DesignGroupAccess) (domain.DesignGroupAccess, error)
+	RevokeDesignGroupAccess(ctx context.Context, workspaceID string, designID string, groupID string) error
 }
 
 type CatalogRepository interface {
@@ -86,6 +103,18 @@ type Repository interface {
 	CollaborationRepository
 	AccessRepository
 	CatalogRepository
+}
+
+func NormalizeDesignVersionStatus(status string) string {
+	return lifecycle.NormalizeVersionStatus(status)
+}
+
+func IsDesignVersionStatus(status string) bool {
+	return lifecycle.IsVersionStatus(status)
+}
+
+func ValidateDesignVersionStatusTransition(from string, to string) error {
+	return lifecycle.ValidateVersionStatusTransition(from, to)
 }
 
 func NewRepository(ctx context.Context, databaseURL string) (Repository, func(), error) {

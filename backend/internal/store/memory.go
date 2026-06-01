@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/system-design-evaluator/backend/internal/domain"
+	"github.com/system-design-evaluator/backend/internal/lifecycle"
 )
 
 type MemoryRepository struct {
@@ -21,8 +22,12 @@ type MemoryRepository struct {
 	docs          map[string]domain.DesignDoc
 	users         map[string]domain.User
 	sessions      map[string]memorySession
+	accessGroups  map[string]domain.AccessGroup
+	groupMembers  map[string]domain.AccessGroupMember
 	workspaceACL  map[string]domain.WorkspaceAccess
+	workspaceGACL map[string]domain.WorkspaceGroupAccess
 	designACL     map[string]domain.DesignAccess
+	designGACL    map[string]domain.DesignGroupAccess
 	signInConfig  domain.SignInConfig
 	aiConfig      domain.AIProviderConfig
 	mcpConfig     domain.MCPConfig
@@ -48,8 +53,12 @@ func NewMemoryRepository() *MemoryRepository {
 		docs:          make(map[string]domain.DesignDoc),
 		users:         make(map[string]domain.User),
 		sessions:      make(map[string]memorySession),
+		accessGroups:  make(map[string]domain.AccessGroup),
+		groupMembers:  make(map[string]domain.AccessGroupMember),
 		workspaceACL:  make(map[string]domain.WorkspaceAccess),
+		workspaceGACL: make(map[string]domain.WorkspaceGroupAccess),
 		designACL:     make(map[string]domain.DesignAccess),
+		designGACL:    make(map[string]domain.DesignGroupAccess),
 		signInConfig:  defaultSignInConfig(time.Now().UTC()),
 		aiConfig:      defaultAIProviderConfig(time.Now().UTC()),
 		mcpConfig:     defaultMCPConfig(time.Now().UTC()),
@@ -251,21 +260,12 @@ func (r *MemoryRepository) CreateDesign(ctx context.Context, workspaceID string,
 		Access:        "private",
 		Title:         name,
 		Document:      storedDocument,
-		VersionNumber: 1,
+		VersionNumber: 0,
 		CreatedBy:     createdBy,
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
 	r.designs[design.ID] = design
-	r.versions[design.ID] = append(r.versions[design.ID], domain.DesignVersion{
-		ID:            fmt.Sprintf("%s_v1", design.ID),
-		DesignID:      design.ID,
-		WorkspaceID:   design.WorkspaceID,
-		VersionNumber: 1,
-		Document:      append([]byte(nil), design.Document...),
-		CreatedBy:     design.CreatedBy,
-		CreatedAt:     now,
-	})
 	if workspace, ok := r.workspaces[workspaceID]; ok {
 		workspace.UpdatedAt = now
 		r.workspaces[workspace.ID] = workspace
@@ -322,14 +322,13 @@ func (r *MemoryRepository) UpsertDesign(ctx context.Context, design domain.Desig
 
 	now := r.clock().UTC()
 	existing, exists := r.designs[design.ID]
-	versionNumber := 1
 	if exists {
 		design.CreatedAt = existing.CreatedAt
 		design.CreatedBy = existing.CreatedBy
 		design.Name = existing.Name
 		design.Access = existing.Access
 		design.Title = existing.Title
-		versionNumber = existing.VersionNumber + 1
+		design.VersionNumber = existing.VersionNumber
 	} else {
 		design.CreatedAt = now
 		if design.CreatedBy == "" {
@@ -341,32 +340,41 @@ func (r *MemoryRepository) UpsertDesign(ctx context.Context, design domain.Desig
 		if design.Access == "" {
 			design.Access = "private"
 		}
+		design.VersionNumber = 0
 	}
 	if design.Title == "" {
 		design.Title = design.Name
 	}
-	design.VersionNumber = versionNumber
 	design.UpdatedAt = now
 	r.designs[design.ID] = design
+	r.markCurrentEditableVersionDraftLocked(design, now)
 
 	if workspace, ok := r.workspaces[design.WorkspaceID]; ok {
 		workspace.UpdatedAt = now
 		r.workspaces[workspace.ID] = workspace
 	}
 
-	version := domain.DesignVersion{
-		ID:             fmt.Sprintf("%s_v%d", design.ID, versionNumber),
-		DesignID:       design.ID,
-		WorkspaceID:    design.WorkspaceID,
-		VersionNumber:  versionNumber,
-		Document:       append([]byte(nil), design.Document...),
-		CanvasSnapshot: append([]byte(nil), design.CanvasSnapshot...),
-		CreatedBy:      design.CreatedBy,
-		CreatedAt:      now,
-	}
-	r.versions[design.ID] = append(r.versions[design.ID], version)
-
 	return design, nil
+}
+
+func (r *MemoryRepository) markCurrentEditableVersionDraftLocked(design domain.Design, now time.Time) {
+	if design.VersionNumber <= 0 {
+		return
+	}
+	for index := range r.versions[design.ID] {
+		version := &r.versions[design.ID][index]
+		if version.VersionNumber != design.VersionNumber {
+			continue
+		}
+		version.Status = lifecycle.StatusAfterDesignChange(version.Status)
+		if strings.TrimSpace(design.VersionRemarks) != "" {
+			version.Remarks = strings.TrimSpace(design.VersionRemarks)
+		}
+		version.Document = append([]byte(nil), design.Document...)
+		version.CanvasSnapshot = append([]byte(nil), design.CanvasSnapshot...)
+		version.UpdatedAt = now
+		return
+	}
 }
 
 func (r *MemoryRepository) DeleteDesign(ctx context.Context, workspaceID string, designID string) error {
@@ -434,6 +442,147 @@ func (r *MemoryRepository) ListDesignVersions(ctx context.Context, workspaceID s
 		return versions[i].VersionNumber > versions[j].VersionNumber
 	})
 	return versions, nil
+}
+
+func (r *MemoryRepository) CreateDesignVersion(ctx context.Context, workspaceID string, designID string, createdBy string, remarks string) (domain.DesignVersion, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.DesignVersion{}, err
+	}
+	if workspaceID == "" || designID == "" {
+		return domain.DesignVersion{}, errors.New("workspace id and design id are required")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	design, ok := r.designs[designID]
+	if !ok || design.WorkspaceID != workspaceID {
+		return domain.DesignVersion{}, errors.New("design not found")
+	}
+	now := r.clock().UTC()
+	if createdBy == "" {
+		createdBy = r.firstUserIDLocked()
+	}
+	versionNumber := len(r.versions[designID]) + 1
+	version := domain.DesignVersion{
+		ID:             fmt.Sprintf("%s_v%d", design.ID, versionNumber),
+		DesignID:       design.ID,
+		WorkspaceID:    design.WorkspaceID,
+		VersionNumber:  versionNumber,
+		Status:         "draft",
+		Remarks:        strings.TrimSpace(remarks),
+		Document:       append([]byte(nil), design.Document...),
+		CanvasSnapshot: append([]byte(nil), design.CanvasSnapshot...),
+		CreatedBy:      createdBy,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	r.versions[designID] = append(r.versions[designID], version)
+	design.VersionNumber = versionNumber
+	design.UpdatedAt = now
+	r.designs[design.ID] = design
+	return version, nil
+}
+
+func (r *MemoryRepository) UpdateDesignVersionStatus(ctx context.Context, workspaceID string, designID string, versionID string, status string) (domain.DesignVersion, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.DesignVersion{}, err
+	}
+	requestedStatus := status
+	status = NormalizeDesignVersionStatus(status)
+	if workspaceID == "" || designID == "" || versionID == "" {
+		return domain.DesignVersion{}, errors.New("workspace id, design id, and version id are required")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	design, ok := r.designs[designID]
+	if !ok || design.WorkspaceID != workspaceID {
+		return domain.DesignVersion{}, errors.New("design not found")
+	}
+	now := r.clock().UTC()
+	var currentStatus string
+	found := false
+	for index := range r.versions[designID] {
+		version := &r.versions[designID][index]
+		if version.ID == versionID && version.WorkspaceID == workspaceID {
+			currentStatus = version.Status
+			found = true
+			break
+		}
+	}
+	if !found {
+		return domain.DesignVersion{}, errors.New("version not found")
+	}
+	if err := ValidateDesignVersionStatusTransition(currentStatus, requestedStatus); err != nil {
+		return domain.DesignVersion{}, err
+	}
+	return r.updateDesignVersionStatusLocked(workspaceID, designID, versionID, status, now)
+}
+
+func (r *MemoryRepository) updateDesignVersionStatusLocked(workspaceID string, designID string, versionID string, status string, now time.Time) (domain.DesignVersion, error) {
+	for index := range r.versions[designID] {
+		version := &r.versions[designID][index]
+		if status == "live" && version.ID != versionID && version.Status == "live" {
+			version.Status = "reviewed"
+			version.UpdatedAt = now
+		}
+	}
+	for index := range r.versions[designID] {
+		version := &r.versions[designID][index]
+		if version.ID == versionID && version.WorkspaceID == workspaceID {
+			version.Status = status
+			version.UpdatedAt = now
+			return *version, nil
+		}
+	}
+	return domain.DesignVersion{}, errors.New("version not found")
+}
+
+func (r *MemoryRepository) DeleteDesignVersion(ctx context.Context, workspaceID string, designID string, versionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if workspaceID == "" || designID == "" || versionID == "" {
+		return errors.New("workspace id, design id, and version id are required")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	design, ok := r.designs[designID]
+	if !ok || design.WorkspaceID != workspaceID {
+		return errors.New("design not found")
+	}
+
+	versions := r.versions[designID]
+	nextVersions := versions[:0]
+	deleted := false
+	maxVersionNumber := 0
+	for _, version := range versions {
+		if version.ID == versionID && version.WorkspaceID == workspaceID {
+			deleted = true
+			continue
+		}
+		if version.VersionNumber > maxVersionNumber {
+			maxVersionNumber = version.VersionNumber
+		}
+		nextVersions = append(nextVersions, version)
+	}
+	if !deleted {
+		return errors.New("version not found")
+	}
+	r.versions[designID] = nextVersions
+	for reviewID, review := range r.reviews {
+		if review.WorkspaceID == workspaceID && review.DesignID == designID && review.VersionID == versionID {
+			delete(r.reviews, reviewID)
+		}
+	}
+	design.VersionNumber = maxVersionNumber
+	design.UpdatedAt = r.clock().UTC()
+	r.designs[designID] = design
+	return nil
 }
 
 func (r *MemoryRepository) ListDesignDocs(ctx context.Context, workspaceID string, designID string) ([]domain.DesignDoc, error) {
@@ -552,6 +701,183 @@ func (r *MemoryRepository) DeleteDesignDoc(ctx context.Context, workspaceID stri
 	return nil
 }
 
+func (r *MemoryRepository) ListAccessGroups(ctx context.Context) ([]domain.AccessGroup, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	groups := make([]domain.AccessGroup, 0, len(r.accessGroups))
+	for _, group := range r.accessGroups {
+		group.MemberCount = r.accessGroupMemberCountLocked(group.ID)
+		groups = append(groups, group)
+	}
+	sort.Slice(groups, func(i, j int) bool { return strings.ToLower(groups[i].Name) < strings.ToLower(groups[j].Name) })
+	return groups, nil
+}
+
+func (r *MemoryRepository) CreateAccessGroup(ctx context.Context, group domain.AccessGroup) (domain.AccessGroup, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.AccessGroup{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	name := strings.TrimSpace(group.Name)
+	if name == "" {
+		return domain.AccessGroup{}, errors.New("group name is required")
+	}
+	for _, existing := range r.accessGroups {
+		if strings.EqualFold(existing.Name, name) {
+			return domain.AccessGroup{}, errors.New("group name already exists")
+		}
+	}
+	now := r.clock().UTC()
+	group.ID = fmt.Sprintf("grp_%d", now.UnixNano())
+	group.Name = name
+	group.Description = strings.TrimSpace(group.Description)
+	group.OktaGroupName = strings.TrimSpace(group.OktaGroupName)
+	group.CreatedAt = now
+	group.UpdatedAt = now
+	r.accessGroups[group.ID] = group
+	return group, nil
+}
+
+func (r *MemoryRepository) UpdateAccessGroup(ctx context.Context, groupID string, group domain.AccessGroup) (domain.AccessGroup, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.AccessGroup{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	groupID = strings.TrimSpace(groupID)
+	existing, ok := r.accessGroups[groupID]
+	if !ok {
+		return domain.AccessGroup{}, errors.New("group not found")
+	}
+	name := strings.TrimSpace(group.Name)
+	if name == "" {
+		return domain.AccessGroup{}, errors.New("group name is required")
+	}
+	for _, other := range r.accessGroups {
+		if other.ID != groupID && strings.EqualFold(other.Name, name) {
+			return domain.AccessGroup{}, errors.New("group name already exists")
+		}
+	}
+	existing.Name = name
+	existing.Description = strings.TrimSpace(group.Description)
+	existing.OktaGroupName = strings.TrimSpace(group.OktaGroupName)
+	existing.UpdatedAt = r.clock().UTC()
+	existing.MemberCount = r.accessGroupMemberCountLocked(groupID)
+	r.accessGroups[groupID] = existing
+	return existing, nil
+}
+
+func (r *MemoryRepository) DeleteAccessGroup(ctx context.Context, groupID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	groupID = strings.TrimSpace(groupID)
+	if _, ok := r.accessGroups[groupID]; !ok {
+		return errors.New("group not found")
+	}
+	delete(r.accessGroups, groupID)
+	for key, member := range r.groupMembers {
+		if member.GroupID == groupID {
+			delete(r.groupMembers, key)
+		}
+	}
+	for key, access := range r.workspaceGACL {
+		if access.GroupID == groupID {
+			delete(r.workspaceGACL, key)
+		}
+	}
+	for key, access := range r.designGACL {
+		if access.GroupID == groupID {
+			delete(r.designGACL, key)
+		}
+	}
+	return nil
+}
+
+func (r *MemoryRepository) ListAccessGroupMembers(ctx context.Context, groupID string) ([]domain.AccessGroupMember, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if _, ok := r.accessGroups[strings.TrimSpace(groupID)]; !ok {
+		return nil, errors.New("group not found")
+	}
+	members := []domain.AccessGroupMember{}
+	for _, member := range r.groupMembers {
+		if member.GroupID == groupID {
+			members = append(members, member)
+		}
+	}
+	sort.Slice(members, func(i, j int) bool { return members[i].UserID < members[j].UserID })
+	return members, nil
+}
+
+func (r *MemoryRepository) ReplaceAccessGroupMembers(ctx context.Context, groupID string, userIDs []string) ([]domain.AccessGroupMember, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	groupID = strings.TrimSpace(groupID)
+	if _, ok := r.accessGroups[groupID]; !ok {
+		return nil, errors.New("group not found")
+	}
+	now := r.clock().UTC()
+	next := map[string]domain.AccessGroupMember{}
+	for _, userID := range userIDs {
+		userID = strings.TrimSpace(userID)
+		if userID == "" {
+			continue
+		}
+		if _, err := r.getUserLocked(userID); err != nil {
+			return nil, err
+		}
+		key := accessKey(groupID, userID)
+		member := domain.AccessGroupMember{GroupID: groupID, UserID: userID, AddedAt: now}
+		if existing, ok := r.groupMembers[key]; ok {
+			member.AddedAt = existing.AddedAt
+		}
+		next[key] = member
+	}
+	for key, member := range r.groupMembers {
+		if member.GroupID == groupID {
+			delete(r.groupMembers, key)
+		}
+	}
+	for key, member := range next {
+		r.groupMembers[key] = member
+	}
+	members := make([]domain.AccessGroupMember, 0, len(next))
+	for _, member := range next {
+		members = append(members, member)
+	}
+	sort.Slice(members, func(i, j int) bool { return members[i].UserID < members[j].UserID })
+	return members, nil
+}
+
+func (r *MemoryRepository) ListUserAccessGroupIDs(ctx context.Context, userID string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	groupIDs := []string{}
+	for _, member := range r.groupMembers {
+		if member.UserID == strings.TrimSpace(userID) {
+			groupIDs = append(groupIDs, member.GroupID)
+		}
+	}
+	sort.Strings(groupIDs)
+	return groupIDs, nil
+}
+
 func (r *MemoryRepository) ListWorkspaceAccess(ctx context.Context, workspaceID string) ([]domain.WorkspaceAccess, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -611,6 +937,61 @@ func (r *MemoryRepository) RevokeWorkspaceAccess(ctx context.Context, workspaceI
 	return nil
 }
 
+func (r *MemoryRepository) ListWorkspaceGroupAccess(ctx context.Context, workspaceID string) ([]domain.WorkspaceGroupAccess, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	access := []domain.WorkspaceGroupAccess{}
+	for _, entry := range r.workspaceGACL {
+		if entry.WorkspaceID == strings.TrimSpace(workspaceID) {
+			access = append(access, entry)
+		}
+	}
+	sort.Slice(access, func(i, j int) bool { return access[i].GroupID < access[j].GroupID })
+	return access, nil
+}
+
+func (r *MemoryRepository) GrantWorkspaceGroupAccess(ctx context.Context, access domain.WorkspaceGroupAccess) (domain.WorkspaceGroupAccess, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.WorkspaceGroupAccess{}, err
+	}
+	access.WorkspaceID = strings.TrimSpace(access.WorkspaceID)
+	access.GroupID = strings.TrimSpace(access.GroupID)
+	if access.WorkspaceID == "" || access.GroupID == "" {
+		return domain.WorkspaceGroupAccess{}, errors.New("workspace id and group id are required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.workspaces[access.WorkspaceID]; !ok {
+		return domain.WorkspaceGroupAccess{}, errors.New("workspace not found")
+	}
+	if _, ok := r.accessGroups[access.GroupID]; !ok {
+		return domain.WorkspaceGroupAccess{}, errors.New("group not found")
+	}
+	now := r.clock().UTC()
+	key := accessKey(access.WorkspaceID, access.GroupID)
+	if existing, ok := r.workspaceGACL[key]; ok {
+		access.CreatedAt = existing.CreatedAt
+	} else {
+		access.CreatedAt = now
+	}
+	access.UpdatedAt = now
+	r.workspaceGACL[key] = access
+	return access, nil
+}
+
+func (r *MemoryRepository) RevokeWorkspaceGroupAccess(ctx context.Context, workspaceID string, groupID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.workspaceGACL, accessKey(workspaceID, groupID))
+	return nil
+}
+
 func (r *MemoryRepository) ListDesignAccess(ctx context.Context, workspaceID string, designID string) ([]domain.DesignAccess, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -665,6 +1046,63 @@ func (r *MemoryRepository) RevokeDesignAccess(ctx context.Context, workspaceID s
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.designACL, accessKey(workspaceID, designID, userID))
+	return nil
+}
+
+func (r *MemoryRepository) ListDesignGroupAccess(ctx context.Context, workspaceID string, designID string) ([]domain.DesignGroupAccess, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	access := []domain.DesignGroupAccess{}
+	for _, entry := range r.designGACL {
+		if entry.WorkspaceID == workspaceID && entry.DesignID == designID {
+			access = append(access, entry)
+		}
+	}
+	sort.Slice(access, func(i, j int) bool { return access[i].GroupID < access[j].GroupID })
+	return access, nil
+}
+
+func (r *MemoryRepository) GrantDesignGroupAccess(ctx context.Context, access domain.DesignGroupAccess) (domain.DesignGroupAccess, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.DesignGroupAccess{}, err
+	}
+	access.WorkspaceID = strings.TrimSpace(access.WorkspaceID)
+	access.DesignID = strings.TrimSpace(access.DesignID)
+	access.GroupID = strings.TrimSpace(access.GroupID)
+	if access.WorkspaceID == "" || access.DesignID == "" || access.GroupID == "" {
+		return domain.DesignGroupAccess{}, errors.New("workspace id, design id, and group id are required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	design, ok := r.designs[access.DesignID]
+	if !ok || design.WorkspaceID != access.WorkspaceID {
+		return domain.DesignGroupAccess{}, errors.New("design not found")
+	}
+	if _, ok := r.accessGroups[access.GroupID]; !ok {
+		return domain.DesignGroupAccess{}, errors.New("group not found")
+	}
+	now := r.clock().UTC()
+	key := accessKey(access.WorkspaceID, access.DesignID, access.GroupID)
+	if existing, ok := r.designGACL[key]; ok {
+		access.CreatedAt = existing.CreatedAt
+	} else {
+		access.CreatedAt = now
+	}
+	access.UpdatedAt = now
+	r.designGACL[key] = access
+	return access, nil
+}
+
+func (r *MemoryRepository) RevokeDesignGroupAccess(ctx context.Context, workspaceID string, designID string, groupID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.designGACL, accessKey(workspaceID, designID, groupID))
 	return nil
 }
 
@@ -1278,12 +1716,13 @@ func (r *MemoryRepository) ListDesignReviewRequests(ctx context.Context, workspa
 	return reviews, nil
 }
 
-func (r *MemoryRepository) CreateDesignReviewRequest(ctx context.Context, workspaceID string, designID string, requestedBy string, reviewerID string, message string) (domain.DesignReviewRequest, error) {
+func (r *MemoryRepository) CreateDesignReviewRequests(ctx context.Context, workspaceID string, designID string, versionID string, requestedBy string, reviewerIDs []string, message string) ([]domain.DesignReviewRequest, error) {
 	if err := ctx.Err(); err != nil {
-		return domain.DesignReviewRequest{}, err
+		return nil, err
 	}
-	if strings.TrimSpace(reviewerID) == "" {
-		return domain.DesignReviewRequest{}, errors.New("reviewer id is required")
+	reviewerIDs = normalizeReviewerIDs(reviewerIDs)
+	if len(reviewerIDs) == 0 {
+		return nil, errors.New("at least one reviewer id is required")
 	}
 
 	r.mu.Lock()
@@ -1291,7 +1730,11 @@ func (r *MemoryRepository) CreateDesignReviewRequest(ctx context.Context, worksp
 
 	design, ok := r.designs[designID]
 	if !ok || design.WorkspaceID != workspaceID {
-		return domain.DesignReviewRequest{}, errors.New("design not found")
+		return nil, errors.New("design not found")
+	}
+	version, err := r.resolveDesignVersionLocked(workspaceID, designID, versionID, design.VersionNumber)
+	if err != nil {
+		return nil, err
 	}
 	now := r.clock().UTC()
 	if requestedBy == "" {
@@ -1299,26 +1742,42 @@ func (r *MemoryRepository) CreateDesignReviewRequest(ctx context.Context, worksp
 	}
 	requester, err := r.getUserLocked(requestedBy)
 	if err != nil {
-		return domain.DesignReviewRequest{}, err
+		return nil, err
 	}
-	reviewer, err := r.getUserLocked(reviewerID)
-	if err != nil {
-		return domain.DesignReviewRequest{}, err
+	reviews := make([]domain.DesignReviewRequest, 0, len(reviewerIDs))
+	for index, reviewerID := range reviewerIDs {
+		reviewer, err := r.getUserLocked(reviewerID)
+		if err != nil {
+			return nil, err
+		}
+		if existing, ok := r.findReviewForVersionReviewerLocked(workspaceID, designID, version.ID, reviewer.ID); ok {
+			reviews = append(reviews, existing)
+			continue
+		}
+		review := domain.DesignReviewRequest{
+			ID:            fmt.Sprintf("review_%d_%d", now.UnixNano(), index),
+			WorkspaceID:   workspaceID,
+			DesignID:      designID,
+			VersionID:     version.ID,
+			VersionNumber: version.VersionNumber,
+			RequestedBy:   requestedBy,
+			ReviewerID:    reviewer.ID,
+			Status:        "requested",
+			Message:       strings.TrimSpace(message),
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		}
+		r.reviews[review.ID] = review
+		r.addNotificationLocked(reviewer.ID, workspaceID, designID, "review_requested", "Review requested", requester.DisplayName+" requested your review on "+design.Name, now)
+		reviews = append(reviews, review)
 	}
-	review := domain.DesignReviewRequest{
-		ID:          fmt.Sprintf("review_%d", now.UnixNano()),
-		WorkspaceID: workspaceID,
-		DesignID:    designID,
-		RequestedBy: requestedBy,
-		ReviewerID:  reviewerID,
-		Status:      "requested",
-		Message:     strings.TrimSpace(message),
-		CreatedAt:   now,
-		UpdatedAt:   now,
+	nextStatus := lifecycle.StatusAfterReviewRequest(version.Status)
+	if nextStatus != version.Status {
+		if _, err := r.updateDesignVersionStatusLocked(workspaceID, designID, version.ID, nextStatus, now); err != nil {
+			return nil, err
+		}
 	}
-	r.reviews[review.ID] = review
-	r.addNotificationLocked(reviewer.ID, workspaceID, designID, "review_requested", "Review requested", requester.DisplayName+" requested your review on "+design.Name, now)
-	return review, nil
+	return reviews, nil
 }
 
 func (r *MemoryRepository) UpdateDesignReviewRequest(ctx context.Context, workspaceID string, designID string, reviewID string, status string, summary string) (domain.DesignReviewRequest, error) {
@@ -1350,6 +1809,9 @@ func (r *MemoryRepository) UpdateDesignReviewRequest(ctx context.Context, worksp
 		review.CompletedAt = &now
 	}
 	r.reviews[review.ID] = review
+	if status == "approved" && review.VersionID != "" {
+		r.markVersionReviewedIfApprovedLocked(workspaceID, designID, review.VersionID, now)
+	}
 	if design.CreatedBy != "" && design.CreatedBy != review.ReviewerID {
 		r.addNotificationLocked(design.CreatedBy, workspaceID, designID, "review_updated", "Review updated", reviewer.DisplayName+" marked review as "+strings.ReplaceAll(status, "_", " "), now)
 	}
@@ -1597,6 +2059,16 @@ func accessKey(parts ...string) string {
 	return strings.Join(cleaned, "\x00")
 }
 
+func (r *MemoryRepository) accessGroupMemberCountLocked(groupID string) int {
+	count := 0
+	for _, member := range r.groupMembers {
+		if member.GroupID == groupID {
+			count++
+		}
+	}
+	return count
+}
+
 func normalizedAIProvider(provider string) string {
 	switch strings.TrimSpace(strings.ToLower(provider)) {
 	case "anthropic":
@@ -1678,6 +2150,76 @@ func normalizedReviewStatus(status string, fallback string) string {
 			return "requested"
 		}
 		return fallback
+	}
+}
+
+func normalizeReviewerIDs(reviewerIDs []string) []string {
+	seen := make(map[string]struct{}, len(reviewerIDs))
+	normalized := make([]string, 0, len(reviewerIDs))
+	for _, reviewerID := range reviewerIDs {
+		reviewerID = strings.TrimSpace(reviewerID)
+		if reviewerID == "" {
+			continue
+		}
+		if _, ok := seen[reviewerID]; ok {
+			continue
+		}
+		seen[reviewerID] = struct{}{}
+		normalized = append(normalized, reviewerID)
+	}
+	return normalized
+}
+
+func (r *MemoryRepository) resolveDesignVersionLocked(workspaceID string, designID string, versionID string, fallbackVersionNumber int) (domain.DesignVersion, error) {
+	versionID = strings.TrimSpace(versionID)
+	for _, version := range r.versions[designID] {
+		if version.WorkspaceID != workspaceID {
+			continue
+		}
+		if versionID != "" && version.ID == versionID {
+			return version, nil
+		}
+		if versionID == "" && fallbackVersionNumber > 0 && version.VersionNumber == fallbackVersionNumber {
+			return version, nil
+		}
+	}
+	if versionID == "" {
+		return domain.DesignVersion{}, errors.New("design version is required before requesting review")
+	}
+	return domain.DesignVersion{}, errors.New("version not found")
+}
+
+func (r *MemoryRepository) findReviewForVersionReviewerLocked(workspaceID string, designID string, versionID string, reviewerID string) (domain.DesignReviewRequest, bool) {
+	for _, review := range r.reviews {
+		if review.WorkspaceID == workspaceID && review.DesignID == designID && review.VersionID == versionID && review.ReviewerID == reviewerID {
+			return review, true
+		}
+	}
+	return domain.DesignReviewRequest{}, false
+}
+
+func (r *MemoryRepository) markVersionReviewedIfApprovedLocked(workspaceID string, designID string, versionID string, now time.Time) {
+	reviewCount := 0
+	for _, review := range r.reviews {
+		if review.WorkspaceID != workspaceID || review.DesignID != designID || review.VersionID != versionID {
+			continue
+		}
+		reviewCount++
+		if review.Status != "approved" {
+			return
+		}
+	}
+	if reviewCount == 0 {
+		return
+	}
+	nextStatus := lifecycle.StatusAfterAllReviewsApproved(lifecycle.VersionPendingReview, reviewCount, 0)
+	for index := range r.versions[designID] {
+		version := &r.versions[designID][index]
+		if version.ID == versionID && version.WorkspaceID == workspaceID && version.Status == lifecycle.VersionPendingReview {
+			version.Status = nextStatus
+			version.UpdatedAt = now
+			return
+		}
 	}
 }
 

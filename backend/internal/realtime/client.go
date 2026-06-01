@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/system-design-evaluator/backend/internal/domain"
+	"github.com/system-design-evaluator/backend/internal/policy"
 )
 
 const (
@@ -21,18 +23,20 @@ type Client struct {
 	log         *slog.Logger
 	workspaceID string
 	userID      string
+	userRole    string
 	isAdmin     bool
 	send        chan Envelope
 	closeOnce   sync.Once
 }
 
-func NewClient(conn *websocket.Conn, hub *Hub, log *slog.Logger, workspaceID string, userID string, isAdmin bool) *Client {
+func NewClient(conn *websocket.Conn, hub *Hub, log *slog.Logger, workspaceID string, userID string, userRole string, isAdmin bool) *Client {
 	return &Client{
 		conn:        conn,
 		hub:         hub,
 		log:         log,
 		workspaceID: workspaceID,
 		userID:      userID,
+		userRole:    userRole,
 		isAdmin:     isAdmin,
 		send:        make(chan Envelope, 32),
 	}
@@ -151,32 +155,11 @@ func (c *Client) canEditDesign(ctx context.Context, payload UpsertDesignPayload)
 	if err := json.Unmarshal(payload.Design, &document); err != nil || document.ID == "" {
 		return false
 	}
-	design, err := c.hub.Repository().GetDesign(ctx, c.workspaceID, document.ID)
-	if err != nil {
-		entries, _ := c.hub.Repository().ListWorkspaceAccess(ctx, c.workspaceID)
-		for _, entry := range entries {
-			if entry.UserID == c.userID && (entry.CanCreateDesign || entry.CanManage) {
-				return true
-			}
-		}
-		return false
+	user := domain.User{ID: c.userID, Role: c.userRole}
+	if c.isAdmin {
+		user.Role = "admin"
 	}
-	if design.CreatedBy == c.userID {
-		return true
-	}
-	workspaceEntries, _ := c.hub.Repository().ListWorkspaceAccess(ctx, c.workspaceID)
-	for _, entry := range workspaceEntries {
-		if entry.UserID == c.userID && entry.CanManage {
-			return true
-		}
-	}
-	designEntries, _ := c.hub.Repository().ListDesignAccess(ctx, c.workspaceID, document.ID)
-	for _, entry := range designEntries {
-		if entry.UserID == c.userID && (entry.CanEdit || entry.CanManage) {
-			return true
-		}
-	}
-	return false
+	return policy.NewAuthorizer(c.hub).CanEditDesignDocument(ctx, user, c.workspaceID, document.ID)
 }
 
 func errorEnvelope(requestID string, code string, message string) Envelope {

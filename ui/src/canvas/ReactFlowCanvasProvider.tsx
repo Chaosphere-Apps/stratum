@@ -47,11 +47,19 @@ import {
   type OnNodeDrag,
   type OnNodesChange,
   type OnReconnect,
+  type OnSelectionChangeFunc,
   type ResizeParams,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { componentCatalog, getCatalogItem } from '../catalog'
 import type { ComponentType, DesignComponent } from '../types'
+import {
+  calculateCenteredDropPosition,
+  defaultComponentSize,
+  isMutatingNodeChange,
+  isValidCanvasConnection,
+  sameStringSet,
+} from './interactions'
 import type { ReactFlowPreviewProps } from './types'
 
 type ArchitectureNodeData = {
@@ -223,8 +231,11 @@ export function ReactFlowCanvasProvider({
   design,
   selectedComponentId,
   selectedConnectorId,
+  selectedComponentIds = [],
+  selectedConnectorIds = [],
   onSelectComponent,
   onSelectConnector,
+  onSelectionChange,
   onMoveComponent,
   onResizeComponent,
   onConnectComponents,
@@ -239,6 +250,8 @@ export function ReactFlowCanvasProvider({
 }: ReactFlowPreviewProps) {
   const traversalComponentIds = useMemo(() => new Set(traversalFocus?.componentIds ?? []), [traversalFocus?.componentIds])
   const traversalConnectorIds = useMemo(() => new Set(traversalFocus?.connectorIds ?? []), [traversalFocus?.connectorIds])
+  const selectedComponentIdSet = useMemo(() => new Set(selectedComponentIds), [selectedComponentIds])
+  const selectedConnectorIdSet = useMemo(() => new Set(selectedConnectorIds), [selectedConnectorIds])
   const hasTraversalFocus = traversalComponentIds.size > 0 || traversalConnectorIds.size > 0
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<Node<ArchitectureNodeData>, Edge> | null>(null)
 
@@ -260,7 +273,7 @@ export function ReactFlowCanvasProvider({
           },
           data: {
             component,
-            selected: component.id === selectedComponentId,
+            selected: component.id === selectedComponentId || selectedComponentIdSet.has(component.id),
             readOnly,
             inTraversal: traversalComponentIds.has(component.id),
             activeTraversal: component.id === traversalFocus?.activeComponentId,
@@ -270,7 +283,7 @@ export function ReactFlowCanvasProvider({
             onRequestDuplicate: onDuplicateComponent,
             onRequestSelect: onSelectComponent,
           },
-          selected: component.id === selectedComponentId,
+          selected: component.id === selectedComponentId || selectedComponentIdSet.has(component.id),
           style: {
             width: component.metadata.size?.width ?? (component.type === 'frame.cloud' ? 540 : 230),
             height: component.metadata.size?.height ?? (component.type === 'frame.cloud' ? 340 : 78),
@@ -286,6 +299,7 @@ export function ReactFlowCanvasProvider({
       onSelectComponent,
       readOnly,
       selectedComponentId,
+      selectedComponentIdSet,
       traversalComponentIds,
       traversalFocus?.activeComponentId,
     ],
@@ -303,7 +317,7 @@ export function ReactFlowCanvasProvider({
           target: connector.toComponentId,
           animated: connector.animated || inTraversal,
           type: 'smoothstep',
-          selected: connector.id === selectedConnectorId,
+          selected: connector.id === selectedConnectorId || selectedConnectorIdSet.has(connector.id),
           reconnectable: true,
           zIndex: inTraversal ? 8 : 4,
           interactionWidth: 28,
@@ -311,7 +325,7 @@ export function ReactFlowCanvasProvider({
             <div
               className={[
                 'rf-edge-label',
-                connector.id === selectedConnectorId ? 'selected' : '',
+                connector.id === selectedConnectorId || selectedConnectorIdSet.has(connector.id) ? 'selected' : '',
                 inTraversal ? 'in-traversal' : '',
                 activeTraversal ? 'active-traversal' : '',
                 dimmedByTraversal ? 'dimmed-by-traversal' : '',
@@ -329,20 +343,29 @@ export function ReactFlowCanvasProvider({
           },
           markerEnd: {
             type: MarkerType.ArrowClosed,
-            color: activeTraversal || connector.id === selectedConnectorId ? '#2563eb' : inTraversal ? '#0f766e' : '#0f172a',
+            color: activeTraversal || connector.id === selectedConnectorId || selectedConnectorIdSet.has(connector.id) ? '#2563eb' : inTraversal ? '#0f766e' : '#0f172a',
           },
           style: {
-            strokeWidth: activeTraversal || connector.id === selectedConnectorId ? 3.5 : inTraversal ? 3 : 2.5,
-            stroke: activeTraversal || connector.id === selectedConnectorId ? '#2563eb' : inTraversal ? '#0f766e' : '#0f172a',
+            strokeWidth: activeTraversal || connector.id === selectedConnectorId || selectedConnectorIdSet.has(connector.id) ? 3.5 : inTraversal ? 3 : 2.5,
+            stroke: activeTraversal || connector.id === selectedConnectorId || selectedConnectorIdSet.has(connector.id) ? '#2563eb' : inTraversal ? '#0f766e' : '#0f172a',
             opacity: dimmedByTraversal ? 0.22 : 1,
           },
         }
       }),
-    [design.connectors, hasTraversalFocus, selectedConnectorId, traversalConnectorIds, traversalFocus?.activeConnectorId],
+    [design.connectors, hasTraversalFocus, selectedConnectorId, selectedConnectorIdSet, traversalConnectorIds, traversalFocus?.activeConnectorId],
   )
 
+  const handleSelectionChange: OnSelectionChangeFunc<Node<ArchitectureNodeData>, Edge> = ({ nodes, edges }) => {
+    const componentIds = nodes.map((node) => node.id)
+    const connectorIds = edges.map((edge) => edge.id)
+    if (sameStringSet(componentIds, selectedComponentIds) && sameStringSet(connectorIds, selectedConnectorIds)) {
+      return
+    }
+    onSelectionChange?.(componentIds, connectorIds)
+  }
+
   const handleNodesChange: OnNodesChange<Node<ArchitectureNodeData>> = (changes) => {
-    if (readOnly && changes.some((change) => change.type === 'remove' || change.type === 'position' || change.type === 'dimensions')) {
+    if (readOnly && changes.some((change) => isMutatingNodeChange(change.type))) {
       return
     }
     const removed = changes.filter((change): change is NodeChange & { type: 'remove' } => change.type === 'remove')
@@ -407,13 +430,13 @@ export function ReactFlowCanvasProvider({
 
   function handleConnect(connection: Connection) {
     if (readOnly) return
-    if (!connection.source || !connection.target || connection.source === connection.target) return
+    if (!isValidCanvasConnection(connection.source, connection.target)) return
     onConnectComponents?.(connection.source, connection.target)
   }
 
   const handleReconnect: OnReconnect<Edge> = (oldEdge, nextConnection) => {
     if (readOnly) return
-    if (!nextConnection.source || !nextConnection.target || nextConnection.source === nextConnection.target) return
+    if (!isValidCanvasConnection(nextConnection.source, nextConnection.target)) return
     onReconnectConnector?.(oldEdge.id, nextConnection.source, nextConnection.target)
   }
 
@@ -435,20 +458,13 @@ export function ReactFlowCanvasProvider({
     const catalogAssetId = getDroppedCatalogAssetId(event)
     if (catalogAssetId) {
       const cursorPosition = flowInstance.screenToFlowPosition({ x: event.clientX, y: event.clientY })
-      onDropCatalogAsset?.(catalogAssetId, {
-        x: cursorPosition.x - 230 / 2,
-        y: cursorPosition.y - 78 / 2,
-      })
+      onDropCatalogAsset?.(catalogAssetId, calculateCenteredDropPosition(cursorPosition, defaultComponentSize('compute.service')))
       return
     }
     const type = getDroppedComponentType(event)
     if (!type || !componentCatalog.some((item) => item.type === type)) return
     const cursorPosition = flowInstance.screenToFlowPosition({ x: event.clientX, y: event.clientY })
-    const defaultSize = type === 'frame.cloud' ? { width: 540, height: 340 } : { width: 230, height: 78 }
-    onDropComponent?.(type, {
-      x: cursorPosition.x - defaultSize.width / 2,
-      y: cursorPosition.y - defaultSize.height / 2,
-    })
+    onDropComponent?.(type, calculateCenteredDropPosition(cursorPosition, defaultComponentSize(type)))
   }
 
   return (
@@ -482,6 +498,7 @@ export function ReactFlowCanvasProvider({
           onEdgesChange={handleEdgesChange}
           onConnect={handleConnect}
           onReconnect={handleReconnect}
+          onSelectionChange={handleSelectionChange}
           onDragOver={(event) => {
             if (readOnly) return
             event.preventDefault()
@@ -492,14 +509,17 @@ export function ReactFlowCanvasProvider({
           onNodeClick={(_, node) => {
             onSelectConnector?.('')
             onSelectComponent?.(node.id)
+            onSelectionChange?.([node.id], [])
           }}
           onEdgeClick={(_, edge) => {
             onSelectComponent?.('')
             onSelectConnector?.(edge.id)
+            onSelectionChange?.([], [edge.id])
           }}
           onPaneClick={() => {
             onSelectComponent?.('')
             onSelectConnector?.('')
+            onSelectionChange?.([], [])
           }}
           connectionLineType={ConnectionLineType.SmoothStep}
           connectionRadius={42}
