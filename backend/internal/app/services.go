@@ -69,6 +69,10 @@ func (s IdentityService) ListUsers(ctx context.Context) ([]domain.User, error) {
 	return s.repo().ListUsers(ctx)
 }
 
+func (s IdentityService) ListUsersPage(ctx context.Context, options store.PageOptions) ([]domain.User, store.PageInfo, error) {
+	return s.repo().ListUsersPage(ctx, options)
+}
+
 func (s IdentityService) UserBySessionToken(ctx context.Context, token string) (domain.User, error) {
 	if token == "" {
 		return domain.User{}, errors.New("session is required")
@@ -77,6 +81,13 @@ func (s IdentityService) UserBySessionToken(ctx context.Context, token string) (
 }
 
 func (s IdentityService) Authenticate(ctx context.Context, email string, password string) (domain.User, error) {
+	config, err := s.repo().GetSignInConfig(ctx)
+	if err != nil {
+		return domain.User{}, err
+	}
+	if !config.LocalPasswordEnabled {
+		return domain.User{}, errors.New("local password sign-in is disabled")
+	}
 	return s.repo().AuthenticateUser(ctx, email, password)
 }
 
@@ -106,6 +117,28 @@ func (s IdentityService) CreateUser(ctx context.Context, displayName string, ema
 
 func (s IdentityService) UpdateUser(ctx context.Context, userID string, displayName string, email string, role string, status string, password string) (domain.User, error) {
 	return s.repo().UpdateUser(ctx, userID, displayName, email, role, status, password)
+}
+
+func (s IdentityService) CreatePasswordResetToken(ctx context.Context, userID string, expiresAt time.Time) (string, domain.PasswordResetToken, error) {
+	config, err := s.repo().GetSignInConfig(ctx)
+	if err != nil {
+		return "", domain.PasswordResetToken{}, err
+	}
+	if !config.LocalPasswordEnabled {
+		return "", domain.PasswordResetToken{}, errors.New("local password sign-in is disabled")
+	}
+	return s.repo().CreatePasswordResetToken(ctx, userID, expiresAt)
+}
+
+func (s IdentityService) ResetPasswordWithToken(ctx context.Context, token string, password string) (domain.User, error) {
+	config, err := s.repo().GetSignInConfig(ctx)
+	if err != nil {
+		return domain.User{}, err
+	}
+	if !config.LocalPasswordEnabled {
+		return domain.User{}, errors.New("local password sign-in is disabled")
+	}
+	return s.repo().ResetPasswordWithToken(ctx, token, password)
 }
 
 func (s IdentityService) DeleteUser(ctx context.Context, userID string) error {
@@ -158,6 +191,10 @@ func (s WorkspaceService) List(ctx context.Context) ([]domain.Workspace, error) 
 	return s.repo().ListWorkspaces(ctx)
 }
 
+func (s WorkspaceService) ListPage(ctx context.Context, options store.PageOptions) ([]domain.Workspace, store.PageInfo, error) {
+	return s.repo().ListWorkspacesPage(ctx, options)
+}
+
 func (s WorkspaceService) Get(ctx context.Context, workspaceID string) (domain.Workspace, error) {
 	return s.repo().GetWorkspace(ctx, workspaceID)
 }
@@ -182,6 +219,10 @@ func (s DesignService) repo() store.Repository { return s.provider.Repository() 
 
 func (s DesignService) List(ctx context.Context, workspaceID string) ([]domain.Design, error) {
 	return s.repo().ListDesigns(ctx, workspaceID)
+}
+
+func (s DesignService) ListPage(ctx context.Context, workspaceID string, options store.PageOptions) ([]domain.Design, store.PageInfo, error) {
+	return s.repo().ListDesignsPage(ctx, workspaceID, options)
 }
 
 func (s DesignService) Get(ctx context.Context, workspaceID string, designID string) (domain.Design, error) {
@@ -212,6 +253,10 @@ func (s VersionService) repo() store.Repository { return s.provider.Repository()
 
 func (s VersionService) List(ctx context.Context, workspaceID string, designID string) ([]domain.DesignVersion, error) {
 	return s.repo().ListDesignVersions(ctx, workspaceID, designID)
+}
+
+func (s VersionService) ListPage(ctx context.Context, workspaceID string, designID string, options store.PageOptions) ([]domain.DesignVersion, store.PageInfo, error) {
+	return s.repo().ListDesignVersionsPage(ctx, workspaceID, designID, options)
 }
 
 func (s VersionService) Create(ctx context.Context, workspaceID string, designID string, createdBy string, remarks string) (domain.DesignVersion, error) {
@@ -262,12 +307,20 @@ func (s ReviewService) ListComments(ctx context.Context, workspaceID string, des
 	return s.repo().ListDesignComments(ctx, workspaceID, designID)
 }
 
+func (s ReviewService) ListCommentsPage(ctx context.Context, workspaceID string, designID string, options store.PageOptions) ([]domain.DesignComment, store.PageInfo, error) {
+	return s.repo().ListDesignCommentsPage(ctx, workspaceID, designID, options)
+}
+
 func (s ReviewService) CreateComment(ctx context.Context, workspaceID string, designID string, authorID string, body string, componentID string, connectorID string) (domain.DesignComment, error) {
 	return s.repo().CreateDesignComment(ctx, workspaceID, designID, authorID, body, componentID, connectorID)
 }
 
 func (s ReviewService) ListReviews(ctx context.Context, workspaceID string, designID string) ([]domain.DesignReviewRequest, error) {
 	return s.repo().ListDesignReviewRequests(ctx, workspaceID, designID)
+}
+
+func (s ReviewService) ListReviewsPage(ctx context.Context, workspaceID string, designID string, options store.PageOptions) ([]domain.DesignReviewRequest, store.PageInfo, error) {
+	return s.repo().ListDesignReviewRequestsPage(ctx, workspaceID, designID, options)
 }
 
 func (s ReviewService) CreateReviews(ctx context.Context, workspaceID string, designID string, versionID string, requestedBy string, reviewerIDs []string, message string) ([]domain.DesignReviewRequest, error) {
@@ -368,6 +421,10 @@ func (s CatalogService) repo() store.Repository { return s.provider.Repository()
 
 func (s CatalogService) ListAssets(ctx context.Context, query string) ([]domain.CatalogAsset, error) {
 	return s.repo().ListCatalogAssets(ctx, query)
+}
+
+func (s CatalogService) ListAssetsPage(ctx context.Context, options store.PageOptions) ([]domain.CatalogAsset, store.PageInfo, error) {
+	return s.repo().ListCatalogAssetsPage(ctx, options)
 }
 
 func (s CatalogService) CreateAsset(ctx context.Context, asset domain.CatalogAsset) (domain.CatalogAsset, error) {

@@ -1,6 +1,6 @@
-import { useState } from 'react'
 import { Copy, FilePlus2, FolderPlus, Search, Trash2 } from 'lucide-react'
 import { defaultWorkspace } from '../app/navigation'
+import type { BackendPageInfo } from '../backendApi'
 import type { BackendDesign } from '../backendSync'
 import type { BackendWorkspace } from '../backendSync'
 
@@ -9,9 +9,16 @@ export function HomeScreen({
   designs,
   activeWorkspaceId,
   newWorkspaceName,
+  workspaceSearch,
+  designSearch,
+  workspacePage,
+  designPage,
+  loadingMore,
   error,
   action,
   onWorkspaceNameChange,
+  onWorkspaceSearchChange,
+  onDesignSearchChange,
   onSelectWorkspace,
   onCreateWorkspace,
   onDeleteWorkspace,
@@ -19,15 +26,24 @@ export function HomeScreen({
   onCloneDesign,
   onDeleteDesign,
   onNewDesign,
+  onLoadMoreWorkspaces,
+  onLoadMoreDesigns,
   onRefresh,
 }: {
   workspaces: BackendWorkspace[]
   designs: BackendDesign[]
   activeWorkspaceId: string
   newWorkspaceName: string
+  workspaceSearch: string
+  designSearch: string
+  workspacePage: BackendPageInfo | null
+  designPage: BackendPageInfo | null
+  loadingMore: 'workspaces' | 'designs' | null
   error: string | null
   action: 'workspace' | 'design' | 'delete-workspace' | 'delete-design' | 'delete-version' | null
   onWorkspaceNameChange: (value: string) => void
+  onWorkspaceSearchChange: (value: string) => void
+  onDesignSearchChange: (value: string) => void
   onSelectWorkspace: (workspaceId: string) => void
   onCreateWorkspace: () => void | Promise<void>
   onDeleteWorkspace: (workspace: BackendWorkspace) => void
@@ -35,22 +51,15 @@ export function HomeScreen({
   onCloneDesign: (design: BackendDesign) => void
   onDeleteDesign: (design: BackendDesign) => void
   onNewDesign: () => void | Promise<void>
+  onLoadMoreWorkspaces: () => void | Promise<void>
+  onLoadMoreDesigns: () => void | Promise<void>
   onRefresh: () => void
 }) {
   const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId)
   const isCreatingWorkspace = action === 'workspace'
   const isCreatingDesign = action === 'design'
-  const canDeleteActiveWorkspace = activeWorkspaceId !== defaultWorkspace.id && designs.length === 0
-  const [workspaceSearch, setWorkspaceSearch] = useState('')
-  const [designSearch, setDesignSearch] = useState('')
-  const filteredWorkspaces = workspaces.filter((workspace) =>
-    workspace.name.toLowerCase().includes(workspaceSearch.trim().toLowerCase()),
-  )
-  const filteredDesigns = designs.filter((backendDesign) => {
-    const query = designSearch.trim().toLowerCase()
-    if (!query) return true
-    return `${backendDesign.name} ${backendDesign.document.title}`.toLowerCase().includes(query)
-  })
+  const canDeleteActiveWorkspace =
+    activeWorkspaceId !== defaultWorkspace.id && !designSearch.trim() && !designPage?.hasMore && designs.length === 0
 
   return (
     <main className="home-shell">
@@ -77,10 +86,10 @@ export function HomeScreen({
           <div className="home-section-title">Workspaces</div>
           <label className="home-search">
             <Search size={15} />
-            <input value={workspaceSearch} onChange={(event) => setWorkspaceSearch(event.target.value)} placeholder="Search workspaces..." />
+            <input value={workspaceSearch} onChange={(event) => onWorkspaceSearchChange(event.target.value)} placeholder="Search workspaces..." />
           </label>
           <div className="workspace-list">
-            {filteredWorkspaces.map((workspace) => (
+            {workspaces.map((workspace) => (
               <div
                 className={`workspace-card ${workspace.id === activeWorkspaceId ? 'active' : ''}`}
                 key={workspace.id}
@@ -101,8 +110,13 @@ export function HomeScreen({
                 ) : null}
               </div>
             ))}
-            {!filteredWorkspaces.length ? (
+            {!workspaces.length ? (
               <div className="empty-search-result">No matching workspaces</div>
+            ) : null}
+            {workspacePage?.hasMore ? (
+              <button className="load-more-button" type="button" disabled={loadingMore === 'workspaces'} onClick={() => void onLoadMoreWorkspaces()}>
+                {loadingMore === 'workspaces' ? 'Loading...' : 'Load more workspaces'}
+              </button>
             ) : null}
           </div>
           <form
@@ -136,12 +150,12 @@ export function HomeScreen({
           </div>
           <label className="home-search design-search">
             <Search size={15} />
-            <input value={designSearch} onChange={(event) => setDesignSearch(event.target.value)} placeholder="Search designs..." />
+            <input value={designSearch} onChange={(event) => onDesignSearchChange(event.target.value)} placeholder="Search designs..." />
           </label>
 
           {designs.length ? (
             <div className="home-design-grid">
-              {filteredDesigns.map((backendDesign) => (
+              {designs.map((backendDesign) => (
                 <article className="home-design-card" key={backendDesign.id}>
                   <button type="button" className="home-design-open" onClick={() => onOpenDesign(backendDesign)}>
                     <div className="design-card-preview">
@@ -171,9 +185,16 @@ export function HomeScreen({
                   </button>
                 </article>
               ))}
-              {!filteredDesigns.length ? (
-                <div className="empty-search-result">No matching designs</div>
+              {designPage?.hasMore ? (
+                <button className="load-more-button design-load-more" type="button" disabled={loadingMore === 'designs'} onClick={() => void onLoadMoreDesigns()}>
+                  {loadingMore === 'designs' ? 'Loading...' : 'Load more designs'}
+                </button>
               ) : null}
+            </div>
+          ) : designSearch.trim() ? (
+            <div className="empty-designs">
+              <strong>No matching designs</strong>
+              <span>Adjust the search term or clear it to see this workspace.</span>
             </div>
           ) : (
             <div className="empty-designs">

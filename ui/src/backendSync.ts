@@ -47,11 +47,12 @@ interface DesignUpdatedPayload {
 interface UseBackendDesignSyncOptions {
   workspaceId: string
   selectedDesignId?: string | null
+  enabled?: boolean
   onRemoteDesign: (design: BackendDesign) => void
 }
 
-export function useBackendDesignSync({ workspaceId, selectedDesignId, onRemoteDesign }: UseBackendDesignSyncOptions) {
-  const [status, setStatus] = useState<ConnectionStatus>('connecting')
+export function useBackendDesignSync({ workspaceId, selectedDesignId, enabled = true, onRemoteDesign }: UseBackendDesignSyncOptions) {
+  const [status, setStatus] = useState<ConnectionStatus>(enabled ? 'connecting' : 'disconnected')
   const [workspace, setWorkspace] = useState<BackendWorkspace | null>(null)
   const [designs, setDesigns] = useState<BackendDesign[]>([])
   const socketRef = useRef<WebSocket | null>(null)
@@ -64,6 +65,17 @@ export function useBackendDesignSync({ workspaceId, selectedDesignId, onRemoteDe
   }, [onRemoteDesign])
 
   useEffect(() => {
+    if (!enabled) {
+      socketRef.current?.close()
+      socketRef.current = null
+      hydratedRef.current = false
+      pendingRequestIds.current.clear()
+      setStatus('disconnected')
+      setWorkspace(null)
+      setDesigns([])
+      return
+    }
+
     let closed = false
     let reconnectTimer: number | undefined
 
@@ -143,7 +155,7 @@ export function useBackendDesignSync({ workspaceId, selectedDesignId, onRemoteDe
       if (reconnectTimer) window.clearTimeout(reconnectTimer)
       socketRef.current?.close()
     }
-  }, [selectedDesignId, workspaceId])
+  }, [enabled, selectedDesignId, workspaceId])
 
   const saveDesign = useCallback((design: DesignDocument) => {
     const socket = socketRef.current

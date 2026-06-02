@@ -124,6 +124,9 @@ export interface DesignJourneyStep {
   id: string
   componentId?: string
   connectorId?: string
+  kind?: 'component' | 'request' | 'async' | 'callback' | 'batch' | 'signal' | 'decision'
+  fromComponentId?: string
+  toComponentId?: string
   title: string
   description: string
 }

@@ -3,6 +3,7 @@ import { describe, it } from 'node:test'
 import { loadTsModule } from './loadTsModule.mjs'
 
 const interactions = loadTsModule('src/canvas/interactions.ts')
+const connectorVisuals = loadTsModule('src/canvas/connectorVisuals.ts')
 
 describe('canvas interactions', () => {
   it('centers dropped components on the cursor', () => {
@@ -25,5 +26,17 @@ describe('canvas interactions', () => {
     assert.equal(interactions.isMutatingNodeChange('select'), false)
     assert.equal(interactions.sameStringSet(['a', 'b'], ['b', 'a']), true)
     assert.equal(interactions.sameStringSet(['a', 'b'], ['a']), false)
+  })
+
+  it('assigns strong visual semantics to connector types', () => {
+    const asyncProfile = connectorVisuals.connectorVisualProfile('asynchronous_event')
+    assert.equal(asyncProfile.tone, 'async')
+    assert.equal(asyncProfile.shouldAnimate, true)
+    assert.ok(asyncProfile.dash)
+
+    const syncProfile = connectorVisuals.connectorVisualProfile('synchronous')
+    assert.equal(syncProfile.tone, 'request')
+    assert.equal(syncProfile.shouldAnimate, false)
+    assert.equal(connectorVisuals.connectorTypeLabel('model_call'), 'Model call')
   })
 })

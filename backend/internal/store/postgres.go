@@ -121,6 +121,16 @@ ALTER TABLE users ALTER COLUMN last_seen_at SET NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_users_role_status ON users(role, status);
 
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+	token_hash TEXT PRIMARY KEY,
+	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	created_at TIMESTAMPTZ NOT NULL,
+	expires_at TIMESTAMPTZ NOT NULL,
+	used_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user ON password_reset_tokens(user_id, expires_at DESC);
+
 CREATE TABLE IF NOT EXISTS access_groups (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL UNIQUE,
@@ -341,16 +351,27 @@ ON CONFLICT (id) DO NOTHING
 }
 
 func (r *PostgresRepository) ListWorkspaces(ctx context.Context) ([]domain.Workspace, error) {
+	return listAllPages(ctx, func(ctx context.Context, options PageOptions) ([]domain.Workspace, PageInfo, error) {
+		return r.ListWorkspacesPage(ctx, options)
+	})
+}
+
+func (r *PostgresRepository) ListWorkspacesPage(ctx context.Context, options PageOptions) ([]domain.Workspace, PageInfo, error) {
 	if _, err := r.GetOrCreateGuestWorkspace(ctx); err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
+	options = NormalizePageOptions(options)
+	offset := OffsetFromCursor(options.Cursor)
+	likeQuery := "%" + strings.ToLower(options.Query) + "%"
 	rows, err := r.pool.Query(ctx, `
 SELECT id, name, created_at, updated_at
 FROM workspaces
+WHERE $1 = '' OR lower(name) LIKE $2
 ORDER BY updated_at DESC
-`)
+LIMIT $3 OFFSET $4
+`, options.Query, likeQuery, options.Limit+1, offset)
 	if err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
 	defer rows.Close()
 
@@ -358,11 +379,15 @@ ORDER BY updated_at DESC
 	for rows.Next() {
 		workspace, err := scanWorkspace(rows)
 		if err != nil {
-			return nil, err
+			return nil, PageInfo{}, err
 		}
 		workspaces = append(workspaces, workspace)
 	}
-	return workspaces, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, PageInfo{}, err
+	}
+	items, page := pageFromFetched(workspaces, options, offset)
+	return items, page, nil
 }
 
 func (r *PostgresRepository) GetWorkspace(ctx context.Context, workspaceID string) (domain.Workspace, error) {
@@ -453,23 +478,33 @@ FOR UPDATE
 }
 
 func (r *PostgresRepository) ListDesigns(ctx context.Context, workspaceID string) ([]domain.Design, error) {
+	return listAllPages(ctx, func(ctx context.Context, options PageOptions) ([]domain.Design, PageInfo, error) {
+		return r.ListDesignsPage(ctx, workspaceID, options)
+	})
+}
+
+func (r *PostgresRepository) ListDesignsPage(ctx context.Context, workspaceID string, options PageOptions) ([]domain.Design, PageInfo, error) {
 	if strings.TrimSpace(workspaceID) == "" {
-		return nil, errors.New("workspace id is required")
+		return nil, PageInfo{}, errors.New("workspace id is required")
 	}
 	if workspaceID == domain.GuestWorkspaceID {
 		if _, err := r.GetOrCreateGuestWorkspace(ctx); err != nil {
-			return nil, err
+			return nil, PageInfo{}, err
 		}
 	}
+	options = NormalizePageOptions(options)
+	offset := OffsetFromCursor(options.Cursor)
+	likeQuery := "%" + strings.ToLower(options.Query) + "%"
 
 	rows, err := r.pool.Query(ctx, `
 SELECT id, workspace_id, name, access, title, document, canvas_snapshot, version_number, created_by, created_at, updated_at
 FROM designs
-WHERE workspace_id = $1
+WHERE workspace_id = $1 AND ($2 = '' OR lower(name) LIKE $3 OR lower(title) LIKE $3)
 ORDER BY updated_at DESC
-`, workspaceID)
+LIMIT $4 OFFSET $5
+`, workspaceID, options.Query, likeQuery, options.Limit+1, offset)
 	if err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
 	defer rows.Close()
 
@@ -477,11 +512,15 @@ ORDER BY updated_at DESC
 	for rows.Next() {
 		design, err := scanDesign(rows)
 		if err != nil {
-			return nil, err
+			return nil, PageInfo{}, err
 		}
 		designs = append(designs, design)
 	}
-	return designs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, PageInfo{}, err
+	}
+	items, page := pageFromFetched(designs, options, offset)
+	return items, page, nil
 }
 
 func (r *PostgresRepository) GetDesign(ctx context.Context, workspaceID string, designID string) (domain.Design, error) {
@@ -717,17 +756,26 @@ func (r *PostgresRepository) DeleteDesign(ctx context.Context, workspaceID strin
 }
 
 func (r *PostgresRepository) ListDesignVersions(ctx context.Context, workspaceID string, designID string) ([]domain.DesignVersion, error) {
+	return listAllPages(ctx, func(ctx context.Context, options PageOptions) ([]domain.DesignVersion, PageInfo, error) {
+		return r.ListDesignVersionsPage(ctx, workspaceID, designID, options)
+	})
+}
+
+func (r *PostgresRepository) ListDesignVersionsPage(ctx context.Context, workspaceID string, designID string, options PageOptions) ([]domain.DesignVersion, PageInfo, error) {
 	if _, err := r.GetDesign(ctx, workspaceID, designID); err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
+	options = NormalizePageOptions(options)
+	offset := OffsetFromCursor(options.Cursor)
 	rows, err := r.pool.Query(ctx, `
 SELECT id, design_id, workspace_id, version_number, status, remarks, document, canvas_snapshot, created_by, created_at, updated_at
 FROM design_versions
 WHERE workspace_id = $1 AND design_id = $2
 ORDER BY version_number DESC
-`, workspaceID, designID)
+LIMIT $3 OFFSET $4
+`, workspaceID, designID, options.Limit+1, offset)
 	if err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
 	defer rows.Close()
 
@@ -735,11 +783,15 @@ ORDER BY version_number DESC
 	for rows.Next() {
 		version, err := scanDesignVersion(rows)
 		if err != nil {
-			return nil, err
+			return nil, PageInfo{}, err
 		}
 		versions = append(versions, version)
 	}
-	return versions, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, PageInfo{}, err
+	}
+	items, page := pageFromFetched(versions, options, offset)
+	return items, page, nil
 }
 
 func (r *PostgresRepository) CreateDesignVersion(ctx context.Context, workspaceID string, designID string, createdBy string, remarks string) (domain.DesignVersion, error) {
@@ -1382,16 +1434,27 @@ func (r *PostgresRepository) RevokeDesignGroupAccess(ctx context.Context, worksp
 }
 
 func (r *PostgresRepository) ListUsers(ctx context.Context) ([]domain.User, error) {
+	return listAllPages(ctx, func(ctx context.Context, options PageOptions) ([]domain.User, PageInfo, error) {
+		return r.ListUsersPage(ctx, options)
+	})
+}
+
+func (r *PostgresRepository) ListUsersPage(ctx context.Context, options PageOptions) ([]domain.User, PageInfo, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
+	options = NormalizePageOptions(options)
+	offset := OffsetFromCursor(options.Cursor)
+	likeQuery := "%" + strings.ToLower(options.Query) + "%"
 	rows, err := r.pool.Query(ctx, `
 SELECT id, display_name, email, password_hash <> '', password_hash, role, status, last_seen_at, created_at, updated_at
 FROM users
+WHERE $1 = '' OR lower(display_name) LIKE $2 OR lower(email) LIKE $2 OR lower(role) LIKE $2
 ORDER BY created_at ASC
-`)
+LIMIT $3 OFFSET $4
+`, options.Query, likeQuery, options.Limit+1, offset)
 	if err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
 	defer rows.Close()
 
@@ -1399,11 +1462,15 @@ ORDER BY created_at ASC
 	for rows.Next() {
 		user, err := scanUser(rows)
 		if err != nil {
-			return nil, err
+			return nil, PageInfo{}, err
 		}
 		users = append(users, user)
 	}
-	return users, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, PageInfo{}, err
+	}
+	items, page := pageFromFetched(users, options, offset)
+	return items, page, nil
 }
 
 func (r *PostgresRepository) GetUser(ctx context.Context, userID string) (domain.User, error) {
@@ -1682,6 +1749,79 @@ RETURNING id, display_name, email, password_hash <> '', password_hash, role, sta
 	return user, err
 }
 
+func (r *PostgresRepository) CreatePasswordResetToken(ctx context.Context, userID string, expiresAt time.Time) (string, domain.PasswordResetToken, error) {
+	user, err := r.GetUser(ctx, userID)
+	if err != nil {
+		return "", domain.PasswordResetToken{}, err
+	}
+	if user.Status == "disabled" {
+		return "", domain.PasswordResetToken{}, errors.New("user is disabled")
+	}
+	token, tokenHash, err := newPasswordResetToken()
+	if err != nil {
+		return "", domain.PasswordResetToken{}, err
+	}
+	now := r.clock().UTC()
+	if expiresAt.IsZero() {
+		expiresAt = now.Add(time.Hour)
+	}
+	reset := domain.PasswordResetToken{
+		Token:     tokenHash,
+		UserID:    user.ID,
+		CreatedAt: now,
+		ExpiresAt: expiresAt.UTC(),
+	}
+	if _, err := r.pool.Exec(ctx, `
+INSERT INTO password_reset_tokens (token_hash, user_id, created_at, expires_at)
+VALUES ($1, $2, $3, $4)
+`, tokenHash, user.ID, reset.CreatedAt, reset.ExpiresAt); err != nil {
+		return "", domain.PasswordResetToken{}, err
+	}
+	return token, reset, nil
+}
+
+func (r *PostgresRepository) ResetPasswordWithToken(ctx context.Context, token string, password string) (domain.User, error) {
+	passwordHash, err := hashPassword(password)
+	if err != nil {
+		return domain.User{}, err
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.User{}, err
+	}
+	defer rollback(ctx, tx)
+
+	now := r.clock().UTC()
+	var userID string
+	if err := tx.QueryRow(ctx, `
+UPDATE password_reset_tokens
+SET used_at = $1
+WHERE token_hash = $2 AND used_at IS NULL AND expires_at > $1
+RETURNING user_id
+`, now, sessionTokenHash(token)).Scan(&userID); errors.Is(err, pgx.ErrNoRows) {
+		return domain.User{}, errors.New("password reset link is invalid or expired")
+	} else if err != nil {
+		return domain.User{}, err
+	}
+	row := tx.QueryRow(ctx, `
+UPDATE users
+SET password_hash = $1, updated_at = $2
+WHERE id = $3 AND status <> 'disabled'
+RETURNING id, display_name, email, password_hash <> '', password_hash, role, status, last_seen_at, created_at, updated_at
+`, passwordHash, now, userID)
+	user, err := scanUser(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.User{}, errors.New("password reset link is invalid or expired")
+	}
+	if err != nil {
+		return domain.User{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.User{}, err
+	}
+	return user, nil
+}
+
 func (r *PostgresRepository) DeleteUser(ctx context.Context, userID string) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -1923,17 +2063,26 @@ RETURNING enabled, endpoint_path, read_catalog, read_designs, create_draft_desig
 }
 
 func (r *PostgresRepository) ListDesignComments(ctx context.Context, workspaceID string, designID string) ([]domain.DesignComment, error) {
+	return listAllPages(ctx, func(ctx context.Context, options PageOptions) ([]domain.DesignComment, PageInfo, error) {
+		return r.ListDesignCommentsPage(ctx, workspaceID, designID, options)
+	})
+}
+
+func (r *PostgresRepository) ListDesignCommentsPage(ctx context.Context, workspaceID string, designID string, options PageOptions) ([]domain.DesignComment, PageInfo, error) {
 	if _, err := r.GetDesign(ctx, workspaceID, designID); err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
+	options = NormalizePageOptions(options)
+	offset := OffsetFromCursor(options.Cursor)
 	rows, err := r.pool.Query(ctx, `
 SELECT id, workspace_id, design_id, author_id, body, component_id, connector_id, created_at
 FROM design_comments
 WHERE workspace_id = $1 AND design_id = $2
 ORDER BY created_at DESC
-`, workspaceID, designID)
+LIMIT $3 OFFSET $4
+`, workspaceID, designID, options.Limit+1, offset)
 	if err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
 	defer rows.Close()
 
@@ -1941,11 +2090,15 @@ ORDER BY created_at DESC
 	for rows.Next() {
 		comment, err := scanDesignComment(rows)
 		if err != nil {
-			return nil, err
+			return nil, PageInfo{}, err
 		}
 		comments = append(comments, comment)
 	}
-	return comments, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, PageInfo{}, err
+	}
+	items, page := pageFromFetched(comments, options, offset)
+	return items, page, nil
 }
 
 func (r *PostgresRepository) CreateDesignComment(ctx context.Context, workspaceID string, designID string, authorID string, body string, componentID string, connectorID string) (domain.DesignComment, error) {
@@ -2005,17 +2158,26 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 }
 
 func (r *PostgresRepository) ListDesignReviewRequests(ctx context.Context, workspaceID string, designID string) ([]domain.DesignReviewRequest, error) {
+	return listAllPages(ctx, func(ctx context.Context, options PageOptions) ([]domain.DesignReviewRequest, PageInfo, error) {
+		return r.ListDesignReviewRequestsPage(ctx, workspaceID, designID, options)
+	})
+}
+
+func (r *PostgresRepository) ListDesignReviewRequestsPage(ctx context.Context, workspaceID string, designID string, options PageOptions) ([]domain.DesignReviewRequest, PageInfo, error) {
 	if _, err := r.GetDesign(ctx, workspaceID, designID); err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
+	options = NormalizePageOptions(options)
+	offset := OffsetFromCursor(options.Cursor)
 	rows, err := r.pool.Query(ctx, `
 SELECT id, workspace_id, design_id, version_id, version_number, requested_by, reviewer_id, status, message, summary, created_at, updated_at, completed_at
 FROM design_review_requests
 WHERE workspace_id = $1 AND design_id = $2
 ORDER BY updated_at DESC
-`, workspaceID, designID)
+LIMIT $3 OFFSET $4
+`, workspaceID, designID, options.Limit+1, offset)
 	if err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
 	defer rows.Close()
 
@@ -2023,11 +2185,15 @@ ORDER BY updated_at DESC
 	for rows.Next() {
 		review, err := scanDesignReviewRequest(rows)
 		if err != nil {
-			return nil, err
+			return nil, PageInfo{}, err
 		}
 		reviews = append(reviews, review)
 	}
-	return reviews, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, PageInfo{}, err
+	}
+	items, page := pageFromFetched(reviews, options, offset)
+	return items, page, nil
 }
 
 func (r *PostgresRepository) CreateDesignReviewRequests(ctx context.Context, workspaceID string, designID string, versionID string, requestedBy string, reviewerIDs []string, message string) ([]domain.DesignReviewRequest, error) {
@@ -2257,7 +2423,16 @@ func (r *PostgresRepository) MarkNotificationRead(ctx context.Context, userID st
 }
 
 func (r *PostgresRepository) ListCatalogAssets(ctx context.Context, query string) ([]domain.CatalogAsset, error) {
-	normalizedQuery := normalizedCatalogName(query)
+	return listAllPages(ctx, func(ctx context.Context, options PageOptions) ([]domain.CatalogAsset, PageInfo, error) {
+		options.Query = query
+		return r.ListCatalogAssetsPage(ctx, options)
+	})
+}
+
+func (r *PostgresRepository) ListCatalogAssetsPage(ctx context.Context, options PageOptions) ([]domain.CatalogAsset, PageInfo, error) {
+	options = NormalizePageOptions(options)
+	offset := OffsetFromCursor(options.Cursor)
+	normalizedQuery := normalizedCatalogName(options.Query)
 	likeQuery := "%" + normalizedQuery + "%"
 	rows, err := r.pool.Query(ctx, `
 SELECT
@@ -2269,9 +2444,10 @@ LEFT JOIN designs d ON d.document LIKE '%"assetId":"' || ca.id || '"%'
 WHERE $1 = '' OR ca.normalized_name LIKE $2
 GROUP BY ca.id
 ORDER BY (ca.normalized_name = $1) DESC, ca.name ASC
-`, normalizedQuery, likeQuery)
+LIMIT $3 OFFSET $4
+`, normalizedQuery, likeQuery, options.Limit+1, offset)
 	if err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
 	defer rows.Close()
 
@@ -2279,11 +2455,15 @@ ORDER BY (ca.normalized_name = $1) DESC, ca.name ASC
 	for rows.Next() {
 		asset, err := scanCatalogAsset(rows)
 		if err != nil {
-			return nil, err
+			return nil, PageInfo{}, err
 		}
 		assets = append(assets, asset)
 	}
-	return assets, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, PageInfo{}, err
+	}
+	items, page := pageFromFetched(assets, options, offset)
+	return items, page, nil
 }
 
 func (r *PostgresRepository) CreateCatalogAsset(ctx context.Context, asset domain.CatalogAsset) (domain.CatalogAsset, error) {

@@ -12,6 +12,7 @@ export interface ReactFlowPreviewProps {
     connectorIds: string[]
     activeComponentId?: string | null
     activeConnectorId?: string | null
+    activeStepKind?: string | null
   } | null
   onSelectComponent?: (componentId: string) => void
   onSelectConnector?: (connectorId: string) => void

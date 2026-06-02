@@ -14,6 +14,7 @@ export type AdminSection =
 
 export type AppRoute =
   | { screen: 'home' }
+  | { screen: 'reset-password' }
   | { screen: 'admin'; section?: AdminSection }
   | { screen: 'workspace'; workspaceId: string }
   | { screen: 'design'; workspaceId: string; designId: string }
@@ -117,10 +118,14 @@ export function parseRoute(pathname: string): AppRoute {
   if (segments[0] === 'admin') {
     return { screen: 'admin', section: parseAdminSection(segments[1]) }
   }
+  if (segments[0] === 'reset-password') {
+    return { screen: 'reset-password' }
+  }
   return { screen: 'home' }
 }
 
 export function routePath(route: AppRoute) {
+  if (route.screen === 'reset-password') return '/reset-password'
   if (route.screen === 'admin') return route.section && route.section !== 'overview' ? `/admin/${route.section}` : '/admin'
   if (route.screen === 'workspace') return `/workspaces/${encodeURIComponent(route.workspaceId)}`
   if (route.screen === 'design') {

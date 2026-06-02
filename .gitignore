@@ -18,6 +18,7 @@ backend/server
 
 # Local AI planning/context notes
 ai-docs/
+about-stratum/
 
 # Logs and editor state
 *.log

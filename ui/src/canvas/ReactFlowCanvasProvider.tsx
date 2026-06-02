@@ -60,6 +60,7 @@ import {
   isValidCanvasConnection,
   sameStringSet,
 } from './interactions'
+import { connectorVisualProfile } from './connectorVisuals'
 import type { ReactFlowPreviewProps } from './types'
 
 type ArchitectureNodeData = {
@@ -311,13 +312,23 @@ export function ReactFlowCanvasProvider({
         const inTraversal = traversalConnectorIds.has(connector.id)
         const activeTraversal = connector.id === traversalFocus?.activeConnectorId
         const dimmedByTraversal = hasTraversalFocus && !inTraversal
+        const selected = connector.id === selectedConnectorId || selectedConnectorIdSet.has(connector.id)
+        const visual = connectorVisualProfile(connector.type)
+        const activeJourneyStroke =
+          traversalFocus?.activeStepKind === 'callback'
+            ? '#d97706'
+            : traversalFocus?.activeStepKind === 'async'
+              ? '#0891b2'
+              : '#2563eb'
+        const stroke = activeTraversal || selected ? activeJourneyStroke : inTraversal ? '#0f766e' : visual.stroke
+        const strokeWidth = activeTraversal || selected ? 3.5 : inTraversal ? 3 : 2.5
         return {
           id: connector.id,
           source: connector.fromComponentId,
           target: connector.toComponentId,
-          animated: connector.animated || inTraversal,
+          animated: connector.animated || visual.shouldAnimate || inTraversal,
           type: 'smoothstep',
-          selected: connector.id === selectedConnectorId || selectedConnectorIdSet.has(connector.id),
+          selected,
           reconnectable: true,
           zIndex: inTraversal ? 8 : 4,
           interactionWidth: 28,
@@ -325,13 +336,15 @@ export function ReactFlowCanvasProvider({
             <div
               className={[
                 'rf-edge-label',
-                connector.id === selectedConnectorId || selectedConnectorIdSet.has(connector.id) ? 'selected' : '',
+                `tone-${visual.tone}`,
+                selected ? 'selected' : '',
                 inTraversal ? 'in-traversal' : '',
                 activeTraversal ? 'active-traversal' : '',
+                activeTraversal && traversalFocus?.activeStepKind ? `journey-${traversalFocus.activeStepKind}` : '',
                 dimmedByTraversal ? 'dimmed-by-traversal' : '',
               ].filter(Boolean).join(' ')}
             >
-              <strong>{connector.type.replaceAll('_', ' ')}</strong>
+              <strong>{visual.label}</strong>
               {connector.protocol ? <span>{connector.protocol}</span> : null}
             </div>
           ),
@@ -343,11 +356,12 @@ export function ReactFlowCanvasProvider({
           },
           markerEnd: {
             type: MarkerType.ArrowClosed,
-            color: activeTraversal || connector.id === selectedConnectorId || selectedConnectorIdSet.has(connector.id) ? '#2563eb' : inTraversal ? '#0f766e' : '#0f172a',
+            color: activeTraversal || selected ? activeJourneyStroke : inTraversal ? '#0f766e' : visual.marker,
           },
           style: {
-            strokeWidth: activeTraversal || connector.id === selectedConnectorId || selectedConnectorIdSet.has(connector.id) ? 3.5 : inTraversal ? 3 : 2.5,
-            stroke: activeTraversal || connector.id === selectedConnectorId || selectedConnectorIdSet.has(connector.id) ? '#2563eb' : inTraversal ? '#0f766e' : '#0f172a',
+            strokeWidth,
+            stroke,
+            strokeDasharray: visual.dash,
             opacity: dimmedByTraversal ? 0.22 : 1,
           },
         }

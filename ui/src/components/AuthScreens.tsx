@@ -79,3 +79,60 @@ export function LoginScreen({
     </main>
   )
 }
+
+export function ResetPasswordScreen({
+  token,
+  error,
+  isSaving,
+  isComplete,
+  onReset,
+  onSignIn,
+}: {
+  token: string
+  error: string | null
+  isSaving: boolean
+  isComplete: boolean
+  onReset: (input: { token: string; password: string }) => void
+  onSignIn: () => void
+}) {
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const mismatch = password.length > 0 && confirmPassword.length > 0 && password !== confirmPassword
+  const canSubmit = token.trim() && password.length >= 8 && password === confirmPassword
+
+  return (
+    <main className="onboarding-shell">
+      <section className="onboarding-card">
+        <div className="home-logo">S</div>
+        <p className="eyebrow">Account recovery</p>
+        <h1>{isComplete ? 'Password updated' : 'Reset your password'}</h1>
+        <p>
+          {isComplete
+            ? 'Your local Stratum password has been updated. You can now sign in with the new password.'
+            : 'Enter a new local password for your Stratum account. Reset links are one-time use and expire automatically.'}
+        </p>
+        {error ? <div className="home-error inline-error"><span>{error}</span></div> : null}
+        {!token.trim() && !isComplete ? <div className="home-error inline-error"><span>This reset link is missing a token.</span></div> : null}
+        {isComplete ? (
+          <button className="primary-action full-width" type="button" onClick={onSignIn}>
+            Sign in
+          </button>
+        ) : (
+          <>
+            <Field label="New password" type="password" value={password} onChange={setPassword} />
+            <Field label="Confirm password" type="password" value={confirmPassword} onChange={setConfirmPassword} />
+            {mismatch ? <small className="field-hint danger">Passwords do not match.</small> : null}
+            <button
+              className="primary-action full-width"
+              type="button"
+              disabled={isSaving || !canSubmit}
+              onClick={() => onReset({ token, password })}
+            >
+              <ShieldCheck size={17} /> {isSaving ? 'Updating...' : 'Reset password'}
+            </button>
+          </>
+        )}
+      </section>
+    </main>
+  )
+}

@@ -11,8 +11,9 @@ import {
 import { isPotentialCatalogMatch, normalizedCatalogLabel } from '../app/designUtils'
 import type { BackendCatalogAsset } from '../backendApi'
 import type { BackendDesign } from '../backendSync'
+import { connectorTypeDescription, connectorTypeLabel, connectorTypeOptions } from '../canvas/connectorVisuals'
 import { toExportableDesign } from '../designModel'
-import type { ConnectorType, DesignComponent, DesignConnector, DesignDocument, RedisMetadata } from '../types'
+import type { DesignComponent, DesignConnector, DesignDocument, RedisMetadata } from '../types'
 import { Field, NumberField, SelectField, TextareaField } from './FormFields'
 
 export function ComponentInspector({
@@ -442,20 +443,22 @@ export function ConnectorInspector({
         </button>
       </div>
 
-      <SelectField
-        label="Type"
-        value={connector.type}
-        values={[
-          'synchronous',
-          'asynchronous_event',
-          'batch_transfer',
-          'cache_read',
-          'cache_write',
-          'model_call',
-          'observability_signal',
-        ]}
-        onChange={(type) => onChange({ ...connector, type: type as ConnectorType })}
-      />
+      <div className="connector-type-picker">
+        <div className="section-title">Flow type</div>
+        <div className="connector-type-grid">
+          {connectorTypeOptions.map((type) => (
+            <button
+              className={connector.type === type ? 'active' : ''}
+              type="button"
+              key={type}
+              onClick={() => onChange({ ...connector, type })}
+            >
+              <strong>{connectorTypeLabel(type)}</strong>
+              <span>{connectorTypeDescription(type)}</span>
+            </button>
+          ))}
+        </div>
+      </div>
       <Field label="Protocol" value={connector.protocol} onChange={(protocol) => onChange({ ...connector, protocol })} />
       <NumberField label="Timeout ms" value={connector.timeoutMs} onChange={(timeoutMs) => onChange({ ...connector, timeoutMs })} />
       <Field

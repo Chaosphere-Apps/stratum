@@ -1,5 +1,6 @@
 import { getCatalogItem } from '../catalog'
 import type { ComponentType, DesignComponent, DesignDocument, DesignJourney } from '../types'
+import { inferJourneyStepKind } from './journeyModel'
 export { nextVersionStatusOptions, versionStatusLabel, versionTransitionLabel } from './versionLifecycle'
 
 export function isJourneyComponent(component: DesignComponent) {
@@ -28,6 +29,7 @@ export function buildPrimaryJourney(design: DesignDocument): DesignJourney | nul
     steps.push({
       id: `step_${crypto.randomUUID()}`,
       componentId: component.id,
+      kind: 'component',
       title: component.name || getCatalogItem(component.type).label,
       description: `${prefix} at ${component.name || getCatalogItem(component.type).label}.`,
     })
@@ -48,6 +50,9 @@ export function buildPrimaryJourney(design: DesignDocument): DesignJourney | nul
         id: `step_${crypto.randomUUID()}`,
         componentId: target?.id,
         connectorId: connector.id,
+        kind: inferJourneyStepKind(connector, visitedComponents),
+        fromComponentId: connector.fromComponentId,
+        toComponentId: connector.toComponentId,
         title: `${sourceName} to ${targetName}`,
         description: `${sourceName} sends ${connector.type.replaceAll('_', ' ')} traffic to ${targetName}${
           connector.protocol ? ` over ${connector.protocol}` : ''
@@ -71,6 +76,9 @@ export function buildPrimaryJourney(design: DesignDocument): DesignJourney | nul
       id: `step_${crypto.randomUUID()}`,
       componentId: target?.id,
       connectorId: firstConnector.id,
+      kind: inferJourneyStepKind(firstConnector),
+      fromComponentId: firstConnector.fromComponentId,
+      toComponentId: firstConnector.toComponentId,
       title: `${source?.name ?? 'Source'} to ${target?.name ?? 'Target'}`,
       description: `${source?.name ?? 'Source'} sends ${firstConnector.type.replaceAll('_', ' ')} traffic to ${
         target?.name ?? 'target'

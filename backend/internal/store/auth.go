@@ -68,6 +68,10 @@ func newSessionToken() (string, string, error) {
 	return token, sessionTokenHash(token), nil
 }
 
+func newPasswordResetToken() (string, string, error) {
+	return newSessionToken()
+}
+
 func sessionTokenHash(token string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
 	return base64.RawStdEncoding.EncodeToString(sum[:])

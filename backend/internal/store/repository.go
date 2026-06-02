@@ -12,6 +12,7 @@ import (
 type WorkspaceRepository interface {
 	GetOrCreateGuestWorkspace(ctx context.Context) (domain.Workspace, error)
 	ListWorkspaces(ctx context.Context) ([]domain.Workspace, error)
+	ListWorkspacesPage(ctx context.Context, options PageOptions) ([]domain.Workspace, PageInfo, error)
 	GetWorkspace(ctx context.Context, workspaceID string) (domain.Workspace, error)
 	CreateWorkspace(ctx context.Context, name string) (domain.Workspace, error)
 	DeleteWorkspace(ctx context.Context, workspaceID string) error
@@ -19,12 +20,14 @@ type WorkspaceRepository interface {
 
 type DesignRepository interface {
 	ListDesigns(ctx context.Context, workspaceID string) ([]domain.Design, error)
+	ListDesignsPage(ctx context.Context, workspaceID string, options PageOptions) ([]domain.Design, PageInfo, error)
 	GetDesign(ctx context.Context, workspaceID string, designID string) (domain.Design, error)
 	CreateDesign(ctx context.Context, workspaceID string, name string, document []byte, createdBy string) (domain.Design, error)
 	UpdateDesignMetadata(ctx context.Context, workspaceID string, designID string, name string, access string) (domain.Design, error)
 	UpsertDesign(ctx context.Context, design domain.Design) (domain.Design, error)
 	DeleteDesign(ctx context.Context, workspaceID string, designID string) error
 	ListDesignVersions(ctx context.Context, workspaceID string, designID string) ([]domain.DesignVersion, error)
+	ListDesignVersionsPage(ctx context.Context, workspaceID string, designID string, options PageOptions) ([]domain.DesignVersion, PageInfo, error)
 	CreateDesignVersion(ctx context.Context, workspaceID string, designID string, createdBy string, remarks string) (domain.DesignVersion, error)
 	UpdateDesignVersionStatus(ctx context.Context, workspaceID string, designID string, versionID string, status string) (domain.DesignVersion, error)
 	DeleteDesignVersion(ctx context.Context, workspaceID string, designID string, versionID string) error
@@ -40,6 +43,7 @@ type DesignDocRepository interface {
 
 type CollaborationRepository interface {
 	ListUsers(ctx context.Context) ([]domain.User, error)
+	ListUsersPage(ctx context.Context, options PageOptions) ([]domain.User, PageInfo, error)
 	GetUser(ctx context.Context, userID string) (domain.User, error)
 	AuthenticateUser(ctx context.Context, email string, password string) (domain.User, error)
 	CreateSession(ctx context.Context, userID string, expiresAt time.Time) (string, error)
@@ -50,6 +54,8 @@ type CollaborationRepository interface {
 	CreateFirstAdmin(ctx context.Context, displayName string, email string, password string) (domain.User, error)
 	CreateUser(ctx context.Context, displayName string, email string, role string, password string) (domain.User, error)
 	UpdateUser(ctx context.Context, userID string, displayName string, email string, role string, status string, password string) (domain.User, error)
+	CreatePasswordResetToken(ctx context.Context, userID string, expiresAt time.Time) (string, domain.PasswordResetToken, error)
+	ResetPasswordWithToken(ctx context.Context, token string, password string) (domain.User, error)
 	DeleteUser(ctx context.Context, userID string) error
 	GetSignInConfig(ctx context.Context) (domain.SignInConfig, error)
 	UpdateSignInConfig(ctx context.Context, config domain.SignInConfig, clientSecret string) (domain.SignInConfig, error)
@@ -59,8 +65,10 @@ type CollaborationRepository interface {
 	GetMCPConfig(ctx context.Context) (domain.MCPConfig, error)
 	UpdateMCPConfig(ctx context.Context, config domain.MCPConfig) (domain.MCPConfig, error)
 	ListDesignComments(ctx context.Context, workspaceID string, designID string) ([]domain.DesignComment, error)
+	ListDesignCommentsPage(ctx context.Context, workspaceID string, designID string, options PageOptions) ([]domain.DesignComment, PageInfo, error)
 	CreateDesignComment(ctx context.Context, workspaceID string, designID string, authorID string, body string, componentID string, connectorID string) (domain.DesignComment, error)
 	ListDesignReviewRequests(ctx context.Context, workspaceID string, designID string) ([]domain.DesignReviewRequest, error)
+	ListDesignReviewRequestsPage(ctx context.Context, workspaceID string, designID string, options PageOptions) ([]domain.DesignReviewRequest, PageInfo, error)
 	CreateDesignReviewRequests(ctx context.Context, workspaceID string, designID string, versionID string, requestedBy string, reviewerIDs []string, message string) ([]domain.DesignReviewRequest, error)
 	UpdateDesignReviewRequest(ctx context.Context, workspaceID string, designID string, reviewID string, status string, summary string) (domain.DesignReviewRequest, error)
 	ListNotifications(ctx context.Context, userID string) ([]domain.Notification, error)
@@ -91,6 +99,7 @@ type AccessRepository interface {
 
 type CatalogRepository interface {
 	ListCatalogAssets(ctx context.Context, query string) ([]domain.CatalogAsset, error)
+	ListCatalogAssetsPage(ctx context.Context, options PageOptions) ([]domain.CatalogAsset, PageInfo, error)
 	CreateCatalogAsset(ctx context.Context, asset domain.CatalogAsset) (domain.CatalogAsset, error)
 	UpdateCatalogAsset(ctx context.Context, assetID string, asset domain.CatalogAsset) (domain.CatalogAsset, error)
 	DeleteCatalogAsset(ctx context.Context, assetID string) error

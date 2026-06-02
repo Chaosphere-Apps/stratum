@@ -11,6 +11,18 @@ export interface BackendProfile {
 }
 
 interface ProfileResponse extends BackendProfile {}
+export interface BackendPageInfo {
+  nextCursor?: string
+  hasMore: boolean
+  limit: number
+}
+
+export interface BackendPageOptions {
+  query?: string
+  cursor?: string
+  limit?: number
+}
+
 export interface BackendStorageStatus {
   mode: 'stateless' | 'database'
   stateless: boolean
@@ -173,6 +185,7 @@ export interface BackendDesignVersion {
 }
 interface CatalogAssetsResponse {
   assets: BackendCatalogAsset[]
+  page?: BackendPageInfo
 }
 interface CatalogAssetResponse {
   asset: BackendCatalogAsset
@@ -215,6 +228,7 @@ interface UserAccessSummaryResponse {
 }
 interface DesignVersionsResponse {
   versions: BackendDesignVersion[]
+  page?: BackendPageInfo
 }
 interface DesignVersionResponse {
   version: BackendDesignVersion
@@ -241,8 +255,14 @@ interface UserResponse {
 interface AuthResponse {
   user: BackendUser
 }
+
+interface PasswordResetLinkResponse {
+  resetLink: string
+  expiresAt: string
+}
 interface UsersResponse {
   users: BackendUser[]
+  page?: BackendPageInfo
 }
 interface SignInConfigResponse {
   signIn: BackendSignInConfig
@@ -265,6 +285,7 @@ export interface BackendDesignComment {
 }
 interface DesignCommentsResponse {
   comments: BackendDesignComment[]
+  page?: BackendPageInfo
 }
 interface DesignCommentResponse {
   comment: BackendDesignComment
@@ -286,6 +307,7 @@ export interface BackendDesignReviewRequest {
 }
 interface DesignReviewsResponse {
   reviews: BackendDesignReviewRequest[]
+  page?: BackendPageInfo
 }
 interface DesignReviewResponse {
   review: BackendDesignReviewRequest
@@ -309,12 +331,14 @@ interface NotificationsResponse {
 }
 interface WorkspacesResponse {
   workspaces: BackendWorkspace[]
+  page?: BackendPageInfo
 }
 interface WorkspaceResponse {
   workspace: BackendWorkspace
 }
 interface DesignsResponse {
   designs: BackendDesign[]
+  page?: BackendPageInfo
 }
 interface DesignResponse {
   design: BackendDesign
@@ -411,6 +435,16 @@ function apiBaseUrl() {
   return `http://${host}:8081`
 }
 
+function pageQuery(options?: BackendPageOptions) {
+  const params = new URLSearchParams()
+  const query = options?.query?.trim()
+  if (query) params.set('query', query)
+  if (options?.cursor) params.set('cursor', options.cursor)
+  if (options?.limit && options.limit > 0) params.set('limit', String(options.limit))
+  const suffix = params.toString()
+  return suffix ? `?${suffix}` : ''
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response
   try {
@@ -475,6 +509,13 @@ export function login(input: { email: string; password: string }) {
   })
 }
 
+export function resetPassword(input: { token: string; password: string }) {
+  return request<AuthResponse>('/api/auth/password-reset', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
 export function logout() {
   return request<void>('/api/auth/logout', {
     method: 'POST',
@@ -482,8 +523,8 @@ export function logout() {
   })
 }
 
-export function fetchUsers() {
-  return request<UsersResponse>('/api/users')
+export function fetchUsers(options?: BackendPageOptions) {
+  return request<UsersResponse>(`/api/users${pageQuery(options)}`)
 }
 
 export function createAdminUser(input: { displayName: string; email: string; role: string; password?: string }) {
@@ -497,6 +538,13 @@ export function updateAdminUser(userId: string, input: { displayName?: string; e
   return request<UserResponse>(`/api/admin/users/${encodeURIComponent(userId)}`, {
     method: 'PATCH',
     body: JSON.stringify(input),
+  })
+}
+
+export function createPasswordResetLink(userId: string) {
+  return request<PasswordResetLinkResponse>(`/api/admin/users/${encodeURIComponent(userId)}/password-reset-link`, {
+    method: 'POST',
+    body: JSON.stringify({}),
   })
 }
 
@@ -564,9 +612,8 @@ export function migrateStorageUsers() {
   })
 }
 
-export function fetchCatalogAssets(query = '') {
-  const suffix = query.trim() ? `?query=${encodeURIComponent(query.trim())}` : ''
-  return request<CatalogAssetsResponse>(`/api/catalog/assets${suffix}`)
+export function fetchCatalogAssets(query = '', options?: Omit<BackendPageOptions, 'query'>) {
+  return request<CatalogAssetsResponse>(`/api/catalog/assets${pageQuery({ ...options, query })}`)
 }
 
 export function createCatalogAsset(input: {
@@ -608,8 +655,8 @@ export function markNotificationRead(notificationId: string) {
   })
 }
 
-export function fetchWorkspaces() {
-  return request<WorkspacesResponse>('/api/workspaces')
+export function fetchWorkspaces(options?: BackendPageOptions) {
+  return request<WorkspacesResponse>(`/api/workspaces${pageQuery(options)}`)
 }
 
 export function createWorkspace(name: string) {
@@ -701,8 +748,8 @@ export function revokeWorkspaceGroupAccess(workspaceId: string, groupId: string)
   })
 }
 
-export function fetchWorkspaceDesigns(workspaceId: string) {
-  return request<DesignsResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/designs`)
+export function fetchWorkspaceDesigns(workspaceId: string, options?: BackendPageOptions) {
+  return request<DesignsResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/designs${pageQuery(options)}`)
 }
 
 export function createDesign(workspaceId: string, name: string, document?: unknown) {
@@ -789,9 +836,9 @@ export function saveDesignDocument(
   )
 }
 
-export function fetchDesignVersions(workspaceId: string, designId: string) {
+export function fetchDesignVersions(workspaceId: string, designId: string, options?: BackendPageOptions) {
   return request<DesignVersionsResponse>(
-    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/versions`,
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/versions${pageQuery(options)}`,
   )
 }
 
@@ -889,9 +936,9 @@ export function deleteDesignDoc(workspaceId: string, designId: string, docId: st
   )
 }
 
-export function fetchDesignComments(workspaceId: string, designId: string) {
+export function fetchDesignComments(workspaceId: string, designId: string, options?: BackendPageOptions) {
   return request<DesignCommentsResponse>(
-    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/comments`,
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/comments${pageQuery(options)}`,
   )
 }
 
@@ -909,9 +956,9 @@ export function createDesignComment(
   )
 }
 
-export function fetchDesignReviews(workspaceId: string, designId: string) {
+export function fetchDesignReviews(workspaceId: string, designId: string, options?: BackendPageOptions) {
   return request<DesignReviewsResponse>(
-    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/reviews`,
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/reviews${pageQuery(options)}`,
   )
 }
 

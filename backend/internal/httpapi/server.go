@@ -15,6 +15,7 @@ import (
 	urlpath "path"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,22 +70,25 @@ func NewServer(cfg config.Config, hub *realtime.Hub, log *slog.Logger, storageEn
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.securityHeaders(s.recoverPanic(s.cors(requestLogger(s.log, s.mux))))
+	return s.securityHeaders(s.recoverPanic(s.cors(s.csrfGuard(requestLogger(s.log, s.mux)))))
 }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	s.mux.HandleFunc("GET /ws", s.handleWorkspaceSocket)
 	s.mux.HandleFunc("GET /api/storage/status", s.handleStorageStatus)
 	s.mux.HandleFunc("GET /api/setup/status", s.handleSetupStatus)
 	s.mux.HandleFunc("POST /api/setup/first-admin", s.handleCreateFirstAdmin)
 	s.mux.HandleFunc("POST /api/setup/admin-password", s.handleSetInitialAdminPassword)
 	s.mux.HandleFunc("POST /api/auth/login", s.handleLogin)
+	s.mux.HandleFunc("POST /api/auth/password-reset", s.handleResetPassword)
 	s.mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
 	s.mux.HandleFunc("GET /api/profile", s.handleProfile)
 	s.mux.HandleFunc("GET /api/users", s.handleListUsers)
 	s.mux.HandleFunc("POST /api/admin/users", s.handleCreateUser)
 	s.mux.HandleFunc("PATCH /api/admin/users/{userID}", s.handleUpdateUser)
+	s.mux.HandleFunc("POST /api/admin/users/{userID}/password-reset-link", s.handleCreatePasswordResetLink)
 	s.mux.HandleFunc("DELETE /api/admin/users/{userID}", s.handleDeleteUser)
 	s.mux.HandleFunc("GET /api/admin/sign-in", s.handleGetSignInConfig)
 	s.mux.HandleFunc("PATCH /api/admin/sign-in", s.handleUpdateSignInConfig)
@@ -155,6 +159,18 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	status := s.storageStatus(r.Context())
+	httpStatus := http.StatusOK
+	if status.Mode == store.StorageModeDatabase && !status.DatabaseConnected {
+		httpStatus = http.StatusServiceUnavailable
+	}
+	writeJSON(w, httpStatus, map[string]any{
+		"status":  map[bool]string{true: "ready", false: "not_ready"}[httpStatus == http.StatusOK],
+		"storage": status,
+	})
 }
 
 func (s *Server) storageStatus(ctx context.Context) store.StorageStatus {
@@ -393,6 +409,23 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"user": user})
 }
 
+func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token    string `json:"token"`
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	user, err := s.services.Identity.ResetPasswordWithToken(r.Context(), body.Token, body.Password)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": user})
+}
+
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	token := sessionToken(r)
 	if token != "" {
@@ -436,12 +469,12 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "session is required")
 		return
 	}
-	users, err := s.services.Identity.ListUsers(r.Context())
+	users, page, err := s.services.Identity.ListUsersPage(r.Context(), pageOptionsFromRequest(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"users": users})
+	writeJSON(w, http.StatusOK, map[string]any{"users": users, "page": page})
 }
 
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
@@ -487,6 +520,21 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"user": user})
+}
+
+func (s *Server) handleCreatePasswordResetLink(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	rawToken, reset, err := s.services.Identity.CreatePasswordResetToken(r.Context(), r.PathValue("userID"), time.Now().UTC().Add(time.Hour))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"resetLink": s.passwordResetLink(r, rawToken),
+		"expiresAt": reset.ExpiresAt,
+	})
 }
 
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
@@ -663,12 +711,12 @@ func (s *Server) handleListCatalogAssets(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusUnauthorized, "session is required")
 		return
 	}
-	assets, err := s.services.Catalog.ListAssets(r.Context(), r.URL.Query().Get("query"))
+	assets, page, err := s.services.Catalog.ListAssetsPage(r.Context(), pageOptionsFromRequest(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"assets": assets})
+	writeJSON(w, http.StatusOK, map[string]any{"assets": assets, "page": page})
 }
 
 func (s *Server) handleCreateCatalogAsset(w http.ResponseWriter, r *http.Request) {
@@ -1065,7 +1113,7 @@ func (s *Server) handleListWorkspaces(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "session is required")
 		return
 	}
-	workspaces, err := s.services.Workspaces.List(r.Context())
+	workspaces, page, err := s.services.Workspaces.ListPage(r.Context(), pageOptionsFromRequest(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1076,7 +1124,7 @@ func (s *Server) handleListWorkspaces(w http.ResponseWriter, r *http.Request) {
 			filtered = append(filtered, workspace)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"workspaces": filtered})
+	writeJSON(w, http.StatusOK, map[string]any{"workspaces": filtered, "page": page})
 }
 
 func (s *Server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
@@ -1502,7 +1550,7 @@ func (s *Server) handleListDesigns(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	designs, err := s.services.Designs.List(r.Context(), workspaceID)
+	designs, page, err := s.services.Designs.ListPage(r.Context(), workspaceID, pageOptionsFromRequest(r))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -1513,7 +1561,7 @@ func (s *Server) handleListDesigns(w http.ResponseWriter, r *http.Request) {
 			filtered = append(filtered, design)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"designs": filtered})
+	writeJSON(w, http.StatusOK, map[string]any{"designs": filtered, "page": page})
 }
 
 func (s *Server) handleCreateDesign(w http.ResponseWriter, r *http.Request) {
@@ -1774,12 +1822,12 @@ func (s *Server) handleListDesignVersions(w http.ResponseWriter, r *http.Request
 	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignRead); !ok {
 		return
 	}
-	versions, err := s.services.Versions.List(r.Context(), workspaceID, designID)
+	versions, page, err := s.services.Versions.ListPage(r.Context(), workspaceID, designID, pageOptionsFromRequest(r))
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"versions": versions})
+	writeJSON(w, http.StatusOK, map[string]any{"versions": versions, "page": page})
 }
 
 func (s *Server) handleCreateDesignVersion(w http.ResponseWriter, r *http.Request) {
@@ -1982,12 +2030,12 @@ func (s *Server) handleListDesignComments(w http.ResponseWriter, r *http.Request
 	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignRead); !ok {
 		return
 	}
-	comments, err := s.services.Reviews.ListComments(r.Context(), workspaceID, designID)
+	comments, page, err := s.services.Reviews.ListCommentsPage(r.Context(), workspaceID, designID, pageOptionsFromRequest(r))
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"comments": comments})
+	writeJSON(w, http.StatusOK, map[string]any{"comments": comments, "page": page})
 }
 
 func (s *Server) handleCreateDesignComment(w http.ResponseWriter, r *http.Request) {
@@ -2020,12 +2068,12 @@ func (s *Server) handleListDesignReviews(w http.ResponseWriter, r *http.Request)
 	if _, _, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignRead); !ok {
 		return
 	}
-	reviews, err := s.services.Reviews.ListReviews(r.Context(), workspaceID, designID)
+	reviews, page, err := s.services.Reviews.ListReviewsPage(r.Context(), workspaceID, designID, pageOptionsFromRequest(r))
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"reviews": reviews})
+	writeJSON(w, http.StatusOK, map[string]any{"reviews": reviews, "page": page})
 }
 
 func (s *Server) handleCreateDesignReview(w http.ResponseWriter, r *http.Request) {
@@ -2091,6 +2139,22 @@ func (s *Server) cors(next http.Handler) http.Handler {
 	})
 }
 
+func (s *Server) csrfGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next.ServeHTTP(w, r)
+			return
+		}
+		origin := r.Header.Get("Origin")
+		if origin != "" && !isAllowedOrigin(origin, s.cfg.AllowedOrigins) {
+			writeError(w, http.StatusForbidden, "origin is not allowed")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -2113,10 +2177,50 @@ func (s *Server) recoverPanic(next http.Handler) http.Handler {
 	})
 }
 
+type responseLogRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (r *responseLogRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
+func (r *responseLogRecorder) WriteHeader(status int) {
+	if r.status != 0 {
+		return
+	}
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *responseLogRecorder) Write(body []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	count, err := r.ResponseWriter.Write(body)
+	r.bytes += count
+	return count, err
+}
+
 func requestLogger(log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Info("request", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
-		next.ServeHTTP(w, r)
+		startedAt := time.Now()
+		recorder := &responseLogRecorder{ResponseWriter: w}
+		next.ServeHTTP(recorder, r)
+		status := recorder.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		log.Info("http_request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", status,
+			"duration_ms", time.Since(startedAt).Milliseconds(),
+			"bytes", recorder.bytes,
+			"remote", remoteAddress(r.RemoteAddr),
+		)
 	})
 }
 
@@ -2142,8 +2246,29 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, target a
 	return nil
 }
 
+func pageOptionsFromRequest(r *http.Request) store.PageOptions {
+	query := r.URL.Query()
+	limit, _ := strconv.Atoi(query.Get("limit"))
+	return store.NormalizePageOptions(store.PageOptions{
+		Query:  query.Get("query"),
+		Cursor: query.Get("cursor"),
+		Limit:  limit,
+	})
+}
+
 func writeError(w http.ResponseWriter, status int, message string) {
+	if status >= http.StatusInternalServerError {
+		message = "internal server error"
+	}
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func remoteAddress(remote string) string {
+	host, _, err := net.SplitHostPort(remote)
+	if err != nil {
+		return remote
+	}
+	return host
 }
 
 func statusForDeleteError(err error) int {
@@ -2238,6 +2363,40 @@ func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 		Secure:   requestIsSecure(r),
 		SameSite: http.SameSiteLaxMode,
 	})
+}
+
+func (s *Server) passwordResetLink(r *http.Request, token string) string {
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		if parsed, err := url.Parse(origin); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+			link := *parsed
+			link.Path = "/reset-password"
+			link.RawQuery = ""
+			query := link.Query()
+			query.Set("token", token)
+			link.RawQuery = query.Encode()
+			return link.String()
+		}
+	}
+	scheme := "http"
+	if requestIsSecure(r) {
+		scheme = "https"
+	}
+	host := r.Host
+	if forwardedHost := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); forwardedHost != "" {
+		host = forwardedHost
+	}
+	if forwardedProto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); forwardedProto != "" {
+		scheme = strings.Split(forwardedProto, ",")[0]
+	}
+	link := url.URL{
+		Scheme: scheme,
+		Host:   host,
+		Path:   "/reset-password",
+	}
+	query := link.Query()
+	query.Set("token", token)
+	link.RawQuery = query.Encode()
+	return link.String()
 }
 
 func requestIsSecure(r *http.Request) bool {

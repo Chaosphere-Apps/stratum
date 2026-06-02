@@ -38,6 +38,14 @@ type SignInConfig struct {
 	UpdatedAt             time.Time `json:"updatedAt"`
 }
 
+type PasswordResetToken struct {
+	Token     string     `json:"-"`
+	UserID    string     `json:"userId"`
+	ExpiresAt time.Time  `json:"expiresAt"`
+	CreatedAt time.Time  `json:"createdAt"`
+	UsedAt    *time.Time `json:"usedAt,omitempty"`
+}
+
 type AIProviderConfig struct {
 	Enabled    bool      `json:"enabled"`
 	Provider   string    `json:"provider"`

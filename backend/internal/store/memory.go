@@ -22,6 +22,7 @@ type MemoryRepository struct {
 	docs          map[string]domain.DesignDoc
 	users         map[string]domain.User
 	sessions      map[string]memorySession
+	passwordReset map[string]domain.PasswordResetToken
 	accessGroups  map[string]domain.AccessGroup
 	groupMembers  map[string]domain.AccessGroupMember
 	workspaceACL  map[string]domain.WorkspaceAccess
@@ -53,6 +54,7 @@ func NewMemoryRepository() *MemoryRepository {
 		docs:          make(map[string]domain.DesignDoc),
 		users:         make(map[string]domain.User),
 		sessions:      make(map[string]memorySession),
+		passwordReset: make(map[string]domain.PasswordResetToken),
 		accessGroups:  make(map[string]domain.AccessGroup),
 		groupMembers:  make(map[string]domain.AccessGroupMember),
 		workspaceACL:  make(map[string]domain.WorkspaceAccess),
@@ -92,24 +94,36 @@ func (r *MemoryRepository) GetOrCreateGuestWorkspace(ctx context.Context) (domai
 }
 
 func (r *MemoryRepository) ListWorkspaces(ctx context.Context) ([]domain.Workspace, error) {
+	return listAllPages(ctx, func(ctx context.Context, options PageOptions) ([]domain.Workspace, PageInfo, error) {
+		return r.ListWorkspacesPage(ctx, options)
+	})
+}
+
+func (r *MemoryRepository) ListWorkspacesPage(ctx context.Context, options PageOptions) ([]domain.Workspace, PageInfo, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
 	if _, err := r.GetOrCreateGuestWorkspace(ctx); err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
+	options = NormalizePageOptions(options)
+	query := strings.ToLower(options.Query)
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	workspaces := make([]domain.Workspace, 0, len(r.workspaces))
 	for _, workspace := range r.workspaces {
+		if query != "" && !strings.Contains(strings.ToLower(workspace.Name), query) {
+			continue
+		}
 		workspaces = append(workspaces, workspace)
 	}
 	sort.Slice(workspaces, func(i, j int) bool {
 		return workspaces[i].UpdatedAt.After(workspaces[j].UpdatedAt)
 	})
-	return workspaces, nil
+	page, info := PageFromSlice(workspaces, options)
+	return page, info, nil
 }
 
 func (r *MemoryRepository) GetWorkspace(ctx context.Context, workspaceID string) (domain.Workspace, error) {
@@ -180,12 +194,20 @@ func (r *MemoryRepository) DeleteWorkspace(ctx context.Context, workspaceID stri
 }
 
 func (r *MemoryRepository) ListDesigns(ctx context.Context, workspaceID string) ([]domain.Design, error) {
+	return listAllPages(ctx, func(ctx context.Context, options PageOptions) ([]domain.Design, PageInfo, error) {
+		return r.ListDesignsPage(ctx, workspaceID, options)
+	})
+}
+
+func (r *MemoryRepository) ListDesignsPage(ctx context.Context, workspaceID string, options PageOptions) ([]domain.Design, PageInfo, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
 	if workspaceID == "" {
-		return nil, errors.New("workspace id is required")
+		return nil, PageInfo{}, errors.New("workspace id is required")
 	}
+	options = NormalizePageOptions(options)
+	query := strings.ToLower(options.Query)
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -193,6 +215,9 @@ func (r *MemoryRepository) ListDesigns(ctx context.Context, workspaceID string) 
 	designs := make([]domain.Design, 0, len(r.designs))
 	for _, design := range r.designs {
 		if design.WorkspaceID == workspaceID {
+			if query != "" && !strings.Contains(strings.ToLower(design.Name+" "+design.Title), query) {
+				continue
+			}
 			designs = append(designs, design)
 		}
 	}
@@ -201,7 +226,8 @@ func (r *MemoryRepository) ListDesigns(ctx context.Context, workspaceID string) 
 		return designs[i].UpdatedAt.After(designs[j].UpdatedAt)
 	})
 
-	return designs, nil
+	page, info := PageFromSlice(designs, options)
+	return page, info, nil
 }
 
 func (r *MemoryRepository) GetDesign(ctx context.Context, workspaceID string, designID string) (domain.Design, error) {
@@ -422,26 +448,34 @@ func (r *MemoryRepository) DeleteDesign(ctx context.Context, workspaceID string,
 }
 
 func (r *MemoryRepository) ListDesignVersions(ctx context.Context, workspaceID string, designID string) ([]domain.DesignVersion, error) {
+	return listAllPages(ctx, func(ctx context.Context, options PageOptions) ([]domain.DesignVersion, PageInfo, error) {
+		return r.ListDesignVersionsPage(ctx, workspaceID, designID, options)
+	})
+}
+
+func (r *MemoryRepository) ListDesignVersionsPage(ctx context.Context, workspaceID string, designID string, options PageOptions) ([]domain.DesignVersion, PageInfo, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
 	if workspaceID == "" || designID == "" {
-		return nil, errors.New("workspace id and design id are required")
+		return nil, PageInfo{}, errors.New("workspace id and design id are required")
 	}
+	options = NormalizePageOptions(options)
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	design, ok := r.designs[designID]
 	if !ok || design.WorkspaceID != workspaceID {
-		return nil, errors.New("design not found")
+		return nil, PageInfo{}, errors.New("design not found")
 	}
 
 	versions := append([]domain.DesignVersion(nil), r.versions[designID]...)
 	sort.Slice(versions, func(i, j int) bool {
 		return versions[i].VersionNumber > versions[j].VersionNumber
 	})
-	return versions, nil
+	page, info := PageFromSlice(versions, options)
+	return page, info, nil
 }
 
 func (r *MemoryRepository) CreateDesignVersion(ctx context.Context, workspaceID string, designID string, createdBy string, remarks string) (domain.DesignVersion, error) {
@@ -1107,33 +1141,53 @@ func (r *MemoryRepository) RevokeDesignGroupAccess(ctx context.Context, workspac
 }
 
 func (r *MemoryRepository) ListUsers(ctx context.Context) ([]domain.User, error) {
+	return listAllPages(ctx, func(ctx context.Context, options PageOptions) ([]domain.User, PageInfo, error) {
+		return r.ListUsersPage(ctx, options)
+	})
+}
+
+func (r *MemoryRepository) ListUsersPage(ctx context.Context, options PageOptions) ([]domain.User, PageInfo, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
+	options = NormalizePageOptions(options)
+	query := strings.ToLower(options.Query)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	users := make([]domain.User, 0, len(r.users))
 	for _, user := range r.users {
+		if query != "" && !strings.Contains(strings.ToLower(user.DisplayName+" "+user.Email+" "+user.Role), query) {
+			continue
+		}
 		users = append(users, user)
 	}
 	sort.Slice(users, func(i, j int) bool {
 		return users[i].CreatedAt.Before(users[j].CreatedAt)
 	})
-	return users, nil
+	page, info := PageFromSlice(users, options)
+	return page, info, nil
 }
 
 func (r *MemoryRepository) ListCatalogAssets(ctx context.Context, query string) ([]domain.CatalogAsset, error) {
+	return listAllPages(ctx, func(ctx context.Context, options PageOptions) ([]domain.CatalogAsset, PageInfo, error) {
+		options.Query = query
+		return r.ListCatalogAssetsPage(ctx, options)
+	})
+}
+
+func (r *MemoryRepository) ListCatalogAssetsPage(ctx context.Context, options PageOptions) ([]domain.CatalogAsset, PageInfo, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
-	normalizedQuery := normalizedCatalogName(query)
+	options = NormalizePageOptions(options)
+	normalizedQuery := normalizedCatalogName(options.Query)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	assets := make([]domain.CatalogAsset, 0, len(r.catalogAssets))
 	for _, asset := range r.catalogAssets {
-		if normalizedQuery != "" && !strings.Contains(asset.NormalizedName, normalizedQuery) && !strings.Contains(strings.ToLower(asset.Name), strings.ToLower(strings.TrimSpace(query))) {
+		if normalizedQuery != "" && !strings.Contains(asset.NormalizedName, normalizedQuery) && !strings.Contains(strings.ToLower(asset.Name), strings.ToLower(strings.TrimSpace(options.Query))) {
 			continue
 		}
 		asset.UsedInDesignCount = r.catalogAssetUsageCountLocked(asset.ID)
@@ -1149,7 +1203,8 @@ func (r *MemoryRepository) ListCatalogAssets(ctx context.Context, query string) 
 		}
 		return assets[i].Name < assets[j].Name
 	})
-	return assets, nil
+	page, info := PageFromSlice(assets, options)
+	return page, info, nil
 }
 
 func (r *MemoryRepository) CreateCatalogAsset(ctx context.Context, asset domain.CatalogAsset) (domain.CatalogAsset, error) {
@@ -1494,6 +1549,69 @@ func (r *MemoryRepository) UpdateUser(ctx context.Context, userID string, displa
 	return user, nil
 }
 
+func (r *MemoryRepository) CreatePasswordResetToken(ctx context.Context, userID string, expiresAt time.Time) (string, domain.PasswordResetToken, error) {
+	if err := ctx.Err(); err != nil {
+		return "", domain.PasswordResetToken{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	user, err := r.getUserLocked(userID)
+	if err != nil {
+		return "", domain.PasswordResetToken{}, err
+	}
+	if user.Status == "disabled" {
+		return "", domain.PasswordResetToken{}, errors.New("user is disabled")
+	}
+	token, tokenHash, err := newPasswordResetToken()
+	if err != nil {
+		return "", domain.PasswordResetToken{}, err
+	}
+	now := r.clock().UTC()
+	if expiresAt.IsZero() {
+		expiresAt = now.Add(time.Hour)
+	}
+	reset := domain.PasswordResetToken{
+		Token:     tokenHash,
+		UserID:    user.ID,
+		CreatedAt: now,
+		ExpiresAt: expiresAt.UTC(),
+	}
+	r.passwordReset[tokenHash] = reset
+	return token, reset, nil
+}
+
+func (r *MemoryRepository) ResetPasswordWithToken(ctx context.Context, token string, password string) (domain.User, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.User{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	tokenHash := sessionTokenHash(token)
+	reset, ok := r.passwordReset[tokenHash]
+	now := r.clock().UTC()
+	if !ok || reset.UsedAt != nil || !reset.ExpiresAt.After(now) {
+		delete(r.passwordReset, tokenHash)
+		return domain.User{}, errors.New("password reset link is invalid or expired")
+	}
+	user, ok := r.users[reset.UserID]
+	if !ok || user.Status == "disabled" {
+		return domain.User{}, errors.New("password reset link is invalid or expired")
+	}
+	passwordHash, err := hashPassword(password)
+	if err != nil {
+		return domain.User{}, err
+	}
+	user.PasswordHash = passwordHash
+	user.PasswordSet = true
+	user.UpdatedAt = now
+	r.users[user.ID] = user
+	reset.UsedAt = &now
+	r.passwordReset[tokenHash] = reset
+	return user, nil
+}
+
 func (r *MemoryRepository) DeleteUser(ctx context.Context, userID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -1624,18 +1742,25 @@ func (r *MemoryRepository) UpdateMCPConfig(ctx context.Context, config domain.MC
 }
 
 func (r *MemoryRepository) ListDesignComments(ctx context.Context, workspaceID string, designID string) ([]domain.DesignComment, error) {
+	return listAllPages(ctx, func(ctx context.Context, options PageOptions) ([]domain.DesignComment, PageInfo, error) {
+		return r.ListDesignCommentsPage(ctx, workspaceID, designID, options)
+	})
+}
+
+func (r *MemoryRepository) ListDesignCommentsPage(ctx context.Context, workspaceID string, designID string, options PageOptions) ([]domain.DesignComment, PageInfo, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
 	if workspaceID == "" || designID == "" {
-		return nil, errors.New("workspace id and design id are required")
+		return nil, PageInfo{}, errors.New("workspace id and design id are required")
 	}
+	options = NormalizePageOptions(options)
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	if design, ok := r.designs[designID]; !ok || design.WorkspaceID != workspaceID {
-		return nil, errors.New("design not found")
+		return nil, PageInfo{}, errors.New("design not found")
 	}
 	comments := make([]domain.DesignComment, 0, len(r.comments))
 	for _, comment := range r.comments {
@@ -1646,7 +1771,8 @@ func (r *MemoryRepository) ListDesignComments(ctx context.Context, workspaceID s
 	sort.Slice(comments, func(i, j int) bool {
 		return comments[i].CreatedAt.After(comments[j].CreatedAt)
 	})
-	return comments, nil
+	page, info := PageFromSlice(comments, options)
+	return page, info, nil
 }
 
 func (r *MemoryRepository) CreateDesignComment(ctx context.Context, workspaceID string, designID string, authorID string, body string, componentID string, connectorID string) (domain.DesignComment, error) {
@@ -1691,18 +1817,25 @@ func (r *MemoryRepository) CreateDesignComment(ctx context.Context, workspaceID 
 }
 
 func (r *MemoryRepository) ListDesignReviewRequests(ctx context.Context, workspaceID string, designID string) ([]domain.DesignReviewRequest, error) {
+	return listAllPages(ctx, func(ctx context.Context, options PageOptions) ([]domain.DesignReviewRequest, PageInfo, error) {
+		return r.ListDesignReviewRequestsPage(ctx, workspaceID, designID, options)
+	})
+}
+
+func (r *MemoryRepository) ListDesignReviewRequestsPage(ctx context.Context, workspaceID string, designID string, options PageOptions) ([]domain.DesignReviewRequest, PageInfo, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, PageInfo{}, err
 	}
 	if workspaceID == "" || designID == "" {
-		return nil, errors.New("workspace id and design id are required")
+		return nil, PageInfo{}, errors.New("workspace id and design id are required")
 	}
+	options = NormalizePageOptions(options)
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	if design, ok := r.designs[designID]; !ok || design.WorkspaceID != workspaceID {
-		return nil, errors.New("design not found")
+		return nil, PageInfo{}, errors.New("design not found")
 	}
 	reviews := make([]domain.DesignReviewRequest, 0, len(r.reviews))
 	for _, review := range r.reviews {
@@ -1713,7 +1846,8 @@ func (r *MemoryRepository) ListDesignReviewRequests(ctx context.Context, workspa
 	sort.Slice(reviews, func(i, j int) bool {
 		return reviews[i].UpdatedAt.After(reviews[j].UpdatedAt)
 	})
-	return reviews, nil
+	page, info := PageFromSlice(reviews, options)
+	return page, info, nil
 }
 
 func (r *MemoryRepository) CreateDesignReviewRequests(ctx context.Context, workspaceID string, designID string, versionID string, requestedBy string, reviewerIDs []string, message string) ([]domain.DesignReviewRequest, error) {

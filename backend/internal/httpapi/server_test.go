@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -165,7 +166,7 @@ func TestProfileReturnsUserForValidSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateSession returned error: %v", err)
 	}
-	server := NewServer(config.Config{}, realtime.NewHub(repo, config.Logger()), config.Logger())
+	server := NewServer(config.Config{AllowedOrigins: []string{"http://ui.local"}}, realtime.NewHub(repo, config.Logger()), config.Logger())
 
 	request := httptest.NewRequest(http.MethodGet, "/api/profile", nil)
 	request.AddCookie(&http.Cookie{Name: "stratum_session", Value: token})
@@ -216,6 +217,102 @@ func TestLoginSetsHttpOnlyCookieAndDoesNotReturnToken(t *testing.T) {
 	server.Handler().ServeHTTP(badRecorder, badLogin)
 	if badRecorder.Code != http.StatusUnauthorized {
 		t.Fatalf("bad login status = %d, want %d", badRecorder.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestPasswordResetLinkFlow(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	admin, err := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
+	if err != nil {
+		t.Fatalf("CreateFirstAdmin returned error: %v", err)
+	}
+	member, err := repo.CreateUser(t.Context(), "Member", "member@example.com", "member", "")
+	if err != nil {
+		t.Fatalf("CreateUser returned error: %v", err)
+	}
+	token, err := repo.CreateSession(t.Context(), admin.ID, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("CreateSession returned error: %v", err)
+	}
+	server := NewServer(config.Config{AllowedOrigins: []string{"http://ui.local"}}, realtime.NewHub(repo, config.Logger()), config.Logger())
+
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/users/"+member.ID+"/password-reset-link", strings.NewReader(`{}`))
+	request.Header.Set("Origin", "http://ui.local")
+	request.AddCookie(&http.Cookie{Name: "stratum_session", Value: token})
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("reset link status = %d body=%q", recorder.Code, recorder.Body.String())
+	}
+	var linkResponse struct {
+		ResetLink string `json:"resetLink"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &linkResponse); err != nil {
+		t.Fatalf("decode reset link response: %v", err)
+	}
+	if !strings.HasPrefix(linkResponse.ResetLink, "http://ui.local/reset-password?token=") {
+		t.Fatalf("reset link used wrong origin: %q", linkResponse.ResetLink)
+	}
+	parsed, err := url.Parse(linkResponse.ResetLink)
+	if err != nil {
+		t.Fatalf("parse reset link: %v", err)
+	}
+	resetToken := parsed.Query().Get("token")
+	if resetToken == "" {
+		t.Fatal("reset token missing")
+	}
+
+	reset := httptest.NewRequest(http.MethodPost, "/api/auth/password-reset", strings.NewReader(`{"token":"`+resetToken+`","password":"new-password123"}`))
+	resetRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resetRecorder, reset)
+	if resetRecorder.Code != http.StatusOK {
+		t.Fatalf("reset password status = %d body=%q", resetRecorder.Code, resetRecorder.Body.String())
+	}
+	reuse := httptest.NewRequest(http.MethodPost, "/api/auth/password-reset", strings.NewReader(`{"token":"`+resetToken+`","password":"another-password123"}`))
+	reuseRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(reuseRecorder, reuse)
+	if reuseRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("reused reset token status = %d, want %d", reuseRecorder.Code, http.StatusBadRequest)
+	}
+	login := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"email":"member@example.com","password":"new-password123"}`))
+	loginRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(loginRecorder, login)
+	if loginRecorder.Code != http.StatusOK {
+		t.Fatalf("login with reset password status = %d body=%q", loginRecorder.Code, loginRecorder.Body.String())
+	}
+}
+
+func TestPasswordResetDisabledWhenLocalPasswordsDisabled(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	admin, err := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
+	if err != nil {
+		t.Fatalf("CreateFirstAdmin returned error: %v", err)
+	}
+	member, err := repo.CreateUser(t.Context(), "Member", "member@example.com", "member", "")
+	if err != nil {
+		t.Fatalf("CreateUser returned error: %v", err)
+	}
+	signInConfig, err := repo.GetSignInConfig(t.Context())
+	if err != nil {
+		t.Fatalf("GetSignInConfig returned error: %v", err)
+	}
+	signInConfig.LocalPasswordEnabled = false
+	signInConfig.SSOEnabled = true
+	if _, err := repo.UpdateSignInConfig(t.Context(), signInConfig, ""); err != nil {
+		t.Fatalf("UpdateSignInConfig returned error: %v", err)
+	}
+	token, err := repo.CreateSession(t.Context(), admin.ID, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("CreateSession returned error: %v", err)
+	}
+	server := NewServer(config.Config{}, realtime.NewHub(repo, config.Logger()), config.Logger())
+
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/users/"+member.ID+"/password-reset-link", strings.NewReader(`{}`))
+	request.AddCookie(&http.Cookie{Name: "stratum_session", Value: token})
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "local password sign-in is disabled") {
+		t.Fatalf("disabled reset link status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
 }
 
