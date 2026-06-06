@@ -284,7 +284,6 @@ export function ReactFlowCanvasProvider({
             onRequestDuplicate: onDuplicateComponent,
             onRequestSelect: onSelectComponent,
           },
-          selected: component.id === selectedComponentId || selectedComponentIdSet.has(component.id),
           style: {
             width: component.metadata.size?.width ?? (component.type === 'frame.cloud' ? 540 : 230),
             height: component.metadata.size?.height ?? (component.type === 'frame.cloud' ? 340 : 78),
@@ -328,7 +327,6 @@ export function ReactFlowCanvasProvider({
           target: connector.toComponentId,
           animated: connector.animated || visual.shouldAnimate || inTraversal,
           type: 'smoothstep',
-          selected,
           reconnectable: true,
           zIndex: inTraversal ? 8 : 4,
           interactionWidth: 28,
@@ -521,19 +519,13 @@ export function ReactFlowCanvasProvider({
           onDrop={handleDrop}
           onNodeDragStop={handleNodeDragStop}
           onNodeClick={(_, node) => {
-            onSelectConnector?.('')
             onSelectComponent?.(node.id)
-            onSelectionChange?.([node.id], [])
           }}
           onEdgeClick={(_, edge) => {
-            onSelectComponent?.('')
             onSelectConnector?.(edge.id)
-            onSelectionChange?.([], [edge.id])
           }}
           onPaneClick={() => {
             onSelectComponent?.('')
-            onSelectConnector?.('')
-            onSelectionChange?.([], [])
           }}
           connectionLineType={ConnectionLineType.SmoothStep}
           connectionRadius={42}

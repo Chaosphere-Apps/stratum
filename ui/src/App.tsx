@@ -697,6 +697,26 @@ export function App() {
     setSelectedConnectorId(nextConnectorId)
   }
 
+  function selectCanvasComponent(componentId: string) {
+    if (!componentId) {
+      handleCanvasSelectionChange([], [])
+      return
+    }
+    handleCanvasSelectionChange([componentId], [])
+    setContextPanel('inspector')
+    setRightRailOpen(true)
+  }
+
+  function selectCanvasConnector(connectorId: string) {
+    if (!connectorId) {
+      handleCanvasSelectionChange([], [])
+      return
+    }
+    handleCanvasSelectionChange([], [connectorId])
+    setContextPanel('inspector')
+    setRightRailOpen(true)
+  }
+
   function getComponentAbsolutePosition(component: DesignComponent, components = designRef.current.components) {
     const position = component.metadata.position ?? { x: 0, y: 0 }
     const parentFrameId = component.metadata.parentFrameId
@@ -2692,26 +2712,8 @@ export function App() {
               readOnly={isCanvasReadOnly}
               traversalFocus={traversalFocus}
               onSelectionChange={handleCanvasSelectionChange}
-              onSelectComponent={(componentId) => {
-                setSelectedComponentId(componentId || null)
-                setSelectedComponentIds(componentId ? new Set([componentId]) : new Set())
-                if (componentId) setSelectedConnectorId(null)
-                if (componentId) setSelectedConnectorIds(new Set())
-                if (componentId) {
-                  setContextPanel('inspector')
-                  setRightRailOpen(true)
-                }
-              }}
-              onSelectConnector={(connectorId) => {
-                setSelectedConnectorId(connectorId || null)
-                setSelectedConnectorIds(connectorId ? new Set([connectorId]) : new Set())
-                if (connectorId) setSelectedComponentId(null)
-                if (connectorId) setSelectedComponentIds(new Set())
-                if (connectorId) {
-                  setContextPanel('inspector')
-                  setRightRailOpen(true)
-                }
-              }}
+              onSelectComponent={selectCanvasComponent}
+              onSelectConnector={selectCanvasConnector}
               onMoveComponent={moveReactFlowComponent}
               onResizeComponent={resizeReactFlowComponent}
               onConnectComponents={(fromComponentId, toComponentId) => setPendingConnector({ fromComponentId, toComponentId })}

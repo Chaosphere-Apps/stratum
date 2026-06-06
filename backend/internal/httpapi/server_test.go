@@ -126,6 +126,18 @@ func TestStaticAssetsServeSPAAndFiles(t *testing.T) {
 	if assetRecorder.Code != http.StatusOK || !strings.Contains(assetRecorder.Body.String(), "console.log") {
 		t.Fatalf("expected static asset, got status=%d body=%q", assetRecorder.Code, assetRecorder.Body.String())
 	}
+	csp := assetRecorder.Header().Get("Content-Security-Policy")
+	for _, directive := range []string{
+		"default-src 'self'",
+		"script-src 'self'",
+		"style-src 'self' 'unsafe-inline'",
+		"connect-src 'self' ws: wss:",
+		"frame-ancestors 'none'",
+	} {
+		if !strings.Contains(csp, directive) {
+			t.Fatalf("CSP missing %q: %q", directive, csp)
+		}
+	}
 }
 
 func TestStaticAssetsDoNotMaskMissingAPI(t *testing.T) {

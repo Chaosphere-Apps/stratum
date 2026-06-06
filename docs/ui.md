@@ -29,6 +29,12 @@ Open `http://127.0.0.1:8080/`.
 
 The image uses a multi-stage build: Node builds the Vite app, then an unprivileged nginx runtime serves only the static `dist` assets.
 
+## Backend URL Resolution
+
+The UI calls the backend through same-origin `/api` and `/ws` routes in production. This is required for the all-in-one image and for deployments behind a reverse proxy.
+
+During Vite development on `5173` or preview on `4173`, the UI defaults to the local backend on `8081`. Set `VITE_BACKEND_API_URL` and `VITE_BACKEND_WS_ORIGIN` when running a split deployment that does not expose the backend through the same origin.
+
 ## Current Capabilities
 
 - React Flow structured canvas.

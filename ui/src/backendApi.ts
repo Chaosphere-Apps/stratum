@@ -429,10 +429,8 @@ function apiBaseUrl() {
   if (import.meta.env.VITE_BACKEND_API_URL) return import.meta.env.VITE_BACKEND_API_URL
   const host = window.location.hostname || '127.0.0.1'
   const port = window.location.port
-  if (port === '8081' || !port) return ''
   if (port.startsWith('517') || port === '4173') return `${window.location.protocol}//${host}:8081`
-  if (!window.location.port) return ''
-  return `http://${host}:8081`
+  return ''
 }
 
 function pageQuery(options?: BackendPageOptions) {

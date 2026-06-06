@@ -15,6 +15,27 @@ The database is intentionally external. Use Postgres as a managed service or as 
 docker build -f Dockerfile_allinone -t stratum:allinone .
 ```
 
+## Published Images
+
+GitHub Actions builds three production container images:
+
+- `ghcr.io/<owner>/stratum-ui`: static React UI served by unprivileged nginx.
+- `ghcr.io/<owner>/stratum-backend`: Go API and WebSocket backend.
+- `ghcr.io/<owner>/stratum-allinone`: Go backend serving the built UI and API from one container.
+
+Pull the all-in-one image for the simplest self-hosted trial:
+
+```bash
+docker pull ghcr.io/<owner>/stratum-allinone:latest
+```
+
+Images are built for pull requests, but only pushed to GHCR from:
+
+- any pushed Git tag
+- manual `workflow_dispatch` runs with `publish=true`
+
+Published tags include the Git tag, semantic version tags when the tag is semver-compatible, `sha-<commit>`, and `latest`.
+
 ## Run
 
 ```bash
@@ -25,6 +46,8 @@ docker run --rm \
 ```
 
 Open `http://localhost:8080`.
+
+The all-in-one image serves UI, `/api`, `/ws`, and `/healthz` from the same origin. The browser should never need a separate backend URL for this mode.
 
 ## Runtime Settings
 
