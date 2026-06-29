@@ -62,6 +62,7 @@ import {
   type BackendMCPConfig,
   type BackendSignInConfig,
   type BackendStorageStatus,
+  type BackendTelemetryIntegrationConfig,
   type BackendUser,
   type BackendUserAccessSummary,
   type BackendWorkspaceAccess,
@@ -85,6 +86,17 @@ function AdminSectionIcon({ section, size = 18 }: { section: AdminSection; size?
   return <Settings size={size} />
 }
 
+function listToLines(values: string[] | undefined) {
+  return (values ?? []).join('\n')
+}
+
+function linesToList(value: string) {
+  return value
+    .split(/\n|,/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
 export function AdminConsole({
   users,
   activeUserId,
@@ -93,6 +105,7 @@ export function AdminConsole({
   signInConfig,
   aiProviderConfig,
   mcpConfig,
+  telemetryConfig,
   catalogAssets,
   error,
   onAddUser,
@@ -102,6 +115,7 @@ export function AdminConsole({
   onSaveSignIn,
   onSaveAIProvider,
   onSaveMCP,
+  onSaveTelemetry,
   onAddCatalogAsset,
   onSaveCatalogAsset,
   onDeleteCatalogAsset,
@@ -119,6 +133,7 @@ export function AdminConsole({
   signInConfig: BackendSignInConfig | null
   aiProviderConfig: BackendAIProviderConfig | null
   mcpConfig: BackendMCPConfig | null
+  telemetryConfig: BackendTelemetryIntegrationConfig | null
   catalogAssets: BackendCatalogAsset[]
   error: string | null
   onAddUser: (input: { displayName: string; email: string; role: string }) => Promise<void>
@@ -128,6 +143,7 @@ export function AdminConsole({
   onSaveSignIn: (config: BackendSignInConfig & { clientSecret?: string }) => void
   onSaveAIProvider: (config: Partial<BackendAIProviderConfig> & { apiKey?: string }) => void
   onSaveMCP: (config: BackendMCPConfig) => void
+  onSaveTelemetry: (config: Partial<BackendTelemetryIntegrationConfig> & { secret?: string }) => void
   onAddCatalogAsset: (input: { name: string; type: string; owner?: string; description?: string; criticality?: string; tags?: string[] }) => Promise<BackendCatalogAsset>
   onSaveCatalogAsset: (asset: BackendCatalogAsset) => Promise<void>
   onDeleteCatalogAsset: (assetId: string) => Promise<void>
@@ -151,6 +167,8 @@ export function AdminConsole({
   const [signInDraft, setSignInDraft] = useState<(BackendSignInConfig & { clientSecret?: string }) | null>(signInConfig)
   const [aiDraft, setAIDraft] = useState<(BackendAIProviderConfig & { apiKey?: string }) | null>(aiProviderConfig)
   const [mcpDraft, setMCPDraft] = useState<BackendMCPConfig | null>(mcpConfig)
+  const [telemetryDraft, setTelemetryDraft] = useState<(BackendTelemetryIntegrationConfig & { secret?: string }) | null>(telemetryConfig)
+  const [activeIntegration, setActiveIntegration] = useState<'telemetry' | 'mcp'>('telemetry')
   const [storageDatabaseUrl, setStorageDatabaseUrl] = useState('')
   const [storageAction, setStorageAction] = useState<'idle' | 'refreshing' | 'testing' | 'configuring' | 'migrating'>('idle')
   const [storageMessage, setStorageMessage] = useState<string | null>(null)
@@ -192,6 +210,7 @@ export function AdminConsole({
   useEffect(() => setSignInDraft(signInConfig), [signInConfig])
   useEffect(() => setAIDraft(aiProviderConfig), [aiProviderConfig])
   useEffect(() => setMCPDraft(mcpConfig), [mcpConfig])
+  useEffect(() => setTelemetryDraft(telemetryConfig), [telemetryConfig])
   useEffect(() => {
     if (!accessWorkspaceId && workspaces[0]) setAccessWorkspaceId(workspaces[0].id)
   }, [accessWorkspaceId, workspaces])
@@ -1867,7 +1886,39 @@ export function AdminConsole({
           )}
         </div>
 
-        <div className="admin-panel mcp-admin-panel" hidden={activeSection !== 'integrations'}>
+        <div className="admin-panel integrations-hub-panel" hidden={activeSection !== 'integrations'}>
+          <div className="admin-panel-heading">
+            <span><Server size={18} /></span>
+            <div>
+              <strong>Integration hub</strong>
+              <p>Enable optional platform integrations without making them mandatory for manual design workflows.</p>
+            </div>
+          </div>
+          <div className="integration-card-grid">
+            <button
+              className={activeIntegration === 'telemetry' ? 'integration-card active' : 'integration-card'}
+              type="button"
+              onClick={() => setActiveIntegration('telemetry')}
+            >
+              <span><Activity size={18} /></span>
+              <strong>Observed architecture</strong>
+              <small>Prometheus service graph metrics</small>
+              <em>{telemetryDraft?.enabled ? 'Enabled' : 'Disabled'}</em>
+            </button>
+            <button
+              className={activeIntegration === 'mcp' ? 'integration-card active' : 'integration-card'}
+              type="button"
+              onClick={() => setActiveIntegration('mcp')}
+            >
+              <span><Server size={18} /></span>
+              <strong>MCP readiness</strong>
+              <small>Controlled tool access surface</small>
+              <em>{mcpDraft?.enabled ? 'Enabled' : 'Disabled'}</em>
+            </button>
+          </div>
+        </div>
+
+        <div className="admin-panel mcp-admin-panel" hidden={activeSection !== 'integrations' || activeIntegration !== 'mcp'}>
           <div className="admin-panel-heading">
             <span><Server size={18} /></span>
             <div>
@@ -1955,6 +2006,172 @@ export function AdminConsole({
             <div className="analysis-empty">
               <strong>Loading MCP settings</strong>
               <span>MCP readiness settings will appear once the backend responds.</span>
+            </div>
+          )}
+        </div>
+
+        <div className="admin-panel telemetry-admin-panel" hidden={activeSection !== 'integrations' || activeIntegration !== 'telemetry'}>
+          <div className="admin-panel-heading">
+            <span><Activity size={18} /></span>
+            <div>
+              <strong>Observed architecture</strong>
+              <p>Connect Prometheus service graph metrics for a read-only runtime topology view.</p>
+            </div>
+          </div>
+          {telemetryDraft ? (
+            <div className="signin-form">
+              <div className="admin-ai-status">
+                <span className={telemetryDraft.enabled ? 'admin-status-pill active' : 'admin-status-pill disabled'}>
+                  {telemetryDraft.enabled ? 'Prometheus enabled' : 'Telemetry disabled'}
+                </span>
+                <small>{telemetryDraft.secretSet ? 'Secret stored' : 'No secret stored'}</small>
+              </div>
+
+              <label className="toggle-row enterprise-toggle">
+                <input
+                  type="checkbox"
+                  checked={telemetryDraft.enabled}
+                  onChange={(event) => setTelemetryDraft({ ...telemetryDraft, enabled: event.target.checked })}
+                />
+                <span>
+                  <strong>Enable observed architecture</strong>
+                  <small>When disabled, Stratum remains a manual design workspace with no telemetry dependency.</small>
+                </span>
+              </label>
+
+              <div className="admin-form-section">
+                <div className="admin-section-title">
+                  <span>Prometheus source</span>
+                  <small>Service graph metrics are fetched only when the observed view requests them.</small>
+                </div>
+                <div className="admin-field-grid two">
+                  <Field label="Display name" value={telemetryDraft.displayName} onChange={(displayName) => setTelemetryDraft({ ...telemetryDraft, displayName })} />
+                  <label className="field">
+                    <span>Provider</span>
+                    <select value={telemetryDraft.provider} onChange={(event) => setTelemetryDraft({ ...telemetryDraft, provider: event.target.value })}>
+                      <option value="prometheus">Prometheus</option>
+                    </select>
+                  </label>
+                </div>
+                <Field label="Prometheus URL" value={telemetryDraft.baseUrl} onChange={(baseUrl) => setTelemetryDraft({ ...telemetryDraft, baseUrl })} />
+                <div className="admin-field-grid three">
+                  <label className="field">
+                    <span>Auth mode</span>
+                    <select
+                      value={telemetryDraft.authMode}
+                      onChange={(event) => setTelemetryDraft({ ...telemetryDraft, authMode: event.target.value as BackendTelemetryIntegrationConfig['authMode'] })}
+                    >
+                      <option value="none">None</option>
+                      <option value="bearer">Bearer token</option>
+                      <option value="basic">Basic password</option>
+                      <option value="custom_header">Custom header</option>
+                    </select>
+                  </label>
+                  <Field
+                    label="Custom header"
+                    value={telemetryDraft.customHeaderName}
+                    onChange={(customHeaderName) => setTelemetryDraft({ ...telemetryDraft, customHeaderName })}
+                  />
+                  <Field
+                    label={telemetryDraft.secretSet ? 'Secret (stored)' : 'Secret'}
+                    type="password"
+                    value={telemetryDraft.secret ?? ''}
+                    onChange={(secret) => setTelemetryDraft({ ...telemetryDraft, secret })}
+                  />
+                </div>
+              </div>
+
+              <div className="admin-form-section">
+                <div className="admin-section-title">
+                  <span>OpenTelemetry service graph metrics</span>
+                  <small>Defaults match common collector service graph metric names.</small>
+                </div>
+                <div className="admin-field-grid two">
+                  <Field label="Query window" value={telemetryDraft.queryWindow} onChange={(queryWindow) => setTelemetryDraft({ ...telemetryDraft, queryWindow })} />
+                  <Field label="Request total metric" value={telemetryDraft.requestTotalMetric} onChange={(requestTotalMetric) => setTelemetryDraft({ ...telemetryDraft, requestTotalMetric })} />
+                  <Field label="Request failed metric" value={telemetryDraft.requestFailedMetric} onChange={(requestFailedMetric) => setTelemetryDraft({ ...telemetryDraft, requestFailedMetric })} />
+                  <Field label="Server latency metric" value={telemetryDraft.serverLatencyMetric} onChange={(serverLatencyMetric) => setTelemetryDraft({ ...telemetryDraft, serverLatencyMetric })} />
+                  <Field label="Client latency metric" value={telemetryDraft.clientLatencyMetric} onChange={(clientLatencyMetric) => setTelemetryDraft({ ...telemetryDraft, clientLatencyMetric })} />
+                  <Field
+                    label="Minimum RPS"
+                    type="number"
+                    value={String(telemetryDraft.filters.minimumRequestsPerSec ?? 0)}
+                    onChange={(minimumRequestsPerSec) =>
+                      setTelemetryDraft({
+                        ...telemetryDraft,
+                        filters: { ...telemetryDraft.filters, minimumRequestsPerSec: Number(minimumRequestsPerSec) || 0 },
+                      })
+                    }
+                  />
+                </div>
+              </div>
+
+              <div className="admin-form-section">
+                <div className="admin-section-title">
+                  <span>Noise filters</span>
+                  <small>Configured once; users can fork a telemetry snapshot into a normal editable design later.</small>
+                </div>
+                <div className="admin-field-grid two">
+                  <TextareaField
+                    label="Include namespaces"
+                    value={listToLines(telemetryDraft.filters.namespaces)}
+                    onChange={(value) => setTelemetryDraft({ ...telemetryDraft, filters: { ...telemetryDraft.filters, namespaces: linesToList(value) } })}
+                  />
+                  <TextareaField
+                    label="Include services"
+                    value={listToLines(telemetryDraft.filters.services)}
+                    onChange={(value) => setTelemetryDraft({ ...telemetryDraft, filters: { ...telemetryDraft.filters, services: linesToList(value) } })}
+                  />
+                  <TextareaField
+                    label="Exclude services"
+                    value={listToLines(telemetryDraft.filters.excludeServices)}
+                    onChange={(value) => setTelemetryDraft({ ...telemetryDraft, filters: { ...telemetryDraft.filters, excludeServices: linesToList(value) } })}
+                  />
+                  <TextareaField
+                    label="Exclude endpoints"
+                    value={listToLines(telemetryDraft.filters.excludeEndpoints)}
+                    onChange={(value) => setTelemetryDraft({ ...telemetryDraft, filters: { ...telemetryDraft.filters, excludeEndpoints: linesToList(value) } })}
+                  />
+                </div>
+                <div className="mcp-capability-grid">
+                  <label className="auth-mode-card compact">
+                    <input
+                      type="checkbox"
+                      checked={telemetryDraft.filters.includeExternal}
+                      onChange={(event) =>
+                        setTelemetryDraft({ ...telemetryDraft, filters: { ...telemetryDraft.filters, includeExternal: event.target.checked } })
+                      }
+                    />
+                    <strong>Include external systems</strong>
+                    <span>Keep calls to systems outside the selected namespaces visible.</span>
+                  </label>
+                  <label className="auth-mode-card compact">
+                    <input
+                      type="checkbox"
+                      checked={telemetryDraft.filters.includeDatabaseClients}
+                      onChange={(event) =>
+                        setTelemetryDraft({ ...telemetryDraft, filters: { ...telemetryDraft.filters, includeDatabaseClients: event.target.checked } })
+                      }
+                    />
+                    <strong>Include data clients</strong>
+                    <span>Render inferred database, cache, and queue dependencies.</span>
+                  </label>
+                </div>
+              </div>
+
+              <div className="okta-guidance">
+                <strong>Integration storage</strong>
+                <span>Prometheus configuration is stored separately from MCP and AI settings. Disabling this integration preserves the saved configuration but stops telemetry-driven views.</span>
+              </div>
+
+              <button className="primary-action full-width" type="button" onClick={() => onSaveTelemetry(telemetryDraft)}>
+                Save telemetry integration
+              </button>
+            </div>
+          ) : (
+            <div className="analysis-empty">
+              <strong>Loading telemetry integration</strong>
+              <span>Prometheus settings will appear once the backend responds.</span>
             </div>
           )}
         </div>

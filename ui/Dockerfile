@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:22-alpine AS build
+FROM --platform=$BUILDPLATFORM node:22-alpine AS build
 
 WORKDIR /app
 
@@ -10,7 +10,8 @@ RUN npm ci
 COPY index.html vite.config.ts tsconfig.json tsconfig.node.json ./
 COPY src ./src
 
-RUN npm run build
+RUN npm run build \
+  && find dist -type f \( -name '*.map' -o -name '*.ts' -o -name '*.tsx' \) -delete
 
 FROM nginxinc/nginx-unprivileged:stable-alpine AS runtime
 
@@ -21,4 +22,3 @@ EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
   CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
-

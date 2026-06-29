@@ -1,16 +1,27 @@
 .git
+.github
+.agents
+.codex
 .DS_Store
 *.log
 ai-docs
+about-stratum
+docs
+README.md
 
 **/node_modules
 **/dist
+**/build
 **/.gocache
 **/tmp
 **/bin
+**/.env
+**/.env.*
 **/coverage.out
+**/coverage
 **/tsconfig.tsbuildinfo
 **/tsconfig.node.tsbuildinfo
+**/*.map
 
 ui/vite.config.js
 ui/vite.config.d.ts

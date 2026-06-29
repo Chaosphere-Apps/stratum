@@ -17,6 +17,9 @@ This UI is Stratum's system design workspace: a structured architecture canvas, 
 
 - Stratum is a focused design tool, not a generic whiteboard. Flexibility is welcome when it preserves structured architecture meaning.
 - The semantic design document is the source of truth. React Flow is the renderer/editor, not the data model.
+- UI should feel like a world-class premium enterprise tool: calm, fast, visually refined, and obvious for first-time users without slowing expert users down.
+- Start with user experience before component implementation. Ask what the user is trying to understand, decide, review, or govern, then shape controls around that workflow.
+- Design, journeys, docs, reviews, and catalog governance are core product pillars. Do not bury them as incidental panels.
 - UI should feel mature and calm: dense enough for enterprise work, visual enough for architecture thinking, and never like a marketing landing page inside the app.
 - Prefer explicit architecture controls over hidden magic. Components, connectors, requirements, and analysis output should be inspectable.
 - Make the canvas enjoyable, but avoid fragile customizations that fight React Flow upgrades.
@@ -29,6 +32,10 @@ This UI is Stratum's system design workspace: a structured architecture canvas, 
 - Do not store API keys or provider secrets in long-lived frontend state unless the product explicitly adds secure backend storage.
 - Do not make analysis-only information impossible for the backend to read. If it affects evaluation, it belongs in the structured design document.
 - Keep visual polish responsive. Text must not overflow controls, panels, nodes, or cards on typical laptop and mobile widths.
+- Everything users can click must either work, clearly explain why it cannot work, or be hidden until it is supported. Avoid dead controls.
+- Do not ship UI that only works at one viewport. Admin, home, canvas, inspector, docs, journeys, and modals must remain usable on 13-inch laptop widths.
+- Do not trade reliability for visual novelty. Premium design means stable interactions, clean failure states, and predictable data persistence.
+- If an action changes backend state, show clear pending/error/success behavior and keep the UI consistent after refresh.
 
 ## Quality Bar
 

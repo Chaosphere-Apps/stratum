@@ -5,5 +5,8 @@ Dockerfile
 README.md
 bin
 tmp
+.env
+.env.*
+.gocache
 coverage.out
-
+coverage

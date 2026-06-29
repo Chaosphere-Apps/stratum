@@ -96,6 +96,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PATCH /api/admin/ai-provider", s.handleUpdateAIProviderConfig)
 	s.mux.HandleFunc("GET /api/admin/mcp", s.handleGetMCPConfig)
 	s.mux.HandleFunc("PATCH /api/admin/mcp", s.handleUpdateMCPConfig)
+	s.mux.HandleFunc("GET /api/admin/telemetry", s.handleGetTelemetryIntegrationConfig)
+	s.mux.HandleFunc("PATCH /api/admin/telemetry", s.handleUpdateTelemetryIntegrationConfig)
 	s.mux.HandleFunc("GET /api/admin/storage", s.handleAdminStorageStatus)
 	s.mux.HandleFunc("POST /api/admin/storage/test", s.handleTestDatabaseStorage)
 	s.mux.HandleFunc("PATCH /api/admin/storage/database", s.handleConfigureDatabaseStorage)
@@ -704,6 +706,62 @@ func (s *Server) handleUpdateMCPConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"mcp": config})
+}
+
+func (s *Server) handleGetTelemetryIntegrationConfig(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	config, err := s.services.Identity.GetTelemetryIntegrationConfig(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"telemetry": config})
+}
+
+func (s *Server) handleUpdateTelemetryIntegrationConfig(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	var body struct {
+		Enabled             bool                              `json:"enabled"`
+		Provider            string                            `json:"provider"`
+		DisplayName         string                            `json:"displayName"`
+		BaseURL             string                            `json:"baseUrl"`
+		AuthMode            string                            `json:"authMode"`
+		Secret              string                            `json:"secret"`
+		CustomHeaderName    string                            `json:"customHeaderName"`
+		QueryWindow         string                            `json:"queryWindow"`
+		RequestTotalMetric  string                            `json:"requestTotalMetric"`
+		RequestFailedMetric string                            `json:"requestFailedMetric"`
+		ServerLatencyMetric string                            `json:"serverLatencyMetric"`
+		ClientLatencyMetric string                            `json:"clientLatencyMetric"`
+		Filters             domain.TelemetryIntegrationFilter `json:"filters"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	config, err := s.services.Identity.UpdateTelemetryIntegrationConfig(r.Context(), domain.TelemetryIntegrationConfig{
+		Enabled:             body.Enabled,
+		Provider:            body.Provider,
+		DisplayName:         body.DisplayName,
+		BaseURL:             body.BaseURL,
+		AuthMode:            body.AuthMode,
+		CustomHeaderName:    body.CustomHeaderName,
+		QueryWindow:         body.QueryWindow,
+		RequestTotalMetric:  body.RequestTotalMetric,
+		RequestFailedMetric: body.RequestFailedMetric,
+		ServerLatencyMetric: body.ServerLatencyMetric,
+		ClientLatencyMetric: body.ClientLatencyMetric,
+		Filters:             body.Filters,
+	}, body.Secret)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"telemetry": config})
 }
 
 func (s *Server) handleListCatalogAssets(w http.ResponseWriter, r *http.Request) {

@@ -173,6 +173,18 @@ func (s IdentityService) UpdateMCPConfig(ctx context.Context, config domain.MCPC
 	return s.repo().UpdateMCPConfig(ctx, config)
 }
 
+func (s IdentityService) GetTelemetryIntegrationConfig(ctx context.Context) (domain.TelemetryIntegrationConfig, error) {
+	return s.repo().GetTelemetryIntegrationConfig(ctx)
+}
+
+func (s IdentityService) GetTelemetryIntegrationConfigWithSecret(ctx context.Context) (domain.TelemetryIntegrationConfig, error) {
+	return s.repo().GetTelemetryIntegrationConfigWithSecret(ctx)
+}
+
+func (s IdentityService) UpdateTelemetryIntegrationConfig(ctx context.Context, config domain.TelemetryIntegrationConfig, secret string) (domain.TelemetryIntegrationConfig, error) {
+	return s.repo().UpdateTelemetryIntegrationConfig(ctx, config, secret)
+}
+
 func (s IdentityService) ListNotifications(ctx context.Context, userID string) ([]domain.Notification, error) {
 	return s.repo().ListNotifications(ctx, userID)
 }

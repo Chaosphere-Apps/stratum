@@ -51,6 +51,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Resolve image name
         id: image
         run: |
@@ -96,6 +99,7 @@ jobs:
             ${{ github.event_name != 'pull_request' &&
             (startsWith(github.ref, 'refs/tags/') ||
             github.event.inputs.publish == 'true') }}
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=stratum-${{ matrix.name }}

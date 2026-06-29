@@ -26,7 +26,7 @@ GitHub Actions builds three production container images:
 Pull the all-in-one image for the simplest self-hosted trial:
 
 ```bash
-docker pull ghcr.io/<owner>/stratum-allinone:latest
+docker pull ghcr.io/chaosphere-apps/stratum-allinone:latest
 ```
 
 Images are built for pull requests, but only pushed to GHCR from:
@@ -36,13 +36,31 @@ Images are built for pull requests, but only pushed to GHCR from:
 
 Published tags include the Git tag, semantic version tags when the tag is semver-compatible, `sha-<commit>`, and `latest`.
 
+Published images are multi-architecture manifests for:
+
+- `linux/amd64`
+- `linux/arm64`
+
+Docker normally selects the matching platform automatically. To force a specific architecture:
+
+```bash
+docker pull --platform linux/arm64 ghcr.io/chaosphere-apps/stratum-allinone:latest
+docker run --rm --platform linux/arm64 -p 8080:8080 ghcr.io/chaosphere-apps/stratum-allinone:latest
+```
+
+For Intel/AMD hosts:
+
+```bash
+docker pull --platform linux/amd64 ghcr.io/chaosphere-apps/stratum-allinone:latest
+```
+
 ## Run
 
 ```bash
 docker run --rm \
   -p 8080:8080 \
   -e DATABASE_URL='postgres://stratum:stratum_dev_password@host.docker.internal:5432/stratum?sslmode=disable' \
-  stratum:allinone
+  ghcr.io/chaosphere-apps/stratum-allinone:latest
 ```
 
 Open `http://localhost:8080`.

@@ -69,6 +69,35 @@ type MCPConfig struct {
 	UpdatedAt           time.Time `json:"updatedAt"`
 }
 
+type TelemetryIntegrationConfig struct {
+	Enabled             bool                       `json:"enabled"`
+	Provider            string                     `json:"provider"`
+	DisplayName         string                     `json:"displayName"`
+	BaseURL             string                     `json:"baseUrl"`
+	AuthMode            string                     `json:"authMode"`
+	Secret              string                     `json:"-"`
+	SecretSet           bool                       `json:"secretSet"`
+	CustomHeaderName    string                     `json:"customHeaderName"`
+	QueryWindow         string                     `json:"queryWindow"`
+	RequestTotalMetric  string                     `json:"requestTotalMetric"`
+	RequestFailedMetric string                     `json:"requestFailedMetric"`
+	ServerLatencyMetric string                     `json:"serverLatencyMetric"`
+	ClientLatencyMetric string                     `json:"clientLatencyMetric"`
+	Filters             TelemetryIntegrationFilter `json:"filters"`
+	UpdatedAt           time.Time                  `json:"updatedAt"`
+}
+
+type TelemetryIntegrationFilter struct {
+	Namespaces             []string          `json:"namespaces"`
+	Services               []string          `json:"services"`
+	ExcludeServices        []string          `json:"excludeServices"`
+	ExcludeEndpoints       []string          `json:"excludeEndpoints"`
+	RequiredLabels         map[string]string `json:"requiredLabels,omitempty"`
+	MinimumRequestsPerSec  float64           `json:"minimumRequestsPerSec"`
+	IncludeExternal        bool              `json:"includeExternal"`
+	IncludeDatabaseClients bool              `json:"includeDatabaseClients"`
+}
+
 type CatalogAsset struct {
 	ID                string          `json:"id"`
 	Name              string          `json:"name"`

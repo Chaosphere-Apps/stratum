@@ -15,28 +15,29 @@ import (
 )
 
 type MemoryRepository struct {
-	mu            sync.RWMutex
-	workspaces    map[string]domain.Workspace
-	designs       map[string]domain.Design
-	versions      map[string][]domain.DesignVersion
-	docs          map[string]domain.DesignDoc
-	users         map[string]domain.User
-	sessions      map[string]memorySession
-	passwordReset map[string]domain.PasswordResetToken
-	accessGroups  map[string]domain.AccessGroup
-	groupMembers  map[string]domain.AccessGroupMember
-	workspaceACL  map[string]domain.WorkspaceAccess
-	workspaceGACL map[string]domain.WorkspaceGroupAccess
-	designACL     map[string]domain.DesignAccess
-	designGACL    map[string]domain.DesignGroupAccess
-	signInConfig  domain.SignInConfig
-	aiConfig      domain.AIProviderConfig
-	mcpConfig     domain.MCPConfig
-	catalogAssets map[string]domain.CatalogAsset
-	comments      map[string]domain.DesignComment
-	reviews       map[string]domain.DesignReviewRequest
-	notifications map[string]domain.Notification
-	clock         func() time.Time
+	mu              sync.RWMutex
+	workspaces      map[string]domain.Workspace
+	designs         map[string]domain.Design
+	versions        map[string][]domain.DesignVersion
+	docs            map[string]domain.DesignDoc
+	users           map[string]domain.User
+	sessions        map[string]memorySession
+	passwordReset   map[string]domain.PasswordResetToken
+	accessGroups    map[string]domain.AccessGroup
+	groupMembers    map[string]domain.AccessGroupMember
+	workspaceACL    map[string]domain.WorkspaceAccess
+	workspaceGACL   map[string]domain.WorkspaceGroupAccess
+	designACL       map[string]domain.DesignAccess
+	designGACL      map[string]domain.DesignGroupAccess
+	signInConfig    domain.SignInConfig
+	aiConfig        domain.AIProviderConfig
+	mcpConfig       domain.MCPConfig
+	telemetryConfig domain.TelemetryIntegrationConfig
+	catalogAssets   map[string]domain.CatalogAsset
+	comments        map[string]domain.DesignComment
+	reviews         map[string]domain.DesignReviewRequest
+	notifications   map[string]domain.Notification
+	clock           func() time.Time
 }
 
 type memorySession struct {
@@ -48,27 +49,28 @@ type memorySession struct {
 
 func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{
-		workspaces:    make(map[string]domain.Workspace),
-		designs:       make(map[string]domain.Design),
-		versions:      make(map[string][]domain.DesignVersion),
-		docs:          make(map[string]domain.DesignDoc),
-		users:         make(map[string]domain.User),
-		sessions:      make(map[string]memorySession),
-		passwordReset: make(map[string]domain.PasswordResetToken),
-		accessGroups:  make(map[string]domain.AccessGroup),
-		groupMembers:  make(map[string]domain.AccessGroupMember),
-		workspaceACL:  make(map[string]domain.WorkspaceAccess),
-		workspaceGACL: make(map[string]domain.WorkspaceGroupAccess),
-		designACL:     make(map[string]domain.DesignAccess),
-		designGACL:    make(map[string]domain.DesignGroupAccess),
-		signInConfig:  defaultSignInConfig(time.Now().UTC()),
-		aiConfig:      defaultAIProviderConfig(time.Now().UTC()),
-		mcpConfig:     defaultMCPConfig(time.Now().UTC()),
-		catalogAssets: make(map[string]domain.CatalogAsset),
-		comments:      make(map[string]domain.DesignComment),
-		reviews:       make(map[string]domain.DesignReviewRequest),
-		notifications: make(map[string]domain.Notification),
-		clock:         time.Now,
+		workspaces:      make(map[string]domain.Workspace),
+		designs:         make(map[string]domain.Design),
+		versions:        make(map[string][]domain.DesignVersion),
+		docs:            make(map[string]domain.DesignDoc),
+		users:           make(map[string]domain.User),
+		sessions:        make(map[string]memorySession),
+		passwordReset:   make(map[string]domain.PasswordResetToken),
+		accessGroups:    make(map[string]domain.AccessGroup),
+		groupMembers:    make(map[string]domain.AccessGroupMember),
+		workspaceACL:    make(map[string]domain.WorkspaceAccess),
+		workspaceGACL:   make(map[string]domain.WorkspaceGroupAccess),
+		designACL:       make(map[string]domain.DesignAccess),
+		designGACL:      make(map[string]domain.DesignGroupAccess),
+		signInConfig:    defaultSignInConfig(time.Now().UTC()),
+		aiConfig:        defaultAIProviderConfig(time.Now().UTC()),
+		mcpConfig:       defaultMCPConfig(time.Now().UTC()),
+		telemetryConfig: defaultTelemetryIntegrationConfig(time.Now().UTC()),
+		catalogAssets:   make(map[string]domain.CatalogAsset),
+		comments:        make(map[string]domain.DesignComment),
+		reviews:         make(map[string]domain.DesignReviewRequest),
+		notifications:   make(map[string]domain.Notification),
+		clock:           time.Now,
 	}
 }
 
@@ -1741,6 +1743,40 @@ func (r *MemoryRepository) UpdateMCPConfig(ctx context.Context, config domain.MC
 	return current, nil
 }
 
+func (r *MemoryRepository) GetTelemetryIntegrationConfig(ctx context.Context) (domain.TelemetryIntegrationConfig, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.TelemetryIntegrationConfig{}, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return sanitizeTelemetryIntegrationConfig(r.telemetryConfig), nil
+}
+
+func (r *MemoryRepository) GetTelemetryIntegrationConfigWithSecret(ctx context.Context) (domain.TelemetryIntegrationConfig, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.TelemetryIntegrationConfig{}, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.telemetryConfig, nil
+}
+
+func (r *MemoryRepository) UpdateTelemetryIntegrationConfig(ctx context.Context, config domain.TelemetryIntegrationConfig, secret string) (domain.TelemetryIntegrationConfig, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.TelemetryIntegrationConfig{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	current := r.telemetryConfig
+	next, err := normalizedTelemetryIntegrationConfig(current, config, secret, r.clock().UTC())
+	if err != nil {
+		return domain.TelemetryIntegrationConfig{}, err
+	}
+	r.telemetryConfig = next
+	return sanitizeTelemetryIntegrationConfig(next), nil
+}
+
 func (r *MemoryRepository) ListDesignComments(ctx context.Context, workspaceID string, designID string) ([]domain.DesignComment, error) {
 	return listAllPages(ctx, func(ctx context.Context, options PageOptions) ([]domain.DesignComment, PageInfo, error) {
 		return r.ListDesignCommentsPage(ctx, workspaceID, designID, options)
@@ -2169,9 +2205,149 @@ func defaultMCPConfig(now time.Time) domain.MCPConfig {
 	}
 }
 
+func defaultTelemetryIntegrationConfig(now time.Time) domain.TelemetryIntegrationConfig {
+	return domain.TelemetryIntegrationConfig{
+		Enabled:             false,
+		Provider:            "prometheus",
+		DisplayName:         "Prometheus Service Graph",
+		AuthMode:            "none",
+		QueryWindow:         "5m",
+		RequestTotalMetric:  "traces_service_graph_request_total",
+		RequestFailedMetric: "traces_service_graph_request_failed_total",
+		ServerLatencyMetric: "traces_service_graph_request_server_seconds_bucket",
+		ClientLatencyMetric: "traces_service_graph_request_client_seconds_bucket",
+		Filters: domain.TelemetryIntegrationFilter{
+			IncludeExternal:        true,
+			IncludeDatabaseClients: true,
+		},
+		UpdatedAt: now,
+	}
+}
+
 func sanitizeAIProviderConfig(config domain.AIProviderConfig) domain.AIProviderConfig {
 	config.APIKey = ""
 	return config
+}
+
+func sanitizeTelemetryIntegrationConfig(config domain.TelemetryIntegrationConfig) domain.TelemetryIntegrationConfig {
+	config.Secret = ""
+	return config
+}
+
+func normalizedTelemetryIntegrationConfig(current domain.TelemetryIntegrationConfig, input domain.TelemetryIntegrationConfig, secret string, now time.Time) (domain.TelemetryIntegrationConfig, error) {
+	next := current
+	next.Enabled = input.Enabled
+	next.Provider = normalizedTelemetryProvider(input.Provider)
+	next.DisplayName = strings.TrimSpace(input.DisplayName)
+	if next.DisplayName == "" {
+		next.DisplayName = "Prometheus Service Graph"
+	}
+	next.BaseURL = strings.TrimSpace(input.BaseURL)
+	next.AuthMode = normalizedTelemetryAuthMode(input.AuthMode)
+	next.CustomHeaderName = strings.TrimSpace(input.CustomHeaderName)
+	next.QueryWindow = strings.TrimSpace(input.QueryWindow)
+	if next.QueryWindow == "" {
+		next.QueryWindow = "5m"
+	}
+	next.RequestTotalMetric = strings.TrimSpace(input.RequestTotalMetric)
+	if next.RequestTotalMetric == "" {
+		next.RequestTotalMetric = "traces_service_graph_request_total"
+	}
+	next.RequestFailedMetric = strings.TrimSpace(input.RequestFailedMetric)
+	if next.RequestFailedMetric == "" {
+		next.RequestFailedMetric = "traces_service_graph_request_failed_total"
+	}
+	next.ServerLatencyMetric = strings.TrimSpace(input.ServerLatencyMetric)
+	if next.ServerLatencyMetric == "" {
+		next.ServerLatencyMetric = "traces_service_graph_request_server_seconds_bucket"
+	}
+	next.ClientLatencyMetric = strings.TrimSpace(input.ClientLatencyMetric)
+	if next.ClientLatencyMetric == "" {
+		next.ClientLatencyMetric = "traces_service_graph_request_client_seconds_bucket"
+	}
+	next.Filters = normalizedTelemetryFilters(input.Filters)
+	if strings.TrimSpace(secret) != "" {
+		next.Secret = strings.TrimSpace(secret)
+		next.SecretSet = true
+	} else {
+		next.SecretSet = current.SecretSet && strings.TrimSpace(current.Secret) != ""
+	}
+	if next.Enabled && next.BaseURL == "" {
+		return domain.TelemetryIntegrationConfig{}, errors.New("prometheus URL is required when telemetry integration is enabled")
+	}
+	if next.AuthMode == "custom_header" && next.CustomHeaderName == "" {
+		return domain.TelemetryIntegrationConfig{}, errors.New("custom header name is required for custom header authentication")
+	}
+	next.UpdatedAt = now
+	return next, nil
+}
+
+func normalizedTelemetryFilters(filters domain.TelemetryIntegrationFilter) domain.TelemetryIntegrationFilter {
+	return domain.TelemetryIntegrationFilter{
+		Namespaces:             normalizedStringList(filters.Namespaces),
+		Services:               normalizedStringList(filters.Services),
+		ExcludeServices:        normalizedStringList(filters.ExcludeServices),
+		ExcludeEndpoints:       normalizedStringList(filters.ExcludeEndpoints),
+		RequiredLabels:         normalizedStringMap(filters.RequiredLabels),
+		MinimumRequestsPerSec:  filters.MinimumRequestsPerSec,
+		IncludeExternal:        filters.IncludeExternal,
+		IncludeDatabaseClients: filters.IncludeDatabaseClients,
+	}
+}
+
+func normalizedStringList(values []string) []string {
+	cleaned := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		key := strings.ToLower(value)
+		if value == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		cleaned = append(cleaned, value)
+	}
+	return cleaned
+}
+
+func normalizedStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	cleaned := map[string]string{}
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key != "" && value != "" {
+			cleaned[key] = value
+		}
+	}
+	if len(cleaned) == 0 {
+		return nil
+	}
+	return cleaned
+}
+
+func normalizedTelemetryProvider(provider string) string {
+	switch strings.TrimSpace(strings.ToLower(provider)) {
+	case "prometheus":
+		return "prometheus"
+	default:
+		return "prometheus"
+	}
+}
+
+func normalizedTelemetryAuthMode(mode string) string {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case "bearer":
+		return "bearer"
+	case "basic":
+		return "basic"
+	case "custom_header":
+		return "custom_header"
+	default:
+		return "none"
+	}
 }
 
 func normalizedMCPPath(path string) string {

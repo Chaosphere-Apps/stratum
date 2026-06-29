@@ -89,6 +89,7 @@ import {
   fetchAIProviderConfig,
   fetchAdminStorageStatus,
   fetchMCPConfig,
+  fetchTelemetryIntegrationConfig,
   fetchCatalogAssets,
   fetchSetupStatus,
   fetchSignInConfig,
@@ -113,6 +114,7 @@ import {
   updateAIProviderConfig,
   updateCatalogAsset,
   updateMCPConfig,
+  updateTelemetryIntegrationConfig,
   updateSignInConfig,
   type BackendAIProviderConfig,
   type BackendCatalogAsset,
@@ -120,6 +122,7 @@ import {
   type BackendDesignDoc,
   type BackendDesignReviewRequest,
   type BackendMCPConfig,
+  type BackendTelemetryIntegrationConfig,
   type BackendNotification,
   type BackendPageInfo,
   type BackendProfile,
@@ -263,6 +266,7 @@ export function App() {
   const [storageStatus, setStorageStatus] = useState<BackendStorageStatus | null>(null)
   const [signInConfig, setSignInConfig] = useState<BackendSignInConfig | null>(null)
   const [mcpConfig, setMCPConfig] = useState<BackendMCPConfig | null>(null)
+  const [telemetryConfig, setTelemetryConfig] = useState<BackendTelemetryIntegrationConfig | null>(null)
   const [catalogAssets, setCatalogAssets] = useState<BackendCatalogAsset[]>([])
   const [catalogRailMode, setCatalogRailMode] = useState<'blocks' | 'catalog'>('blocks')
   const [catalogSearch, setCatalogSearch] = useState('')
@@ -669,7 +673,9 @@ export function App() {
 
   function updateDesign(updater: (current: DesignDocument) => DesignDocument) {
     setDesign((current) => {
-      const nextDesign = touchDesign(updater(current))
+      const updated = updater(current)
+      if (updated === current) return current
+      const nextDesign = touchDesign(updated)
       designRef.current = nextDesign
       return nextDesign
     })
@@ -1312,11 +1318,12 @@ export function App() {
 
   async function refreshAdmin() {
     setAdminError(null)
-    const [userResponse, signInResponse, aiProviderResponse, mcpResponse, catalogResponse, storageResponse] = await Promise.allSettled([
+    const [userResponse, signInResponse, aiProviderResponse, mcpResponse, telemetryResponse, catalogResponse, storageResponse] = await Promise.allSettled([
       fetchUsers({ limit: 100 }),
       fetchSignInConfig(),
       fetchAIProviderConfig(),
       fetchMCPConfig(),
+      fetchTelemetryIntegrationConfig(),
       fetchCatalogAssets('', { limit: 100 }),
       fetchAdminStorageStatus(),
     ] as const)
@@ -1328,6 +1335,7 @@ export function App() {
     if (signInResponse.status === 'fulfilled') setSignInConfig(signInResponse.value.signIn)
     if (aiProviderResponse.status === 'fulfilled') setAIConnection(aiProviderResponse.value.aiProvider)
     if (mcpResponse.status === 'fulfilled') setMCPConfig(mcpResponse.value.mcp)
+    if (telemetryResponse.status === 'fulfilled') setTelemetryConfig(telemetryResponse.value.telemetry)
     if (catalogResponse.status === 'fulfilled') setCatalogAssets(catalogResponse.value.assets)
     if (storageResponse.status === 'fulfilled') setStorageStatus(storageResponse.value.storage)
   }
@@ -1445,6 +1453,16 @@ export function App() {
       setMCPConfig(response.mcp)
     } catch (error) {
       setAdminError(error instanceof Error ? error.message : 'Could not save MCP settings')
+    }
+  }
+
+  async function saveTelemetryIntegration(nextConfig: Partial<BackendTelemetryIntegrationConfig> & { secret?: string }) {
+    setAdminError(null)
+    try {
+      const response = await updateTelemetryIntegrationConfig(nextConfig)
+      setTelemetryConfig(response.telemetry)
+    } catch (error) {
+      setAdminError(error instanceof Error ? error.message : 'Could not save telemetry integration settings')
     }
   }
 
@@ -1824,25 +1842,45 @@ export function App() {
   }
 
   function moveReactFlowComponent(componentId: string, position: { x: number; y: number }, parentFrameId?: string) {
-    updateDesign((current) => ({
-      ...current,
-      components: current.components.map((component) =>
-        component.id === componentId
-          ? { ...component, metadata: { ...component.metadata, position, parentFrameId } }
-          : component,
-      ),
-    }))
+    updateDesign((current) => {
+      const component = current.components.find((item) => item.id === componentId)
+      if (!component) return current
+      const currentPosition = component?.metadata.position
+      if (
+        currentPosition?.x === position.x &&
+        currentPosition?.y === position.y &&
+        component.metadata.parentFrameId === parentFrameId
+      ) {
+        return current
+      }
+      return {
+        ...current,
+        components: current.components.map((item) =>
+          item.id === componentId
+            ? { ...item, metadata: { ...item.metadata, position, parentFrameId } }
+            : item,
+        ),
+      }
+    })
   }
 
   function resizeReactFlowComponent(componentId: string, size: { width: number; height: number }) {
-    updateDesign((current) => ({
-      ...current,
-      components: current.components.map((component) =>
-        component.id === componentId
-          ? { ...component, metadata: { ...component.metadata, size } }
-          : component,
-      ),
-    }))
+    updateDesign((current) => {
+      const component = current.components.find((item) => item.id === componentId)
+      if (!component) return current
+      const currentSize = component?.metadata.size
+      if (currentSize?.width === size.width && currentSize?.height === size.height) {
+        return current
+      }
+      return {
+        ...current,
+        components: current.components.map((item) =>
+          item.id === componentId
+            ? { ...item, metadata: { ...item.metadata, size } }
+            : item,
+        ),
+      }
+    })
   }
 
   function updateComponentFromInspector(component: DesignComponent) {
@@ -2290,6 +2328,7 @@ export function App() {
             signInConfig={signInConfig}
             aiProviderConfig={aiConnection}
             mcpConfig={mcpConfig}
+            telemetryConfig={telemetryConfig}
             catalogAssets={catalogAssets}
             error={adminError}
             onAddUser={addAdminUser}
@@ -2299,6 +2338,7 @@ export function App() {
             onSaveSignIn={(config) => void saveSignIn(config)}
             onSaveAIProvider={(config) => void saveAIProvider(config)}
             onSaveMCP={(config) => void saveMCP(config)}
+            onSaveTelemetry={(config) => void saveTelemetryIntegration(config)}
             onAddCatalogAsset={addCatalogAsset}
             onSaveCatalogAsset={saveCatalogAsset}
             onDeleteCatalogAsset={removeCatalogAsset}

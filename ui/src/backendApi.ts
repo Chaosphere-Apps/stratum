@@ -75,14 +75,40 @@ export interface BackendAIProviderConfig {
   updatedAt: string
 }
 export interface BackendMCPConfig {
-  enabled: boolean
-  endpointPath: string
-  readCatalog: boolean
+ enabled: boolean
+ endpointPath: string
+ readCatalog: boolean
   readDesigns: boolean
   createDraftDesign: boolean
   runAnalysis: boolean
   fetchImpactReport: boolean
-  requireAdminConsent: boolean
+ requireAdminConsent: boolean
+ updatedAt: string
+}
+export interface BackendTelemetryIntegrationFilter {
+  namespaces: string[]
+  services: string[]
+  excludeServices: string[]
+  excludeEndpoints: string[]
+  requiredLabels?: Record<string, string>
+  minimumRequestsPerSec: number
+  includeExternal: boolean
+  includeDatabaseClients: boolean
+}
+export interface BackendTelemetryIntegrationConfig {
+  enabled: boolean
+  provider: string
+  displayName: string
+  baseUrl: string
+  authMode: 'none' | 'bearer' | 'basic' | 'custom_header'
+  secretSet: boolean
+  customHeaderName: string
+  queryWindow: string
+  requestTotalMetric: string
+  requestFailedMetric: string
+  serverLatencyMetric: string
+  clientLatencyMetric: string
+  filters: BackendTelemetryIntegrationFilter
   updatedAt: string
 }
 export interface BackendCatalogAsset {
@@ -272,6 +298,9 @@ interface AIProviderConfigResponse {
 }
 interface MCPConfigResponse {
   mcp: BackendMCPConfig
+}
+interface TelemetryIntegrationConfigResponse {
+  telemetry: BackendTelemetryIntegrationConfig
 }
 export interface BackendDesignComment {
   id: string
@@ -580,6 +609,17 @@ export function fetchMCPConfig() {
 
 export function updateMCPConfig(input: BackendMCPConfig) {
   return request<MCPConfigResponse>('/api/admin/mcp', {
+    method: 'PATCH',
+    body: JSON.stringify(input),
+  })
+}
+
+export function fetchTelemetryIntegrationConfig() {
+  return request<TelemetryIntegrationConfigResponse>('/api/admin/telemetry')
+}
+
+export function updateTelemetryIntegrationConfig(input: Partial<BackendTelemetryIntegrationConfig> & { secret?: string }) {
+  return request<TelemetryIntegrationConfigResponse>('/api/admin/telemetry', {
     method: 'PATCH',
     body: JSON.stringify(input),
   })

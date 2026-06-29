@@ -440,6 +440,70 @@ func TestAdminStorageRoutesRequireAdminAndValidateInput(t *testing.T) {
 	}
 }
 
+func TestAdminMCPRoutesRequireAdminAndPersistConfig(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	admin, err := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
+	if err != nil {
+		t.Fatalf("CreateFirstAdmin returned error: %v", err)
+	}
+	member, err := repo.CreateUser(t.Context(), "Member", "member@example.com", "member", "password123")
+	if err != nil {
+		t.Fatalf("CreateUser returned error: %v", err)
+	}
+	adminToken, err := repo.CreateSession(t.Context(), admin.ID, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("CreateSession admin returned error: %v", err)
+	}
+	memberToken, err := repo.CreateSession(t.Context(), member.ID, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("CreateSession member returned error: %v", err)
+	}
+	server := NewServer(config.Config{}, realtime.NewHub(repo, config.Logger()), config.Logger())
+
+	memberRequest := httptest.NewRequest(http.MethodGet, "/api/admin/mcp", nil)
+	memberRequest.AddCookie(&http.Cookie{Name: "stratum_session", Value: memberToken})
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, memberRequest)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("member mcp status = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+
+	updateBody := `{
+		"enabled": true,
+		"endpointPath": "internal-mcp",
+		"readCatalog": true,
+		"readDesigns": false,
+		"createDraftDesign": true,
+		"runAnalysis": true,
+		"fetchImpactReport": true,
+		"requireAdminConsent": false
+	}`
+	updateRequest := httptest.NewRequest(http.MethodPatch, "/api/admin/mcp", strings.NewReader(updateBody))
+	updateRequest.AddCookie(&http.Cookie{Name: "stratum_session", Value: adminToken})
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, updateRequest)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("update mcp status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		MCP domain.MCPConfig `json:"mcp"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode mcp response: %v", err)
+	}
+	if !response.MCP.Enabled || response.MCP.EndpointPath != "/internal-mcp" || response.MCP.ReadDesigns || response.MCP.RequireAdminConsent {
+		t.Fatalf("updated mcp config = %#v", response.MCP)
+	}
+
+	getRequest := httptest.NewRequest(http.MethodGet, "/api/admin/mcp", nil)
+	getRequest.AddCookie(&http.Cookie{Name: "stratum_session", Value: adminToken})
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, getRequest)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"/internal-mcp"`) {
+		t.Fatalf("get mcp status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestProductDataRoutesRequireSession(t *testing.T) {
 	repo := store.NewMemoryRepository()
 	if _, err := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123"); err != nil {
