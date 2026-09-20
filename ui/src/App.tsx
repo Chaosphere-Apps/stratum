@@ -2419,7 +2419,10 @@ export function App() {
           onOpenNotifications={() => setNotificationsOpen(true)}
           onLogout={() => void signOut()}
         />
-        <StatelessModeBanner storageStatus={storageStatus} />
+        <StatelessModeBanner
+          storageStatus={storageStatus}
+          onConfigureDatabase={() => applyRoute({ screen: 'admin', section: 'settings' })}
+        />
         <Suspense fallback={<RouteLoading label="Loading admin console" />}>
           <AdminConsole
             users={users}
@@ -2475,7 +2478,10 @@ export function App() {
           onOpenNotifications={() => setNotificationsOpen(true)}
           onLogout={() => void signOut()}
         />
-        <StatelessModeBanner storageStatus={storageStatus} />
+        <StatelessModeBanner
+          storageStatus={storageStatus}
+          onConfigureDatabase={homeProfile?.role === 'admin' ? () => applyRoute({ screen: 'admin', section: 'settings' }) : undefined}
+        />
         <Suspense fallback={<RouteLoading label="Loading home" />}>
           <HomeScreen
             workspaces={homeWorkspaces}
@@ -2497,6 +2503,7 @@ export function App() {
             onCloneDesign={requestCloneDesign}
             onDeleteDesign={requestDeleteDesign}
             onNewDesign={openNewDesignBrief}
+            onGenerate={() => setCopilotOpen(true)}
             onLoadMoreWorkspaces={loadMoreHomeWorkspaces}
             onLoadMoreDesigns={loadMoreHomeDesigns}
             onRefresh={() => refreshHome(activeWorkspaceId)}
@@ -2543,6 +2550,14 @@ export function App() {
             />
           </Suspense>
         ) : null}
+        {copilotOpen ? (
+          <Suspense fallback={null}>
+            <CopilotDraftModal
+              aiConnection={aiConnection?.enabled && aiConnection.apiKeySet ? aiConnection : null}
+              onClose={() => setCopilotOpen(false)}
+            />
+          </Suspense>
+        ) : null}
         {notificationsOpen ? (
           <Suspense fallback={null}>
             <NotificationsModal
@@ -2584,7 +2599,10 @@ export function App() {
         onOpenNotifications={() => setNotificationsOpen(true)}
         onLogout={() => void signOut()}
       />
-      <StatelessModeBanner storageStatus={storageStatus} />
+      <StatelessModeBanner
+        storageStatus={storageStatus}
+        onConfigureDatabase={homeProfile?.role === 'admin' ? () => applyRoute({ screen: 'admin', section: 'settings' }) : undefined}
+      />
       <Suspense fallback={<RouteLoading label="Loading canvas" />}>
       <main className={`app-shell ${leftRailOpen ? '' : 'left-rail-collapsed'} ${rightRailOpen ? '' : 'right-rail-collapsed'}`}>
         <aside className="left-rail">

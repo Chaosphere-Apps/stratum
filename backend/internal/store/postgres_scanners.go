@@ -19,6 +19,12 @@ func scanWorkspace(row rowScanner) (domain.Workspace, error) {
 	return workspace, err
 }
 
+func scanWorkspaceWithAccess(row rowScanner) (domain.Workspace, error) {
+	var workspace domain.Workspace
+	err := row.Scan(&workspace.ID, &workspace.Name, &workspace.OwnerID, &workspace.CreatedAt, &workspace.UpdatedAt, &workspace.EffectiveAccess)
+	return workspace, err
+}
+
 func scanDesign(row rowScanner) (domain.Design, error) {
 	var design domain.Design
 	var document string
@@ -35,6 +41,26 @@ func scanDesign(row rowScanner) (domain.Design, error) {
 		&design.CreatedBy,
 		&design.CreatedAt,
 		&design.UpdatedAt,
+	)
+	if err != nil {
+		return domain.Design{}, err
+	}
+	design.Document = json.RawMessage(document)
+	design.DocumentRevision = domain.DesignRevision(design.Document)
+	if canvasSnapshot != nil {
+		design.CanvasSnapshot = json.RawMessage(*canvasSnapshot)
+	}
+	return design, nil
+}
+
+func scanDesignWithAccess(row rowScanner) (domain.Design, error) {
+	var design domain.Design
+	var document string
+	var canvasSnapshot *string
+	err := row.Scan(
+		&design.ID, &design.WorkspaceID, &design.Name, &design.Access, &design.Title,
+		&document, &canvasSnapshot, &design.VersionNumber, &design.CreatedBy,
+		&design.CreatedAt, &design.UpdatedAt, &design.EffectiveAccess,
 	)
 	if err != nil {
 		return domain.Design{}, err

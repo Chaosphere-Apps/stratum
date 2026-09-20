@@ -95,3 +95,22 @@ func TestMemoryRepositoryDoesNotDeleteGuestWorkspace(t *testing.T) {
 		t.Fatal("guest workspace delete should be rejected")
 	}
 }
+
+func TestAccessibleWorkspaceIncludesEffectiveAccess(t *testing.T) {
+	repo := NewMemoryRepository()
+	admin, _ := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
+	viewer, _ := repo.CreateUser(t.Context(), "Viewer", "viewer@example.com", "member", "password123")
+	editor, _ := repo.CreateUser(t.Context(), "Editor", "editor@example.com", "member", "password123")
+	workspace, _ := repo.CreateWorkspace(t.Context(), "Payments", admin.ID)
+	_, _ = repo.GrantWorkspaceAccess(t.Context(), domain.WorkspaceAccess{WorkspaceID: workspace.ID, UserID: viewer.ID, CanRead: true})
+	_, _ = repo.GrantWorkspaceAccess(t.Context(), domain.WorkspaceAccess{WorkspaceID: workspace.ID, UserID: editor.ID, CanRead: true, CanCreateDesign: true})
+
+	viewed, _, _ := repo.ListAccessibleWorkspacesPage(t.Context(), AccessScope{UserID: viewer.ID}, PageOptions{})
+	edited, _, _ := repo.ListAccessibleWorkspacesPage(t.Context(), AccessScope{UserID: editor.ID}, PageOptions{})
+	if len(viewed) != 1 || viewed[0].EffectiveAccess != "read" {
+		t.Fatalf("viewer access = %#v, want read", viewed)
+	}
+	if len(edited) != 1 || edited[0].EffectiveAccess != "edit" {
+		t.Fatalf("editor access = %#v, want edit", edited)
+	}
+}

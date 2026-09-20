@@ -66,7 +66,13 @@ func (r *PostgresRepository) ListAccessibleDesignsPage(ctx context.Context, work
 	likeQuery := "%" + strings.ToLower(options.Query) + "%"
 	rows, err := r.pool.Query(ctx, `
 SELECT design.id, design.workspace_id, design.name, design.access, design.title, design.document,
-       design.canvas_snapshot, design.version_number, design.created_by, design.created_at, design.updated_at
+       design.canvas_snapshot, design.version_number, design.created_by, design.created_at, design.updated_at,
+       CASE WHEN $4 OR design.created_by = $5 OR workspace.owner_id = $5
+         OR EXISTS (SELECT 1 FROM workspace_access AS editable WHERE editable.workspace_id = design.workspace_id AND editable.user_id = $5 AND editable.can_manage)
+         OR EXISTS (SELECT 1 FROM workspace_group_access AS editable WHERE editable.workspace_id = design.workspace_id AND editable.group_id = ANY($6::text[]) AND editable.can_manage)
+         OR EXISTS (SELECT 1 FROM design_access AS editable WHERE editable.workspace_id = design.workspace_id AND editable.design_id = design.id AND editable.user_id = $5 AND (editable.can_edit OR editable.can_manage))
+         OR EXISTS (SELECT 1 FROM design_group_access AS editable WHERE editable.workspace_id = design.workspace_id AND editable.design_id = design.id AND editable.group_id = ANY($6::text[]) AND (editable.can_edit OR editable.can_manage))
+       THEN 'edit' ELSE 'read' END AS effective_access
 FROM designs AS design
 JOIN workspaces AS workspace ON workspace.id = design.workspace_id
 WHERE design.workspace_id = $1
@@ -114,7 +120,7 @@ LIMIT $7 OFFSET $8
 	defer rows.Close()
 	designs := []domain.Design{}
 	for rows.Next() {
-		design, err := scanDesign(rows)
+		design, err := scanDesignWithAccess(rows)
 		if err != nil {
 			return nil, PageInfo{}, err
 		}

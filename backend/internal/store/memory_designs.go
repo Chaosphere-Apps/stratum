@@ -86,18 +86,21 @@ func (r *MemoryRepository) ListAccessibleDesignsPage(ctx context.Context, worksp
 		if design.WorkspaceID != workspaceID || (query != "" && !strings.Contains(strings.ToLower(design.Name+" "+design.Title), query)) {
 			continue
 		}
-		allowed := scope.IsAdmin || design.CreatedBy == scope.UserID || workspaceManage || design.Access == "public" || (design.Access == "workspace" && workspaceRead)
+		canEdit := scope.IsAdmin || design.CreatedBy == scope.UserID || workspaceManage
+		allowed := canEdit || design.Access == "public" || (design.Access == "workspace" && workspaceRead)
 		if access, ok := r.designACL[accessKey(workspaceID, design.ID, scope.UserID)]; ok {
 			allowed = allowed || access.CanRead || access.CanEdit || access.CanComment || access.CanReview || access.CanManage
+			canEdit = canEdit || access.CanEdit || access.CanManage
 		}
 		for _, access := range r.designGACL {
 			_, member := groups[access.GroupID]
 			if access.WorkspaceID == workspaceID && access.DesignID == design.ID && member && (access.CanRead || access.CanEdit || access.CanComment || access.CanReview || access.CanManage) {
 				allowed = true
-				break
+				canEdit = canEdit || access.CanEdit || access.CanManage
 			}
 		}
 		if allowed {
+			design.EffectiveAccess = map[bool]string{true: "edit", false: "read"}[canEdit]
 			designs = append(designs, design)
 		}
 	}

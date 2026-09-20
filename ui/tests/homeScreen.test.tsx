@@ -11,8 +11,8 @@ vi.mock('../src/backendApi', () => ({ fetchWorkspaceSharePrincipals }))
 import { HomeScreen } from '../src/components/HomeScreen'
 
 const workspaces: BackendWorkspace[] = [
-  { id: 'guest-workspace', name: 'Guest Workspace' },
-  { id: 'workspace-payments', name: 'Payments' },
+  { id: 'guest-workspace', name: 'Guest Workspace', effectiveAccess: 'read' },
+  { id: 'workspace-payments', name: 'Payments', effectiveAccess: 'edit' },
 ]
 
 const design: BackendDesign = {
@@ -34,6 +34,7 @@ const design: BackendDesign = {
   },
   versionNumber: 3,
   updatedAt: '2026-07-10T12:00:00Z',
+  effectiveAccess: 'edit',
 }
 
 function renderHome(overrides: Partial<React.ComponentProps<typeof HomeScreen>> = {}) {
@@ -57,6 +58,7 @@ function renderHome(overrides: Partial<React.ComponentProps<typeof HomeScreen>> 
     onCloneDesign: vi.fn(),
     onDeleteDesign: vi.fn(),
     onNewDesign: vi.fn(),
+    onGenerate: vi.fn(),
     onLoadMoreWorkspaces: vi.fn(),
     onLoadMoreDesigns: vi.fn(),
     onRefresh: vi.fn(),
@@ -96,10 +98,10 @@ describe('HomeScreen', () => {
     expect(screen.getAllByText(/journeys/)).toHaveLength(2)
     expect(screen.getByText('v3')).toBeTruthy()
 
-    await user.type(screen.getByPlaceholderText('Search workspaces...'), 'pay')
+    await user.type(screen.getByPlaceholderText('Search designs and workspaces...'), 'pay')
     expect(props.onWorkspaceSearchChange).toHaveBeenLastCalledWith('y')
-    await user.type(screen.getByPlaceholderText('Search designs...'), 'api')
-    expect(props.onDesignSearchChange).toHaveBeenLastCalledWith('i')
+    expect(props.onDesignSearchChange).toHaveBeenLastCalledWith('y')
+    expect(screen.getByText('Can edit')).toBeTruthy()
 
     await user.click(screen.getByRole('button', { name: /Guest WorkspaceDefault workspace/i }))
     expect(props.onSelectWorkspace).toHaveBeenCalledWith('guest-workspace')
@@ -214,5 +216,16 @@ describe('HomeScreen', () => {
     await user.click(screen.getByRole('button', { name: 'Delete Payments' }))
     expect(onDeleteWorkspace).toHaveBeenCalledWith(workspaces[1])
     expect(screen.queryByRole('button', { name: 'Delete Guest Workspace' })).toBeNull()
+  })
+
+  it('shows effective access before opening and suppresses edit actions for read-only designs', () => {
+    renderHome({
+      designs: [{ ...design, effectiveAccess: 'read' }],
+      workspaces: [{ ...workspaces[1], effectiveAccess: 'read' }],
+    })
+
+    expect(screen.getAllByText(/View only/).length).toBeGreaterThanOrEqual(2)
+    expect(screen.queryByRole('button', { name: 'Delete Payment processing' })).toBeNull()
+    expect((screen.getByRole('button', { name: 'New design' }) as HTMLButtonElement).disabled).toBe(true)
   })
 })

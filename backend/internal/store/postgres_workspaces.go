@@ -70,7 +70,11 @@ func (r *PostgresRepository) ListAccessibleWorkspacesPage(ctx context.Context, s
 	offset := OffsetFromCursor(options.Cursor)
 	likeQuery := "%" + strings.ToLower(options.Query) + "%"
 	rows, err := r.pool.Query(ctx, `
-SELECT workspace.id, workspace.name, COALESCE(workspace.owner_id, ''), workspace.created_at, workspace.updated_at
+SELECT workspace.id, workspace.name, COALESCE(workspace.owner_id, ''), workspace.created_at, workspace.updated_at,
+  CASE WHEN $3 OR workspace.owner_id = $4
+    OR EXISTS (SELECT 1 FROM workspace_access AS editable WHERE editable.workspace_id = workspace.id AND editable.user_id = $4 AND (editable.can_create_design OR editable.can_manage))
+    OR EXISTS (SELECT 1 FROM workspace_group_access AS editable WHERE editable.workspace_id = workspace.id AND editable.group_id = ANY($5::text[]) AND (editable.can_create_design OR editable.can_manage))
+  THEN 'edit' ELSE 'read' END AS effective_access
 FROM workspaces AS workspace
 WHERE ($1 = '' OR lower(workspace.name) LIKE $2)
   AND (
@@ -95,7 +99,7 @@ LIMIT $6 OFFSET $7
 	defer rows.Close()
 	workspaces := []domain.Workspace{}
 	for rows.Next() {
-		workspace, err := scanWorkspace(rows)
+		workspace, err := scanWorkspaceWithAccess(rows)
 		if err != nil {
 			return nil, PageInfo{}, err
 		}

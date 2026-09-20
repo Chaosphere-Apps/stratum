@@ -80,18 +80,21 @@ func (r *MemoryRepository) ListAccessibleWorkspacesPage(ctx context.Context, sco
 		if query != "" && !strings.Contains(strings.ToLower(workspace.Name), query) {
 			continue
 		}
-		allowed := scope.IsAdmin || workspace.OwnerID == scope.UserID
+		canCreate := scope.IsAdmin || workspace.OwnerID == scope.UserID
+		allowed := canCreate
 		if access, ok := r.workspaceACL[accessKey(workspace.ID, scope.UserID)]; ok {
 			allowed = allowed || access.CanRead || access.CanCreateDesign || access.CanManage
+			canCreate = canCreate || access.CanCreateDesign || access.CanManage
 		}
 		for _, access := range r.workspaceGACL {
 			_, member := groups[access.GroupID]
 			if access.WorkspaceID == workspace.ID && member && (access.CanRead || access.CanCreateDesign || access.CanManage) {
 				allowed = true
-				break
+				canCreate = canCreate || access.CanCreateDesign || access.CanManage
 			}
 		}
 		if allowed {
+			workspace.EffectiveAccess = map[bool]string{true: "edit", false: "read"}[canCreate]
 			workspaces = append(workspaces, workspace)
 		}
 	}

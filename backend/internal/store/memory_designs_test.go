@@ -308,3 +308,18 @@ func TestMemoryRepositoryCreateDesignGeneratesDocumentForNullInput(t *testing.T)
 		t.Fatalf("document id = %q, want %q", document.ID, created.ID)
 	}
 }
+
+func TestAccessibleDesignIncludesEffectiveAccess(t *testing.T) {
+	repo := NewMemoryRepository()
+	admin, _ := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
+	viewer, _ := repo.CreateUser(t.Context(), "Viewer", "viewer@example.com", "member", "password123")
+	workspace, _ := repo.CreateWorkspace(t.Context(), "Payments", admin.ID)
+	_, _ = repo.GrantWorkspaceAccess(t.Context(), domain.WorkspaceAccess{WorkspaceID: workspace.ID, UserID: viewer.ID, CanRead: true})
+	design, _ := repo.CreateDesign(t.Context(), workspace.ID, "Ledger", []byte(`{"title":"Ledger"}`), admin.ID)
+	_, _ = repo.UpdateDesignMetadata(t.Context(), workspace.ID, design.ID, design.Name, "workspace")
+
+	items, _, err := repo.ListAccessibleDesignsPage(t.Context(), workspace.ID, AccessScope{UserID: viewer.ID}, PageOptions{})
+	if err != nil || len(items) != 1 || items[0].EffectiveAccess != "read" {
+		t.Fatalf("viewer design access = %#v, err=%v, want read", items, err)
+	}
+}

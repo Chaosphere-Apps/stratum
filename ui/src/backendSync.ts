@@ -6,6 +6,8 @@ type ConnectionStatus = 'connecting' | 'connected' | 'disconnected'
 export interface BackendWorkspace {
   id: string
   name: string
+  ownerId?: string
+  effectiveAccess?: 'read' | 'edit'
 }
 
 export interface BackendDesign {
@@ -19,6 +21,7 @@ export interface BackendDesign {
   canvasSnapshot?: unknown
   versionNumber?: number
   updatedAt: string
+  effectiveAccess?: 'read' | 'edit'
 }
 
 interface Envelope<T = unknown> {
