@@ -181,6 +181,8 @@ This keeps AI analysis connected to the diagram instead of becoming detached pro
 
 ## 9. Version-Aware Analysis
 
+The review endpoint can target either the current working design or an immutable saved version. A review is also scoped to a deliberate lens such as security, reliability, scalability, data, operability, or cost. The UI must keep the selected target visible so findings are never mistaken for feedback about another version.
+
 When comparing versions, the system should identify:
 
 - New risks.
@@ -215,3 +217,15 @@ Dismissals should feed future evaluation tuning, especially for workspace-specif
 - Show confidence and evidence for findings.
 - Allow analysis to run with redacted metadata.
 - Avoid sending secrets or raw sensitive payloads to external models.
+
+## 12. Grounded Architecture Chat
+
+Architecture chat is a persistent, design-scoped review surface rather than a general-purpose assistant:
+
+- Each conversation belongs to one workspace and design and may be pinned to a saved version.
+- Every response is grounded in the structured graph, requirements, and deterministic evaluation evidence.
+- Component and connector references returned by the model are checked against the selected document before they become navigable UI links.
+- Design content is treated as untrusted input and cannot override system instructions.
+- Suggestions never mutate the design implicitly; a human must apply every change.
+- Conversation messages are stored independently from design documents and version history.
+- Provider endpoints reject unsafe network targets by default, responses are size-bounded, and chat requests are rate-limited.

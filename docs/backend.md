@@ -9,7 +9,7 @@ Production-oriented Go backend for the system design evaluator.
 - Multiple workspaces.
 - Designs under workspaces.
 - Design versions created on save.
-- WebSocket API for workspace snapshot and design upsert.
+- WebSocket API for workspace snapshots, conflict-safe design updates, and editor presence.
 - Postgres repository with exact structured JSON document storage.
 - Separate design-doc storage for rich written context so large docs do not travel with every canvas save.
 - Structured design analysis across requirements, topology, traffic, consistency, availability, security, and data.
@@ -38,23 +38,35 @@ docker compose up -d backend
 Defaults:
 
 - HTTP/WebSocket address: `:8081`
-- WebSocket endpoint: `ws://127.0.0.1:8081/ws?workspaceId=guest-workspace`
+- WebSocket endpoint: `ws://127.0.0.1:8081/ws?workspaceId=guest-workspace&designId=<design-id>`
 - Health endpoint: `http://127.0.0.1:8081/healthz`
 - Without `DATABASE_URL`, the backend uses in-memory storage.
 
 Production-relevant configuration:
 
 - `ALLOWED_ORIGINS`: comma-separated browser origins allowed for REST CORS and WebSocket upgrades.
+- `AUTO_MIGRATE`: defaults to `true` for simple installations. Set it to `false` in controlled production deployments and run `/migrate up` before starting a new backend release.
+- `DATABASE_MAX_CONNECTIONS`, `DATABASE_MIN_CONNECTIONS`: per-process Postgres pool bounds. Defaults are `20` and `2`.
+- `DATABASE_MAX_CONN_LIFETIME`, `DATABASE_MAX_CONN_IDLE_TIME`, `DATABASE_HEALTH_CHECK_PERIOD`: pool lifecycle controls.
+- `MIGRATION_LOCK_TIMEOUT`, `MIGRATION_STATEMENT_TIMEOUT`: bound migration lock waits and individual migration execution.
+- `STARTUP_TIMEOUT`: bounds database connection and optional startup migration work. Defaults to two minutes.
+- `PUBLIC_URL`: canonical browser origin used for password-reset and OIDC redirects. Set this explicitly outside local development; Stratum does not trust arbitrary `Host`, `Origin`, or forwarding headers when generating reset links.
+- `TRUSTED_PROXY_CIDRS`: comma-separated proxy networks whose forwarding metadata may be used for secure-cookie and client-IP handling.
+- `LOGIN_ATTEMPTS_PER_WINDOW`, `PASSWORD_RESET_ATTEMPTS_PER_WINDOW`, `AUTH_RATE_LIMIT_WINDOW`: authentication endpoint throttling. Local accounts are additionally locked for 15 minutes after five consecutive failed passwords.
 - `MAX_REQUEST_BODY_BYTES`: maximum REST JSON request body size.
 - `WEBSOCKET_READ_LIMIT_BYTES`: maximum WebSocket message size.
 - `READ_HEADER_TIMEOUT`, `READ_TIMEOUT`, `WRITE_TIMEOUT`, `IDLE_TIMEOUT`: HTTP server timeout controls.
 - `ALLOW_PRIVATE_AI_PROVIDER_URLS`: defaults to `false`; keep it disabled unless a deployment intentionally verifies private/self-hosted AI endpoints.
-- AI provider settings are managed through the Admin console and persisted server-side. The deterministic analysis path does not require AI configuration.
+- AI provider settings are managed through the Admin console and persisted server-side. The deterministic analysis path does not require AI configuration. AI chat is limited per user and design to protect provider capacity; distributed deployments should additionally enforce provider quotas at the gateway.
 
 ## REST API
 
 - `GET /api/profile`
 - `POST /api/auth/login`
+- `GET /api/auth/config`
+  returns the enabled sign-in methods and the backend-enforced password policy used by password-creation screens.
+- `GET /api/auth/oidc/start`
+- `GET /api/auth/oidc/callback`
 - `POST /api/auth/logout`
 - `POST /api/setup/admin-password` completes one-time password setup for pre-existing admin users created before local passwords were introduced.
 - `GET /api/admin/ai-provider`
@@ -68,13 +80,19 @@ Production-relevant configuration:
 - `DELETE /api/workspaces/{workspaceID}/designs/{designID}`
 - `PATCH /api/workspaces/{workspaceID}/designs/{designID}`
 - `PUT /api/workspaces/{workspaceID}/designs/{designID}/document`
-- `POST /api/workspaces/{workspaceID}/designs/{designID}/analysis`
+- `POST /api/workspaces/{workspaceID}/designs/{designID}/analysis` accepts an optional saved `versionId` and review `focus` (`full`, `security`, `scalability`, `reliability`, `data`, `operability`, or `cost`).
+- `GET /api/workspaces/{workspaceID}/designs/{designID}/ai/conversations`
+- `POST /api/workspaces/{workspaceID}/designs/{designID}/ai/conversations`
+- `GET /api/workspaces/{workspaceID}/designs/{designID}/ai/conversations/{conversationID}/messages`
+- `POST /api/workspaces/{workspaceID}/designs/{designID}/ai/conversations/{conversationID}/messages`
 - `GET /api/workspaces/{workspaceID}/designs/{designID}/versions`
 - `GET /api/workspaces/{workspaceID}/designs/{designID}/docs`
 - `POST /api/workspaces/{workspaceID}/designs/{designID}/docs`
 - `GET /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}`
 - `PATCH /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}`
 - `DELETE /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}`
+
+AI conversations are persisted separately from the versioned design document. A conversation can be pinned to one saved version; otherwise it follows the current working design. The model receives deterministic analysis evidence and a structured design context, while returned component and connector references are validated against the selected document before storage.
 
 ## Test
 
@@ -106,10 +124,34 @@ Client upserts a design:
   "requestId": "request-id",
   "payload": {
     "design": {},
-    "canvasSnapshot": {}
+    "canvasSnapshot": {},
+    "baseRevision": "sha256:..."
   }
 }
 ```
+
+`baseRevision` is the SHA-256 revision returned with the last synchronized design. The repository compares it atomically with the current structured document. A stale REST save returns `409 Conflict`; a stale WebSocket save returns an `error` envelope with code `design_conflict` and the current server document. Metadata and lifecycle changes do not invalidate this document revision.
+
+The server also broadcasts design-scoped presence:
+
+```json
+{
+  "type": "presence.updated",
+  "payload": {
+    "members": [
+      {
+        "userId": "user-1",
+        "displayName": "Ada",
+        "role": "architect",
+        "designId": "design-1",
+        "sessionCount": 2
+      }
+    ]
+  }
+}
+```
+
+Presence is ephemeral and does not grant access. WebSocket authentication and the same workspace/design policies used by REST remain authoritative. Presence fanout is process-local today; multi-replica deployments need shared pub/sub before active sessions can span backend instances.
 
 Server broadcasts:
 
@@ -131,6 +173,7 @@ docker run --rm -p 8081:8081 system-design-evaluator-backend:local
 ```
 
 The image uses a multi-stage build and distroless non-root runtime.
+It includes `/migrate`, a separate operator command for inspecting and applying the exact migration set embedded in that release. See [PostgreSQL Operations and Migrations](postgres-operations.md).
 
 ## Modular Boundaries
 

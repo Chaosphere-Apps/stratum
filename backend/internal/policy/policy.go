@@ -47,13 +47,20 @@ func (a Authorizer) CanEditDesignDocument(ctx context.Context, user domain.User,
 	repo := a.provider.Repository()
 	design, err := repo.GetDesign(ctx, workspaceID, designID)
 	if err != nil {
-		return CanAccessWorkspace(ctx, repo, user, workspaceID, WorkspaceCreateDesign)
+		return false
 	}
 	return CanAccessDesign(ctx, repo, user, design, DesignEdit)
 }
 
 func CanAccessWorkspace(ctx context.Context, repo store.Repository, user domain.User, workspaceID string, permission string) bool {
 	if RoleAllows(user.Role, "admin") {
+		return true
+	}
+	workspace, err := repo.GetWorkspace(ctx, workspaceID)
+	if err != nil {
+		return false
+	}
+	if workspace.OwnerID != "" && workspace.OwnerID == user.ID {
 		return true
 	}
 	entries, err := repo.ListWorkspaceAccess(ctx, workspaceID)
@@ -63,9 +70,6 @@ func CanAccessWorkspace(ctx context.Context, repo store.Repository, user domain.
 	groupEntries, err := repo.ListWorkspaceGroupAccess(ctx, workspaceID)
 	if err != nil {
 		return false
-	}
-	if len(entries) == 0 && len(groupEntries) == 0 {
-		return RoleAllows(user.Role, "architect")
 	}
 	for _, entry := range entries {
 		if entry.UserID == user.ID && WorkspaceAccessAllows(entry, permission) {

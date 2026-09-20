@@ -12,6 +12,15 @@ type Config struct {
 	Addr                       string
 	AllowedOrigins             []string
 	DatabaseURL                string
+	DatabaseAutoMigrate        bool
+	DatabaseMaxConnections     int
+	DatabaseMinConnections     int
+	DatabaseMaxConnLifetime    time.Duration
+	DatabaseMaxConnIdleTime    time.Duration
+	DatabaseHealthCheckPeriod  time.Duration
+	MigrationLockTimeout       time.Duration
+	MigrationStatementTimeout  time.Duration
+	StartupTimeout             time.Duration
 	ShutdownTimeout            time.Duration
 	ReadHeaderTimeout          time.Duration
 	ReadTimeout                time.Duration
@@ -22,6 +31,11 @@ type Config struct {
 	AllowPrivateAIProviderURLs bool
 	StaticAssetsDir            string
 	SessionTTL                 time.Duration
+	PublicURL                  string
+	TrustedProxyCIDRs          []string
+	LoginAttemptsPerWindow     int
+	PasswordResetAttempts      int
+	AuthRateLimitWindow        time.Duration
 }
 
 func Load() Config {
@@ -29,6 +43,15 @@ func Load() Config {
 		Addr:                       envString("BACKEND_ADDR", ":8081"),
 		AllowedOrigins:             envList("ALLOWED_ORIGINS", []string{"http://localhost:*", "http://127.0.0.1:*", "http://[::1]:*"}),
 		DatabaseURL:                envString("DATABASE_URL", ""),
+		DatabaseAutoMigrate:        envBool("AUTO_MIGRATE", true),
+		DatabaseMaxConnections:     envInt("DATABASE_MAX_CONNECTIONS", 20),
+		DatabaseMinConnections:     envInt("DATABASE_MIN_CONNECTIONS", 2),
+		DatabaseMaxConnLifetime:    envDuration("DATABASE_MAX_CONN_LIFETIME", 30*time.Minute),
+		DatabaseMaxConnIdleTime:    envDuration("DATABASE_MAX_CONN_IDLE_TIME", 5*time.Minute),
+		DatabaseHealthCheckPeriod:  envDuration("DATABASE_HEALTH_CHECK_PERIOD", 30*time.Second),
+		MigrationLockTimeout:       envDuration("MIGRATION_LOCK_TIMEOUT", 30*time.Second),
+		MigrationStatementTimeout:  envDuration("MIGRATION_STATEMENT_TIMEOUT", 5*time.Minute),
+		StartupTimeout:             envDuration("STARTUP_TIMEOUT", 2*time.Minute),
 		ShutdownTimeout:            envDuration("SHUTDOWN_TIMEOUT", 10*time.Second),
 		ReadHeaderTimeout:          envDuration("READ_HEADER_TIMEOUT", 5*time.Second),
 		ReadTimeout:                envDuration("READ_TIMEOUT", 15*time.Second),
@@ -39,7 +62,24 @@ func Load() Config {
 		AllowPrivateAIProviderURLs: envBool("ALLOW_PRIVATE_AI_PROVIDER_URLS", false),
 		StaticAssetsDir:            envString("STATIC_ASSETS_DIR", ""),
 		SessionTTL:                 envDuration("SESSION_TTL", 12*time.Hour),
+		PublicURL:                  strings.TrimRight(envString("PUBLIC_URL", ""), "/"),
+		TrustedProxyCIDRs:          envList("TRUSTED_PROXY_CIDRS", nil),
+		LoginAttemptsPerWindow:     envInt("LOGIN_ATTEMPTS_PER_WINDOW", 10),
+		PasswordResetAttempts:      envInt("PASSWORD_RESET_ATTEMPTS_PER_WINDOW", 6),
+		AuthRateLimitWindow:        envDuration("AUTH_RATE_LIMIT_WINDOW", 5*time.Minute),
 	}
+}
+
+func envInt(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return parsed
 }
 
 func Logger() *slog.Logger {

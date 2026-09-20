@@ -65,9 +65,13 @@ export interface LinkedDesignMetadata {
 export interface EnterpriseAssetRefMetadata {
   assetId: string
   name: string
+  kind?: string
   type: string
   owner: string
   criticality: string
+  status?: string
+  replacementAssetId?: string
+  updateMessage?: string
   linkedAt: string
 }
 

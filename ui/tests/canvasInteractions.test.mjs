@@ -28,6 +28,26 @@ describe('canvas interactions', () => {
     assert.equal(interactions.sameStringSet(['a', 'b'], ['a']), false)
   })
 
+  it('removes components with attached connectors and journey references', () => {
+    const design = {
+      components: [{ id: 'a' }, { id: 'b' }, { id: 'c' }],
+      connectors: [
+        { id: 'ab', fromComponentId: 'a', toComponentId: 'b' },
+        { id: 'bc', fromComponentId: 'b', toComponentId: 'c' },
+      ],
+      journeys: [{ id: 'journey', steps: [
+        { id: 'one', componentId: 'a' },
+        { id: 'two', connectorId: 'ab' },
+        { id: 'three', componentId: 'c' },
+      ] }],
+    }
+    const next = interactions.removeComponentsFromDesign(design, ['a'])
+    assert.deepEqual(next.components.map((component) => component.id), ['b', 'c'])
+    assert.deepEqual(next.connectors.map((connector) => connector.id), ['bc'])
+    assert.deepEqual(next.journeys[0].steps.map((step) => step.id), ['three'])
+    assert.equal(interactions.removeComponentsFromDesign(next, ['missing']), next)
+  })
+
   it('assigns strong visual semantics to connector types', () => {
     const asyncProfile = connectorVisuals.connectorVisualProfile('asynchronous_event')
     assert.equal(asyncProfile.tone, 'async')

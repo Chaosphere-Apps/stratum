@@ -24,6 +24,18 @@ For Okta SSO, create an OIDC Web Application in Okta and configure Stratum with:
 - Admin and reviewer group names for role mapping.
 - Just-in-time provisioning, when users should be created from SSO claims on first sign-in.
 
+Stratum uses the OIDC authorization-code flow with PKCE. It validates the provider signature, issuer, audience, expiry, nonce, one-time state, and verified email before creating a session. Configure multifactor and phishing-resistant authentication policies in Okta; Stratum inherits those controls rather than maintaining a second MFA system.
+
+Access groups can map to values in the configured OIDC groups claim. On each SSO sign-in, mapped memberships are synchronized: newly asserted groups are added and stale mapped memberships are removed. Unmapped local groups are left unchanged.
+
+For production deployments:
+
+- Use HTTPS for the issuer, Stratum public URL, and redirect URI.
+- Set `PUBLIC_URL` to the canonical Stratum browser origin.
+- Register `/api/auth/oidc/callback` exactly as the sign-in redirect URI.
+- Keep at least one sign-in method enabled while changing configuration.
+- Verify discovery from the Admin Console before disabling local password sign-in.
+
 References:
 
 - Okta OIDC overview: https://developer.okta.com/docs/api/openapi/okta-oauth/guides/overview/

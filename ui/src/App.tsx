@@ -34,10 +34,12 @@ import {
   Save,
   Search,
   Send,
+  SlidersHorizontal,
   Sparkles,
   SkipBack,
   SkipForward,
   Trash2,
+  UsersRound,
 } from 'lucide-react'
 import { componentCatalog, getCatalogItem } from './catalog'
 import {
@@ -48,14 +50,19 @@ import {
 } from './app/navigation'
 import {
   buildPrimaryJourney,
-  catalogAssetUsageLabel,
   isBackendOfflineMessage,
   isPotentialCatalogMatch,
   normalizedCatalogLabel,
   stripHtml,
   versionStatusLabel,
 } from './app/designUtils'
+import {
+  catalogAssetStatusLabel,
+  isCatalogAssetActionable,
+} from './app/catalogGovernance'
 import { journeyStepKindLabel, journeyStepSummary } from './app/journeyModel'
+import { initialCanvasPanelState } from './app/canvasLayout'
+import { removeComponentsFromDesign } from './canvas/interactions'
 import { formatCompactDateTime } from './app/format'
 import { AppNavbar } from './components/AppNavbar'
 import { CatalogGlyph, isCatalogComponentType } from './components/CatalogGlyph'
@@ -91,6 +98,7 @@ import {
   fetchMCPConfig,
   fetchTelemetryIntegrationConfig,
   fetchCatalogAssets,
+  fetchAuthConfig,
   fetchSetupStatus,
   fetchSignInConfig,
   fetchUsers,
@@ -116,7 +124,9 @@ import {
   updateMCPConfig,
   updateTelemetryIntegrationConfig,
   updateSignInConfig,
+  BackendDesignConflictError,
   type BackendAIProviderConfig,
+  type BackendAIMessageReference,
   type BackendCatalogAsset,
   type BackendDesignComment,
   type BackendDesignDoc,
@@ -131,6 +141,8 @@ import {
   type BackendDesignVersion,
   type BackendDesignVersionStatus,
   type BackendUser,
+  type BackendWorkspaceShareInput,
+  type PublicAuthConfig,
   type DesignAnalysisReport,
 } from './backendApi'
 import { useBackendDesignSync, type BackendWorkspace } from './backendSync'
@@ -205,6 +217,9 @@ const StructuredView = lazy(() =>
 const ReactFlowCanvasProvider = lazy(() =>
   import('./canvas/ReactFlowCanvasProvider').then((module) => ({ default: module.ReactFlowCanvasProvider })),
 )
+const AIChatPanel = lazy(() =>
+  import('./components/AIChatPanel').then((module) => ({ default: module.AIChatPanel })),
+)
 
 type AIConnectionMetadata = BackendAIProviderConfig
 
@@ -254,12 +269,22 @@ export function App() {
   const [users, setUsers] = useState<BackendUser[]>([])
   const [activeUserId, setActiveUserId] = useState('')
   const [authenticated, setAuthenticated] = useState(false)
+	const [publicAuthConfig, setPublicAuthConfig] = useState<PublicAuthConfig>({
+		localPasswordEnabled: true,
+		ssoEnabled: false,
+		provider: 'okta',
+		ssoStartUrl: '',
+		passwordPolicy: { minimumLength: 8 },
+	})
   const [authChecked, setAuthChecked] = useState(false)
   const [setupRequired, setSetupRequired] = useState(false)
   const [passwordSetupRequired, setPasswordSetupRequired] = useState(false)
   const [setupAction, setSetupAction] = useState<'idle' | 'saving' | 'error'>('idle')
   const [authAction, setAuthAction] = useState<'idle' | 'saving' | 'error'>('idle')
-  const [authError, setAuthError] = useState<string | null>(null)
+  const [authError, setAuthError] = useState<string | null>(() => {
+		const code = new URLSearchParams(window.location.search).get('authError')
+		return code ? 'Single sign-on could not be completed. Please try again or contact your administrator.' : null
+	})
   const [resetAction, setResetAction] = useState<'idle' | 'saving' | 'error' | 'complete'>('idle')
   const [resetError, setResetError] = useState<string | null>(null)
   const [adminError, setAdminError] = useState<string | null>(null)
@@ -271,6 +296,8 @@ export function App() {
   const [catalogRailMode, setCatalogRailMode] = useState<'blocks' | 'catalog'>('blocks')
   const [catalogSearch, setCatalogSearch] = useState('')
   const [catalogTypeFilter, setCatalogTypeFilter] = useState('all')
+  const [catalogKindFilter, setCatalogKindFilter] = useState('all')
+  const [catalogStatusFilter, setCatalogStatusFilter] = useState('all')
   const [notifications, setNotifications] = useState<BackendNotification[]>([])
   const [notificationsOpen, setNotificationsOpen] = useState(false)
   const [homeWorkspaces, setHomeWorkspaces] = useState<BackendWorkspace[]>([defaultWorkspace])
@@ -280,7 +307,6 @@ export function App() {
   const [homeWorkspacePage, setHomeWorkspacePage] = useState<BackendPageInfo | null>(null)
   const [homeDesignPage, setHomeDesignPage] = useState<BackendPageInfo | null>(null)
   const [homeLoadingMore, setHomeLoadingMore] = useState<'workspaces' | 'designs' | null>(null)
-  const [newWorkspaceName, setNewWorkspaceName] = useState('')
   const [homeError, setHomeError] = useState<string | null>(null)
   const [homeAction, setHomeAction] = useState<'workspace' | 'design' | 'delete-workspace' | 'delete-design' | 'delete-version' | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
@@ -309,7 +335,12 @@ export function App() {
   const [canvasClipboard, setCanvasClipboard] = useState<CanvasClipboard | null>(null)
   const pasteCountRef = useRef(0)
   const [pendingConnector, setPendingConnector] = useState<PendingConnector | null>(null)
-  const [rightRailOpen, setRightRailOpen] = useState(true)
+  const initialPanelState = useMemo(
+    () => initialCanvasPanelState(typeof window === 'undefined' ? Number.POSITIVE_INFINITY : window.innerWidth),
+    [],
+  )
+  const [rightRailOpen, setRightRailOpen] = useState(initialPanelState.rightRailOpen)
+  const [leftRailOpen, setLeftRailOpen] = useState(initialPanelState.leftRailOpen)
   const [contextPanel, setContextPanel] = useState<ContextPanel>('requirements')
   const [toolbarExpanded, setToolbarExpanded] = useState(false)
   const [canvasMode, setCanvasMode] = useState<CanvasMode>('design')
@@ -324,6 +355,8 @@ export function App() {
   const [analysisReport, setAnalysisReport] = useState<DesignAnalysisReport | null>(null)
   const [analysisError, setAnalysisError] = useState<string | null>(null)
   const [analysisModalOpen, setAnalysisModalOpen] = useState(false)
+  const [analysisFocus, setAnalysisFocus] = useState('full')
+  const [aiChatOpen, setAIChatOpen] = useState(false)
   const [docsModalOpen, setDocsModalOpen] = useState(false)
   const [comments, setComments] = useState<BackendDesignComment[]>([])
   const [reviews, setReviews] = useState<BackendDesignReviewRequest[]>([])
@@ -335,6 +368,7 @@ export function App() {
   const [collaborationState, setCollaborationState] = useState<'idle' | 'loading' | 'saving' | 'error'>('idle')
   const [collaborationError, setCollaborationError] = useState<string | null>(null)
   const [collaborationOffline, setCollaborationOffline] = useState(false)
+  const [designConflict, setDesignConflict] = useState<BackendDesign | null>(null)
   const [aiConnection, setAIConnection] = useState<AIConnectionMetadata | null>(null)
   const [copilotOpen, setCopilotOpen] = useState(false)
   const [visionOpen, setVisionOpen] = useState(false)
@@ -342,6 +376,8 @@ export function App() {
   const designNameRef = useRef(designName)
   const autosaveTimer = useRef<number | null>(null)
   const hydratedRouteDesignRef = useRef<string | null>(null)
+  const lastSyncedDocumentRef = useRef('')
+  const serverRevisionRef = useRef('')
   const canvasDesign = versionPreview?.document ?? design
   const selectedComponent = useMemo(
     () => canvasDesign.components.find((component) => component.id === selectedComponentId) ?? null,
@@ -362,22 +398,34 @@ export function App() {
     return catalogAssets
       .filter((asset) => isCatalogComponentType(asset.type))
       .filter((asset) => catalogTypeFilter === 'all' || asset.type === catalogTypeFilter)
+      .filter((asset) => catalogKindFilter === 'all' || (asset.kind || 'component') === catalogKindFilter)
+      .filter((asset) => catalogStatusFilter === 'all' || (asset.status || 'active') === catalogStatusFilter)
       .filter((asset) => {
         if (!query) return true
-        return [asset.name, asset.normalizedName, asset.type, asset.owner, asset.description, asset.tags.join(' ')]
+        return [asset.name, asset.normalizedName, asset.type, asset.owner, asset.description, asset.tags.join(' '), asset.aliases.join(' ')]
           .some((value) => normalizedCatalogLabel(value).includes(query))
       })
       .sort((left, right) => {
         if (right.usedInDesignCount !== left.usedInDesignCount) return right.usedInDesignCount - left.usedInDesignCount
         return left.name.localeCompare(right.name)
       })
-  }, [catalogAssets, catalogSearch, catalogTypeFilter])
+  }, [catalogAssets, catalogKindFilter, catalogSearch, catalogStatusFilter, catalogTypeFilter])
   const catalogTypeOptions = useMemo(
     () =>
       componentCatalog.filter((item) =>
         catalogAssets.some((asset) => asset.type === item.type),
       ),
     [catalogAssets],
+  )
+  const catalogGovernanceWarnings = useMemo(
+    () =>
+      canvasDesign.components.flatMap((component) => {
+        const reference = component.metadata.enterpriseAsset
+        if (!reference) return []
+        const currentAsset = catalogAssets.find((asset) => asset.id === reference.assetId) ?? reference
+        return isCatalogAssetActionable(currentAsset) ? [{ component, asset: currentAsset }] : []
+      }),
+    [canvasDesign.components, catalogAssets],
   )
   const traversalFocus = useMemo(() => {
     if (!activeJourney || canvasMode !== 'journey') return null
@@ -392,7 +440,7 @@ export function App() {
       activeStepKind: activeStep?.kind ?? null,
     }
   }, [activeJourney, activeJourneyStepIndex, canvasMode])
-  const isCanvasReadOnly = canvasMode !== 'design' || Boolean(versionPreview)
+  const isCanvasReadOnly = canvasMode !== 'design' || Boolean(versionPreview) || Boolean(designConflict)
 
   useEffect(() => {
     designRef.current = design
@@ -401,6 +449,12 @@ export function App() {
   useEffect(() => {
     designNameRef.current = designName
   }, [designName])
+
+  useEffect(() => {
+    setAnalysisReport(null)
+    setAnalysisError(null)
+    setAnalysisState('idle')
+  }, [analysisFocus, selectedDesignId, versionPreview?.version.id])
 
   useEffect(() => {
     if (activeJourneyId && canvasDesign.journeys.some((journey) => journey.id === activeJourneyId)) return
@@ -424,8 +478,9 @@ export function App() {
 
     async function loadIdentity() {
       try {
-        const setup = await fetchSetupStatus()
+        const [setup, authConfig] = await Promise.all([fetchSetupStatus(), fetchAuthConfig()])
         if (cancelled) return
+		setPublicAuthConfig(authConfig)
         if (setup.storage) setStorageStatus(setup.storage)
         setSetupRequired(setup.requiresSetup)
         setPasswordSetupRequired(setup.requiresPasswordSetup)
@@ -538,8 +593,30 @@ export function App() {
     workspaceId: activeWorkspaceId,
     selectedDesignId,
     enabled: view === 'canvas' && Boolean(selectedDesignId),
-    onRemoteDesign: (remoteDesign) => {
-      loadDesignIntoWorkspace(remoteDesign.document, remoteDesign.name)
+    onRemoteDesign: (remoteDesign, source) => {
+      const localDocument = JSON.stringify(designRef.current)
+      const remoteDocument = JSON.stringify(remoteDesign.document)
+      const hasLocalChanges = Boolean(lastSyncedDocumentRef.current) && localDocument !== lastSyncedDocumentRef.current
+      if (source === 'remote' && hasLocalChanges && localDocument !== remoteDocument) {
+        setDesignConflict(remoteDesign)
+        setSaveState('error')
+        return
+      }
+      loadDesignIntoWorkspace(remoteDesign.document, remoteDesign.name, remoteDesign.documentRevision)
+    },
+    onDesignSynced: (syncedDesign) => {
+      serverRevisionRef.current = syncedDesign.documentRevision
+      lastSyncedDocumentRef.current = JSON.stringify(syncedDesign.document)
+      setDesignConflict(null)
+      setSaveState('saved')
+      // If the user continued editing while this save was in flight, serialize
+      // the next revision after the acknowledgement updates our base timestamp.
+      window.setTimeout(scheduleAutosave, 0)
+      window.setTimeout(() => setSaveState('idle'), 1200)
+    },
+    onConflict: (remoteDesign) => {
+      setDesignConflict(remoteDesign)
+      setSaveState('error')
     },
   })
 
@@ -552,6 +629,7 @@ export function App() {
       access: 'private',
       title: designName,
       document: design,
+      documentRevision: serverRevisionRef.current,
       updatedAt: design.updatedAt,
     } satisfies BackendDesign
     const merged = backendDesigns.map((backendDesign) => (backendDesign.id === design.id ? currentDesign : backendDesign))
@@ -593,7 +671,7 @@ export function App() {
         const response = await fetchWorkspaceDesign(workspaceId, designId)
         if (cancelled) return
         hydratedRouteDesignRef.current = routeDesignKey
-        loadDesignIntoWorkspace(response.design.document, response.design.name)
+        loadDesignIntoWorkspace(response.design.document, response.design.name, response.design.documentRevision)
       } catch (error) {
         if (!cancelled) {
           setHomeError(error instanceof Error ? error.message : 'Could not open design from URL')
@@ -890,8 +968,11 @@ export function App() {
     })
   }
 
-  function loadDesignIntoWorkspace(nextDesign: DesignDocument, metadataName?: string) {
+  function loadDesignIntoWorkspace(nextDesign: DesignDocument, metadataName?: string, serverRevision = '') {
     const normalizedDesign = normalizeDesignDocument(nextDesign)
+    lastSyncedDocumentRef.current = JSON.stringify(normalizedDesign)
+    if (serverRevision) serverRevisionRef.current = serverRevision
+    setDesignConflict(null)
     setVersionPreview(null)
     setDesign(normalizedDesign)
     setDesignName(metadataName || normalizedDesign.title || 'Untitled system design')
@@ -907,12 +988,29 @@ export function App() {
   function persistDesignToRealtime() {
     const currentDesign = designRef.current
     saveDesignDocument(currentDesign)
-    const saved = Boolean(selectedDesignId && backendSync.saveDesign(currentDesign))
+    if (designConflict || JSON.stringify(currentDesign) === lastSyncedDocumentRef.current) return false
+    const saved = Boolean(selectedDesignId && backendSync.saveDesign(currentDesign, serverRevisionRef.current))
     if (saved) markCurrentVersionDraft()
     return saved
   }
 
-  async function persistDesignToBackend(versionRemarks = '') {
+  function loadRemoteConflict() {
+    if (!designConflict) return
+    loadDesignIntoWorkspace(designConflict.document, designConflict.name, designConflict.documentRevision)
+    setSaveState('idle')
+  }
+
+  function overwriteRemoteConflict() {
+    if (!designConflict) return
+    const queued = backendSync.saveDesign(designRef.current, designConflict.documentRevision)
+    if (!queued) {
+      setCollaborationError('Reconnect before resolving this edit conflict.')
+      return
+    }
+    setSaveState('saving')
+  }
+
+  async function persistDesignToBackend(versionRemarks = '', versionId = '') {
     const currentDesign = designRef.current
     saveDesignDocument(currentDesign)
     if (!selectedDesignId) return false
@@ -921,16 +1019,24 @@ export function App() {
     try {
       const response = await saveDesignDocumentToBackend(activeWorkspaceId, selectedDesignId, {
         document: currentDesign,
+        baseRevision: serverRevisionRef.current,
         versionRemarks,
+        versionId,
       })
+      serverRevisionRef.current = response.design.documentRevision
+      lastSyncedDocumentRef.current = JSON.stringify(response.design.document)
+      setDesignConflict(null)
       setHomeDesigns((current) =>
         current.map((backendDesign) => (backendDesign.id === response.design.id ? response.design : backendDesign)),
       )
-      markCurrentVersionDraft(response.design.versionNumber, response.design.updatedAt)
+      if (response.version) {
+        setDesignVersions((current) => current.map((version) => version.id === response.version?.id ? response.version : version))
+      }
       setSaveState('saved')
       window.setTimeout(() => setSaveState('idle'), 1400)
       return true
     } catch (error) {
+      if (error instanceof BackendDesignConflictError) setDesignConflict(error.design)
       console.warn('Could not save design document', error)
       setHomeError(error instanceof Error ? error.message : 'Could not save design')
       setSaveState('error')
@@ -968,7 +1074,7 @@ export function App() {
     const remarks = saveRemarks.trim()
     const saved = saveVersionMode === 'new'
       ? await createManualVersion(remarks)
-      : await persistDesignToBackend(remarks)
+      : await persistDesignToBackend(remarks, designVersions[0]?.id ?? '')
     if (!saved) return
     setSaveDialogOpen(false)
     setSaveRemarks('')
@@ -1051,6 +1157,7 @@ export function App() {
 
   function scheduleAutosave() {
     if (!selectedDesignId) return
+    if (designConflict || JSON.stringify(designRef.current) === lastSyncedDocumentRef.current) return
     if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current)
     autosaveTimer.current = window.setTimeout(() => {
       autosaveTimer.current = null
@@ -1059,7 +1166,7 @@ export function App() {
   }
 
   function selectBackendDesign(backendDesign: BackendDesign) {
-    loadDesignIntoWorkspace(backendDesign.document, backendDesign.name)
+    loadDesignIntoWorkspace(backendDesign.document, backendDesign.name, backendDesign.documentRevision)
     hydratedRouteDesignRef.current = `${backendDesign.workspaceId}/${backendDesign.id}`
     applyRoute({ screen: 'design', workspaceId: backendDesign.workspaceId, designId: backendDesign.id })
   }
@@ -1094,11 +1201,12 @@ export function App() {
       })
       const savedResponse = await saveDesignDocumentToBackend(response.design.workspaceId, response.design.id, {
         document: nextDesign,
+        baseRevision: response.design.documentRevision,
       })
       const savedDesign = savedResponse.design
       setNewDesignBriefOpen(false)
       setHomeDesigns((current) => [savedDesign, ...current.filter((designItem) => designItem.id !== savedDesign.id)])
-      loadDesignIntoWorkspace(savedDesign.document, savedDesign.name)
+      loadDesignIntoWorkspace(savedDesign.document, savedDesign.name, savedDesign.documentRevision)
       hydratedRouteDesignRef.current = `${savedDesign.workspaceId}/${savedDesign.id}`
       applyRoute({ screen: 'design', workspaceId: savedDesign.workspaceId, designId: savedDesign.id })
     } catch (error) {
@@ -1143,6 +1251,7 @@ export function App() {
       const clonedDocument = cloneDesignDocumentForFork(sourceDocument, created.design.id, title)
       const saved = await saveDesignDocumentToBackend(created.design.workspaceId, created.design.id, {
         document: clonedDocument,
+        baseRevision: created.design.documentRevision,
         versionRemarks: selectedVersion
           ? `Cloned from ${cloneTarget.name || cloneTarget.document.title || 'design'} v${selectedVersion.versionNumber}`
           : `Cloned from ${cloneTarget.name || cloneTarget.document.title || 'design'}`,
@@ -1153,7 +1262,7 @@ export function App() {
       setCloneVersionId('current')
       setCloneTitle('')
       setCloneState('idle')
-      loadDesignIntoWorkspace(saved.design.document, saved.design.name)
+      loadDesignIntoWorkspace(saved.design.document, saved.design.name, saved.design.documentRevision)
       hydratedRouteDesignRef.current = `${saved.design.workspaceId}/${saved.design.id}`
       applyRoute({ screen: 'design', workspaceId: saved.design.workspaceId, designId: saved.design.id })
     } catch (error) {
@@ -1629,24 +1738,25 @@ export function App() {
     }
   }
 
-  async function handleCreateWorkspace() {
-    const name = newWorkspaceName.trim()
+  async function handleCreateWorkspace(input: { name: string; shares: BackendWorkspaceShareInput[] }) {
+    const name = input.name.trim()
     if (!name) {
       setHomeError('Workspace name is required')
-      return
+      return false
     }
-    if (homeAction) return
+    if (homeAction) return false
     try {
       setHomeAction('workspace')
       setHomeError(null)
-      const result = await createWorkspace(name)
+      const result = await createWorkspace({ name, shares: input.shares })
       setHomeWorkspaces((current) => [result.workspace, ...current.filter((workspace) => workspace.id !== result.workspace.id)])
       setHomeDesigns([])
-      setNewWorkspaceName('')
       applyRoute({ screen: 'workspace', workspaceId: result.workspace.id })
       await refreshHome(result.workspace.id)
+      return true
     } catch (error) {
       setHomeError(error instanceof Error ? error.message : 'Could not create workspace')
+      return false
     } finally {
       setHomeAction(null)
     }
@@ -1808,9 +1918,13 @@ export function App() {
         enterpriseAsset: {
           assetId: asset.id,
           name: asset.name,
+          kind: asset.kind,
           type: asset.type,
           owner: asset.owner,
           criticality: asset.criticality,
+          status: asset.status,
+          replacementAssetId: asset.replacementAssetId,
+          updateMessage: asset.updateMessage,
           linkedAt: new Date().toISOString(),
         },
       },
@@ -1969,26 +2083,7 @@ export function App() {
   function deleteComponents(componentIds: string[]) {
     if (!componentIds.length) return
     const ids = new Set(componentIds)
-    updateDesign((current) => {
-      const removedConnectorIds = new Set(
-        current.connectors
-          .filter((connector) => ids.has(connector.fromComponentId) || ids.has(connector.toComponentId))
-          .map((connector) => connector.id),
-      )
-      return {
-        ...current,
-        components: current.components.filter((component) => !ids.has(component.id)),
-        connectors: current.connectors.filter((connector) => !removedConnectorIds.has(connector.id)),
-        journeys: (current.journeys ?? []).map((journey) => ({
-          ...journey,
-          steps: journey.steps.filter(
-            (step) =>
-              (!step.componentId || !ids.has(step.componentId)) &&
-              (!step.connectorId || !removedConnectorIds.has(step.connectorId)),
-          ),
-        })),
-      }
-    })
+    updateDesign((current) => removeComponentsFromDesign(current, componentIds))
     if (selectedComponentId && ids.has(selectedComponentId)) setSelectedComponentId(null)
     setSelectedConnectorId(null)
     setSelectedComponentIds((current) => new Set([...current].filter((componentId) => !ids.has(componentId))))
@@ -2170,8 +2265,11 @@ export function App() {
     setAnalysisState('running')
     setAnalysisError(null)
     try {
-      await persistDesignToBackend()
-      const response = await analyzeDesign(activeWorkspaceId, selectedDesignId)
+      if (!versionPreview) await persistDesignToBackend()
+      const response = await analyzeDesign(activeWorkspaceId, selectedDesignId, {
+        versionId: versionPreview?.version.id,
+        focus: analysisFocus,
+      })
       setAnalysisReport(response.analysis)
       setAnalysisState('ready')
     } catch (error) {
@@ -2206,6 +2304,7 @@ export function App() {
           <FirstAdminOnboarding
             error={homeError}
             isSaving={setupAction === 'saving'}
+            passwordPolicy={publicAuthConfig.passwordPolicy}
             onCreate={(input) => void completeFirstAdmin(input)}
           />
         </Suspense>
@@ -2236,6 +2335,7 @@ export function App() {
             error={resetError}
             isSaving={resetAction === 'saving'}
             isComplete={resetAction === 'complete'}
+            passwordPolicy={publicAuthConfig.passwordPolicy}
             onReset={(input) => void completePasswordReset(input)}
             onSignIn={() => {
               setResetAction('idle')
@@ -2258,6 +2358,7 @@ export function App() {
             isSaving={authAction === 'saving'}
             onLogin={(input) => void signIn(input)}
             onSetInitialPassword={(input) => void completePasswordSetup(input)}
+			authConfig={publicAuthConfig}
           />
         </Suspense>
       </div>
@@ -2380,7 +2481,6 @@ export function App() {
             workspaces={homeWorkspaces}
             designs={homeDesigns}
             activeWorkspaceId={activeWorkspaceId}
-            newWorkspaceName={newWorkspaceName}
             workspaceSearch={homeWorkspaceSearch}
             designSearch={homeDesignSearch}
             workspacePage={homeWorkspacePage}
@@ -2388,7 +2488,6 @@ export function App() {
             loadingMore={homeLoadingMore}
             error={homeError}
             action={homeAction}
-            onWorkspaceNameChange={setNewWorkspaceName}
             onWorkspaceSearchChange={setHomeWorkspaceSearch}
             onDesignSearchChange={setHomeDesignSearch}
             onSelectWorkspace={(workspaceId) => applyRoute({ screen: 'workspace', workspaceId })}
@@ -2487,20 +2586,19 @@ export function App() {
       />
       <StatelessModeBanner storageStatus={storageStatus} />
       <Suspense fallback={<RouteLoading label="Loading canvas" />}>
-      <main className={`app-shell ${rightRailOpen ? '' : 'right-rail-collapsed'}`}>
+      <main className={`app-shell ${leftRailOpen ? '' : 'left-rail-collapsed'} ${rightRailOpen ? '' : 'right-rail-collapsed'}`}>
         <aside className="left-rail">
           <div className="brand">
             <Boxes size={20} />
             <div>
               <strong>{backendSync.workspace?.name ?? 'Guest Workspace'}</strong>
-              <span>{workspaceDesigns.length} design{workspaceDesigns.length === 1 ? '' : 's'}</span>
             </div>
           </div>
 
           <section className="panel-section">
             <div className="section-title catalog-heading">
-              <span>{catalogRailMode === 'blocks' ? 'Components' : 'Enterprise Catalog'}</span>
-              <small>{catalogRailMode === 'blocks' ? `${componentCatalog.length} blocks` : `${catalogAssets.length} assets`}</small>
+              <span>{catalogRailMode === 'blocks' ? 'Components' : 'Catalog'}</span>
+              <small>{catalogRailMode === 'blocks' ? componentCatalog.length : catalogAssets.length}</small>
             </div>
             <div className="rail-mode-switch" role="group" aria-label="Component source">
               <button className={catalogRailMode === 'blocks' ? 'active' : ''} type="button" onClick={() => setCatalogRailMode('blocks')}>
@@ -2547,28 +2645,40 @@ export function App() {
                   <input
                     value={catalogSearch}
                     onChange={(event) => setCatalogSearch(event.target.value)}
-                    placeholder="Search shared services..."
+                    placeholder="Search catalog..."
                   />
                 </label>
-                <select
-                  className="rail-select compact"
-                  value={catalogTypeFilter}
-                  onChange={(event) => setCatalogTypeFilter(event.target.value)}
-                  aria-label="Catalog type filter"
-                >
-                  <option value="all">All asset types</option>
-                  {catalogTypeOptions.map((item) => (
-                    <option key={item.type} value={item.type}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
+                <details className="catalog-filter-menu">
+                  <summary>
+                    <SlidersHorizontal size={14} />
+                    <span>Filters</span>
+                    {(catalogTypeFilter !== 'all' || catalogKindFilter !== 'all' || catalogStatusFilter !== 'all') ? <b>Active</b> : null}
+                  </summary>
+                  <div>
+                    <select className="rail-select compact" value={catalogTypeFilter} onChange={(event) => setCatalogTypeFilter(event.target.value)} aria-label="Catalog type filter">
+                      <option value="all">All asset types</option>
+                      {catalogTypeOptions.map((item) => <option key={item.type} value={item.type}>{item.label}</option>)}
+                    </select>
+                    <select className="rail-select compact" value={catalogKindFilter} onChange={(event) => setCatalogKindFilter(event.target.value)} aria-label="Catalog kind filter">
+                      <option value="all">Components and systems</option>
+                      <option value="component">Components</option>
+                      <option value="system">Systems</option>
+                    </select>
+                    <select className="rail-select compact" value={catalogStatusFilter} onChange={(event) => setCatalogStatusFilter(event.target.value)} aria-label="Catalog status filter">
+                      <option value="all">All lifecycle states</option>
+                      <option value="active">Active</option>
+                      <option value="proposed">Proposed</option>
+                      <option value="deprecated">Deprecated</option>
+                      <option value="retired">Retired</option>
+                    </select>
+                  </div>
+                </details>
                 <div className="enterprise-catalog-list">
                   {filteredCatalogAssets.length ? filteredCatalogAssets.map((asset) => {
                     const item = getCatalogItem(asset.type as ComponentType)
                     return (
                       <button
-                        className="enterprise-catalog-item"
+                        className={`enterprise-catalog-item ${isCatalogAssetActionable(asset) ? 'governance-warning' : ''}`}
                         key={asset.id}
                         draggable={!isCanvasReadOnly}
                         disabled={isCanvasReadOnly}
@@ -2586,8 +2696,14 @@ export function App() {
                         <span>
                           <strong>{asset.name}</strong>
                           <small>{item.label} • {asset.owner || 'No owner'}</small>
+                          {(asset.kind === 'system' || asset.status !== 'active') ? (
+                            <span className="catalog-item-badges">
+                              {asset.kind === 'system' ? <b className="catalog-mini-pill system">System</b> : null}
+                              {asset.status !== 'active' ? <b className={`catalog-mini-pill ${asset.status}`}>{catalogAssetStatusLabel(asset.status)}</b> : null}
+                            </span>
+                          ) : null}
                         </span>
-                        <em>{catalogAssetUsageLabel(asset.usedInDesignCount)}</em>
+                        <em>{asset.usedInDesignCount} use{asset.usedInDesignCount === 1 ? '' : 's'}</em>
                       </button>
                     )
                   }) : (
@@ -2601,14 +2717,13 @@ export function App() {
             )}
           </section>
 
-          <section className="panel-section draft-actions">
-            <button className="command" onClick={exportDesign}>
-              <Download size={16} /> Export JSON
-            </button>
-            <button className="command ghost" onClick={resetDraft}>
-              <RotateCcw size={16} /> Reset local draft
-            </button>
-          </section>
+          <details className="rail-utilities">
+            <summary>Design actions</summary>
+            <div>
+              <button className="command" onClick={exportDesign}><Download size={16} /> Export JSON</button>
+              <button className="command ghost" onClick={resetDraft}><RotateCcw size={16} /> Reset local draft</button>
+            </div>
+          </details>
         </aside>
 
         <section className="workspace">
@@ -2634,9 +2749,49 @@ export function App() {
                 </button>
               ) : null}
               {analysisState === 'error' ? <span className="save-error">Analysis failed</span> : null}
+              {backendSync.presence.some((member) => member.userId !== activeUserId || member.sessionCount > 1) ? (
+                <div className="collaboration-presence" title="People currently editing this design">
+                  <UsersRound size={15} />
+                  <div className="presence-avatars" aria-label="Active collaborators">
+                    {backendSync.presence.slice(0, 3).map((member) => (
+                      <span key={`${member.userId}:${member.designId}`} title={`${member.displayName}${member.userId === activeUserId ? ' (you)' : ''}${member.sessionCount > 1 ? ` · ${member.sessionCount} tabs` : ''}`}>
+                        {(member.displayName || '?').trim().charAt(0).toUpperCase()}
+                      </span>
+                    ))}
+                  </div>
+                  <strong>{backendSync.presence.reduce((total, member) => total + member.sessionCount, 0)} editing</strong>
+                </div>
+              ) : null}
             </div>
-          </header>
+        </header>
         <div className="canvas-host">
+          {designConflict ? (
+            <div className="design-conflict-banner" role="alert">
+              <div>
+                <strong>Another editor saved changes</strong>
+                <span>Your local work is preserved. Choose which document should continue before editing resumes.</span>
+              </div>
+              <button type="button" onClick={loadRemoteConflict}>Load their changes</button>
+              <button className="danger" type="button" onClick={overwriteRemoteConflict}>Keep my changes</button>
+            </div>
+          ) : null}
+          {catalogGovernanceWarnings.length ? (
+            <button
+              className="canvas-governance-banner"
+              type="button"
+              onClick={() => {
+                const first = catalogGovernanceWarnings[0]
+                setSelectedComponentId(first.component.id)
+                setSelectedComponentIds(new Set([first.component.id]))
+                setContextPanel('inspector')
+                setRightRailOpen(true)
+              }}
+            >
+              <span>{catalogGovernanceWarnings.length}</span>
+              <strong>catalog asset{catalogGovernanceWarnings.length === 1 ? '' : 's'} need attention</strong>
+              <small>Review deprecated or retired dependencies</small>
+            </button>
+          ) : null}
           <div className={`floating-canvas-toolbar ${toolbarExpanded ? 'expanded' : 'collapsed'}`} role="toolbar" aria-label="Canvas actions">
             {!toolbarExpanded ? (
               <button className="toolbar-expander" type="button" onClick={() => setToolbarExpanded(true)} title="Open canvas tools">
@@ -2714,6 +2869,9 @@ export function App() {
             >
               <Sparkles size={16} /> <span>{analysisState === 'running' ? 'Analysing' : 'Analyse'}</span>
             </button>
+            <button className="command compact" onClick={() => setAIChatOpen(true)} disabled={!selectedDesignId} title="Ask the architecture copilot">
+              <MessageSquare size={16} /> <span>Ask AI</span>
+            </button>
             <button className="command compact" onClick={() => setVisionOpen(true)} disabled={!selectedDesignId} title="Import from image">
               <ImageIcon size={16} /> <span>Vision</span>
             </button>
@@ -2732,6 +2890,16 @@ export function App() {
               <button type="button" onClick={exitVersionPreview}>Back to editable draft</button>
             </div>
           ) : null}
+          <button
+            className={`component-rail-toggle ${leftRailOpen ? 'open' : 'closed'}`}
+            type="button"
+            onClick={() => setLeftRailOpen((value) => !value)}
+            title={leftRailOpen ? 'Compact component palette' : 'Open component palette'}
+            aria-label={leftRailOpen ? 'Compact component palette' : 'Open component palette'}
+            aria-expanded={leftRailOpen}
+          >
+            {leftRailOpen ? <ChevronLeft size={17} /> : <ChevronRight size={17} />}
+          </button>
           <button
             className={`context-rail-toggle ${rightRailOpen ? 'open' : 'closed'}`}
             type="button"
@@ -2774,8 +2942,8 @@ export function App() {
         <aside className="right-rail">
           <div className="context-drawer-header">
             <div>
-              <strong>Workspace context</strong>
-              <span>Inspect, explain, and review this system</span>
+              <strong>Context</strong>
+              <span>{contextPanel === 'inspector' ? 'Selection details' : contextPanel === 'requirements' ? 'System requirements' : contextPanel === 'journey' ? 'Request journeys' : 'Review activity'}</span>
             </div>
           </div>
           <div className="context-tabs" role="tablist" aria-label="Canvas context">
@@ -2907,14 +3075,46 @@ export function App() {
       ) : null}
       {analysisModalOpen ? (
         <AnalysisModal
-          design={design}
+          design={canvasDesign}
           docs={designDocs}
           analysisState={analysisState}
           analysisReport={analysisReport}
           analysisError={analysisError}
+          focus={analysisFocus}
+          targetLabel={versionPreview ? `Saved version v${versionPreview.version.versionNumber}` : 'Current working design'}
           onClose={() => setAnalysisModalOpen(false)}
+          onFocusChange={setAnalysisFocus}
           onRunAnalysis={() => void runAnalysis()}
         />
+      ) : null}
+      {aiChatOpen && selectedDesignId ? (
+        <Suspense fallback={null}>
+          <AIChatPanel
+            workspaceId={activeWorkspaceId}
+            designId={selectedDesignId}
+            designName={designName}
+            versions={designVersions}
+            currentVersionId={versionPreview?.version.id}
+            providerEnabled={Boolean(aiConnection?.enabled && aiConnection.apiKeySet)}
+            onClose={() => setAIChatOpen(false)}
+            onSelectReference={(reference: BackendAIMessageReference) => {
+              setAIChatOpen(false)
+              if (reference.kind === 'component') {
+                setSelectedComponentId(reference.id)
+                setSelectedComponentIds(new Set([reference.id]))
+                setSelectedConnectorId(null)
+                setSelectedConnectorIds(new Set())
+              } else {
+                setSelectedConnectorId(reference.id)
+                setSelectedConnectorIds(new Set([reference.id]))
+                setSelectedComponentId(null)
+                setSelectedComponentIds(new Set())
+              }
+              setContextPanel('inspector')
+              setRightRailOpen(true)
+            }}
+          />
+        </Suspense>
       ) : null}
       {saveDialogOpen ? (
         <SaveDesignModal
@@ -3002,7 +3202,10 @@ function AnalysisModal({
   analysisState,
   analysisReport,
   analysisError,
+  focus,
+  targetLabel,
   onClose,
+  onFocusChange,
   onRunAnalysis,
 }: {
   design: DesignDocument
@@ -3010,7 +3213,10 @@ function AnalysisModal({
   analysisState: 'idle' | 'running' | 'ready' | 'error'
   analysisReport: DesignAnalysisReport | null
   analysisError: string | null
+  focus: string
+  targetLabel: string
   onClose: () => void
+  onFocusChange: (focus: string) => void
   onRunAnalysis: () => void
 }) {
   return (
@@ -3033,6 +3239,23 @@ function AnalysisModal({
         </div>
 
         <div className="analysis-modal-body">
+          <section className="analysis-review-controls" aria-label="Analysis scope">
+            <div><span>Review target</span><strong>{targetLabel}</strong></div>
+            <SelectField
+              label="Review lens"
+              value={focus}
+              onChange={onFocusChange}
+              values={[
+                { value: 'full', label: 'Complete architecture' },
+                { value: 'security', label: 'Security and trust' },
+                { value: 'scalability', label: 'Scale and capacity' },
+                { value: 'reliability', label: 'Reliability and failure modes' },
+                { value: 'data', label: 'Data and consistency' },
+                { value: 'operability', label: 'Operations and observability' },
+                { value: 'cost', label: 'Cost efficiency' },
+              ]}
+            />
+          </section>
           <DesignAnalysisBase design={design} docs={docs} />
 
           <section className="analysis-result-panel analysis-report-panel">
@@ -3643,101 +3866,27 @@ function RequirementPanel({
           <span>Lightweight MVP capture</span>
         </div>
       </div> : null}
-      <TextareaField
-        label="Use case"
-        value={brief.useCase}
-        disabled={readOnly}
-        onChange={(value) =>
-          onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, useCase: value } }))
-        }
-      />
-      <TextareaField
-        label="Functional requirements"
-        value={brief.functionalRequirements}
-        disabled={readOnly}
-        onChange={(value) =>
-          onChange((current) => ({
-            ...current,
-            requirementBrief: { ...current.requirementBrief, functionalRequirements: value },
-          }))
-        }
-      />
-      <NumberField
-        label="Target RPS"
-        value={brief.targetRps}
-        disabled={readOnly}
-        onChange={(targetRps) =>
-          onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, targetRps } }))
-        }
-      />
-      <Field
-        label="Availability"
-        value={brief.availabilityRequirement}
-        disabled={readOnly}
-        onChange={(availabilityRequirement) =>
-          onChange((current) => ({
-            ...current,
-            requirementBrief: { ...current.requirementBrief, availabilityRequirement },
-          }))
-        }
-      />
-      <Field
-        label="SLA"
-        value={brief.sla}
-        disabled={readOnly}
-        onChange={(sla) => onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, sla } }))}
-      />
-      <TextareaField
-        label="Consistency requirements"
-        value={brief.consistencyNotes}
-        disabled={readOnly}
-        onChange={(value) =>
-          onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, consistencyNotes: value } }))
-        }
-      />
-      <TextareaField
-        label="Non-functional requirements"
-        value={brief.nonFunctionalRequirements}
-        disabled={readOnly}
-        onChange={(value) =>
-          onChange((current) => ({
-            ...current,
-            requirementBrief: { ...current.requirementBrief, nonFunctionalRequirements: value },
-          }))
-        }
-      />
-      <TextareaField
-        label="Traffic notes"
-        value={brief.trafficNotes}
-        disabled={readOnly}
-        onChange={(value) =>
-          onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, trafficNotes: value } }))
-        }
-      />
-      <TextareaField
-        label="Primary actors"
-        value={brief.primaryActors}
-        disabled={readOnly}
-        onChange={(value) =>
-          onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, primaryActors: value } }))
-        }
-      />
-      <TextareaField
-        label="Problem statement"
-        value={brief.problemStatement}
-        disabled={readOnly}
-        onChange={(value) =>
-          onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, problemStatement: value } }))
-        }
-      />
-      <TextareaField
-        label="Open questions"
-        value={brief.openQuestions}
-        disabled={readOnly}
-        onChange={(value) =>
-          onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, openQuestions: value } }))
-        }
-      />
+      <details className="requirement-group" open>
+        <summary>Core requirements <span>Use case, load, availability</span></summary>
+        <div className="requirement-group-fields">
+          <TextareaField label="Use case" value={brief.useCase} disabled={readOnly} onChange={(value) => onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, useCase: value } }))} />
+          <TextareaField label="Functional requirements" value={brief.functionalRequirements} disabled={readOnly} onChange={(value) => onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, functionalRequirements: value } }))} />
+          <NumberField label="Target RPS" value={brief.targetRps} disabled={readOnly} onChange={(targetRps) => onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, targetRps } }))} />
+          <Field label="Availability" value={brief.availabilityRequirement} disabled={readOnly} onChange={(availabilityRequirement) => onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, availabilityRequirement } }))} />
+          <Field label="SLA" value={brief.sla} disabled={readOnly} onChange={(sla) => onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, sla } }))} />
+          <TextareaField label="Consistency requirements" value={brief.consistencyNotes} disabled={readOnly} onChange={(value) => onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, consistencyNotes: value } }))} />
+        </div>
+      </details>
+      <details className="requirement-group">
+        <summary>Supporting context <span>Actors, traffic, open questions</span></summary>
+        <div className="requirement-group-fields">
+          <TextareaField label="Non-functional requirements" value={brief.nonFunctionalRequirements} disabled={readOnly} onChange={(value) => onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, nonFunctionalRequirements: value } }))} />
+          <TextareaField label="Traffic notes" value={brief.trafficNotes} disabled={readOnly} onChange={(value) => onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, trafficNotes: value } }))} />
+          <TextareaField label="Primary actors" value={brief.primaryActors} disabled={readOnly} onChange={(value) => onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, primaryActors: value } }))} />
+          <TextareaField label="Problem statement" value={brief.problemStatement} disabled={readOnly} onChange={(value) => onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, problemStatement: value } }))} />
+          <TextareaField label="Open questions" value={brief.openQuestions} disabled={readOnly} onChange={(value) => onChange((current) => ({ ...current, requirementBrief: { ...current.requirementBrief, openQuestions: value } }))} />
+        </div>
+      </details>
     </div>
   )
 }

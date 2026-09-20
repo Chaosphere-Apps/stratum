@@ -31,6 +31,7 @@ import {
 import { componentCatalog, getCatalogItem } from '../catalog'
 import { adminSectionCopy, adminSectionOrder, type AdminSection } from '../app/navigation'
 import { catalogAssetUsageLabel, isPotentialCatalogMatch, normalizedCatalogLabel } from '../app/designUtils'
+import { catalogAssetKindLabel, catalogAssetStatusLabel, isCatalogAssetActionable } from '../app/catalogGovernance'
 import { formatCompactDateTime, initialsFor, roleLabel, userDisplayName } from '../app/format'
 import {
   createAccessGroup,
@@ -53,6 +54,7 @@ import {
   revokeWorkspaceAccess,
   revokeWorkspaceGroupAccess,
   updateAccessGroup,
+  verifySignInConfig,
   type BackendAccessGroup,
   type BackendAccessGroupMember,
   type BackendAIProviderConfig,
@@ -144,7 +146,19 @@ export function AdminConsole({
   onSaveAIProvider: (config: Partial<BackendAIProviderConfig> & { apiKey?: string }) => void
   onSaveMCP: (config: BackendMCPConfig) => void
   onSaveTelemetry: (config: Partial<BackendTelemetryIntegrationConfig> & { secret?: string }) => void
-  onAddCatalogAsset: (input: { name: string; type: string; owner?: string; description?: string; criticality?: string; tags?: string[] }) => Promise<BackendCatalogAsset>
+  onAddCatalogAsset: (input: {
+    name: string
+    kind?: string
+    type: string
+    owner?: string
+    description?: string
+    criticality?: string
+    status?: string
+    aliases?: string[]
+    replacementAssetId?: string
+    updateMessage?: string
+    tags?: string[]
+  }) => Promise<BackendCatalogAsset>
   onSaveCatalogAsset: (asset: BackendCatalogAsset) => Promise<void>
   onDeleteCatalogAsset: (assetId: string) => Promise<void>
   onRefreshStorage: () => Promise<BackendStorageStatus>
@@ -155,7 +169,18 @@ export function AdminConsole({
   onSelectSection: (section: AdminSection) => void
 }) {
   const [newUser, setNewUser] = useState({ displayName: '', email: '', role: 'member' })
-  const [newAsset, setNewAsset] = useState({ name: '', type: 'compute.service', owner: '', description: '', criticality: 'medium' })
+  const [newAsset, setNewAsset] = useState({
+    name: '',
+    kind: 'component',
+    type: 'compute.service',
+    owner: '',
+    description: '',
+    criticality: 'medium',
+    status: 'active',
+    aliasesText: '',
+    replacementAssetId: '',
+    updateMessage: '',
+  })
   const [draftUsers, setDraftUsers] = useState<BackendUser[]>(users)
   const [draftAssets, setDraftAssets] = useState<BackendCatalogAsset[]>(catalogAssets)
   const [editingUserId, setEditingUserId] = useState<string | null>(null)
@@ -165,6 +190,8 @@ export function AdminConsole({
   const [userError, setUserError] = useState<string | null>(null)
   const [assetError, setAssetError] = useState<string | null>(null)
   const [signInDraft, setSignInDraft] = useState<(BackendSignInConfig & { clientSecret?: string }) | null>(signInConfig)
+	const [signInVerification, setSignInVerification] = useState<'idle' | 'checking' | 'verified' | 'error'>('idle')
+	const [signInVerificationMessage, setSignInVerificationMessage] = useState('')
   const [aiDraft, setAIDraft] = useState<(BackendAIProviderConfig & { apiKey?: string }) | null>(aiProviderConfig)
   const [mcpDraft, setMCPDraft] = useState<BackendMCPConfig | null>(mcpConfig)
   const [telemetryDraft, setTelemetryDraft] = useState<(BackendTelemetryIntegrationConfig & { secret?: string }) | null>(telemetryConfig)
@@ -175,6 +202,8 @@ export function AdminConsole({
   const [storageError, setStorageError] = useState<string | null>(null)
   const [adminSearch, setAdminSearch] = useState('')
   const [catalogAdminSearch, setCatalogAdminSearch] = useState('')
+  const [catalogKindFilter, setCatalogKindFilter] = useState('all')
+  const [catalogStatusFilter, setCatalogStatusFilter] = useState('all')
   const [accessScope, setAccessScope] = useState<'workspace' | 'design'>('workspace')
   const [accessWorkspaceId, setAccessWorkspaceId] = useState(workspaces[0]?.id ?? '')
   const [accessDesignId, setAccessDesignId] = useState('')
@@ -207,6 +236,19 @@ export function AdminConsole({
 
   useEffect(() => setDraftUsers(users), [users])
   useEffect(() => setDraftAssets(catalogAssets), [catalogAssets])
+
+	async function verifyOIDC() {
+		setSignInVerification('checking')
+		setSignInVerificationMessage('')
+		try {
+			await verifySignInConfig()
+			setSignInVerification('verified')
+			setSignInVerificationMessage('OIDC discovery and provider metadata verified.')
+		} catch (error) {
+			setSignInVerification('error')
+			setSignInVerificationMessage(error instanceof Error ? error.message : 'OIDC verification failed')
+		}
+	}
   useEffect(() => setSignInDraft(signInConfig), [signInConfig])
   useEffect(() => setAIDraft(aiProviderConfig), [aiProviderConfig])
   useEffect(() => setMCPDraft(mcpConfig), [mcpConfig])
@@ -280,8 +322,10 @@ export function AdminConsole({
   const accessGrantHasPermissions = accessScope === 'workspace' ? workspaceGrantHasPermissions : designGrantHasPermissions
   const catalogQuery = normalizedCatalogLabel(catalogAdminSearch)
   const filteredDraftAssets = draftAssets.filter((asset) => {
+    if (catalogKindFilter !== 'all' && (asset.kind || 'component') !== catalogKindFilter) return false
+    if (catalogStatusFilter !== 'all' && (asset.status || 'active') !== catalogStatusFilter) return false
     if (!catalogQuery) return true
-    return [asset.name, asset.type, asset.owner, asset.description, asset.normalizedName].some((value) =>
+    return [asset.name, asset.type, asset.owner, asset.description, asset.normalizedName, asset.aliases?.join(' ')].some((value) =>
       normalizedCatalogLabel(value ?? '').includes(catalogQuery),
     )
   })
@@ -432,8 +476,30 @@ export function AdminConsole({
     }
     setAssetError(null)
     try {
-      await onAddCatalogAsset(newAsset)
-      setNewAsset({ name: '', type: 'compute.service', owner: '', description: '', criticality: 'medium' })
+      await onAddCatalogAsset({
+        name: newAsset.name,
+        kind: newAsset.kind,
+        type: newAsset.type,
+        owner: newAsset.owner,
+        description: newAsset.description,
+        criticality: newAsset.criticality,
+        status: newAsset.status,
+        aliases: newAsset.aliasesText.split(',').map((alias) => alias.trim()).filter(Boolean),
+        replacementAssetId: newAsset.replacementAssetId,
+        updateMessage: newAsset.updateMessage,
+      })
+      setNewAsset({
+        name: '',
+        kind: 'component',
+        type: 'compute.service',
+        owner: '',
+        description: '',
+        criticality: 'medium',
+        status: 'active',
+        aliasesText: '',
+        replacementAssetId: '',
+        updateMessage: '',
+      })
     } catch (error) {
       setAssetError(error instanceof Error ? error.message : 'Could not add catalog asset.')
     }
@@ -1556,7 +1622,8 @@ export function AdminConsole({
             <div className="catalog-kpis">
               <article><strong>{catalogAssets.length}</strong><span>Catalog assets</span></article>
               <article><strong>{catalogAssets.reduce((count, asset) => count + asset.usedInDesignCount, 0)}</strong><span>Design links</span></article>
-              <article><strong>{catalogAssets.filter((asset) => asset.criticality === 'critical' || asset.criticality === 'high').length}</strong><span>High criticality</span></article>
+              <article><strong>{catalogAssets.filter((asset) => asset.kind === 'system').length}</strong><span>Systems</span></article>
+              <article><strong>{catalogAssets.filter(isCatalogAssetActionable).length}</strong><span>Needs attention</span></article>
             </div>
             <label className="admin-command-search catalog-search">
               <Search size={17} />
@@ -1573,6 +1640,13 @@ export function AdminConsole({
               <Field label="Asset name" value={newAsset.name} onChange={(name) => setNewAsset((current) => ({ ...current, name }))} />
               <div className="admin-field-grid two">
                 <label className="field">
+                  <span>Kind</span>
+                  <select value={newAsset.kind} onChange={(event) => setNewAsset((current) => ({ ...current, kind: event.target.value }))}>
+                    <option value="component">Component</option>
+                    <option value="system">System</option>
+                  </select>
+                </label>
+                <label className="field">
                   <span>Type</span>
                   <select value={newAsset.type} onChange={(event) => setNewAsset((current) => ({ ...current, type: event.target.value }))}>
                     {componentCatalog.filter((item) => item.type !== 'note.sticky' && item.type !== 'frame.cloud' && item.type !== 'design.link').map((item) => (
@@ -1582,6 +1656,8 @@ export function AdminConsole({
                     ))}
                   </select>
                 </label>
+              </div>
+              <div className="admin-field-grid two">
                 <label className="field">
                   <span>Criticality</span>
                   <select value={newAsset.criticality} onChange={(event) => setNewAsset((current) => ({ ...current, criticality: event.target.value }))}>
@@ -1591,8 +1667,28 @@ export function AdminConsole({
                     <option value="critical">Critical</option>
                   </select>
                 </label>
+                <label className="field">
+                  <span>Status</span>
+                  <select value={newAsset.status} onChange={(event) => setNewAsset((current) => ({ ...current, status: event.target.value }))}>
+                    <option value="active">Active</option>
+                    <option value="proposed">Proposed</option>
+                    <option value="deprecated">Deprecated</option>
+                    <option value="retired">Retired</option>
+                  </select>
+                </label>
               </div>
               <Field label="Owner" value={newAsset.owner} onChange={(owner) => setNewAsset((current) => ({ ...current, owner }))} />
+              <Field label="Aliases" value={newAsset.aliasesText} onChange={(aliasesText) => setNewAsset((current) => ({ ...current, aliasesText }))} />
+              {newAsset.status === 'deprecated' || newAsset.status === 'retired' ? (
+                <div className="catalog-advisory-fields">
+                  <Field label="Replacement asset ID" value={newAsset.replacementAssetId} onChange={(replacementAssetId) => setNewAsset((current) => ({ ...current, replacementAssetId }))} />
+                  <TextareaField
+                    label="Update advisory"
+                    value={newAsset.updateMessage}
+                    onChange={(updateMessage) => setNewAsset((current) => ({ ...current, updateMessage }))}
+                  />
+                </div>
+              ) : null}
               <TextareaField
                 label="Description"
                 value={newAsset.description}
@@ -1625,11 +1721,38 @@ export function AdminConsole({
                 <span>Canonical assets</span>
                 <small>{filteredDraftAssets.length} visible</small>
               </div>
+              <div className="catalog-library-filters">
+                <div className="segmented-control" aria-label="Catalog kind">
+                  {[
+                    ['all', 'All'],
+                    ['component', 'Components'],
+                    ['system', 'Systems'],
+                  ].map(([value, label]) => (
+                    <button key={value} type="button" className={catalogKindFilter === value ? 'active' : ''} onClick={() => setCatalogKindFilter(value)}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <select value={catalogStatusFilter} onChange={(event) => setCatalogStatusFilter(event.target.value)} aria-label="Catalog status">
+                  <option value="all">All statuses</option>
+                  <option value="active">Active</option>
+                  <option value="proposed">Proposed</option>
+                  <option value="deprecated">Deprecated</option>
+                  <option value="retired">Retired</option>
+                </select>
+              </div>
               <div className="catalog-admin-list modern">
             {filteredDraftAssets.length ? filteredDraftAssets.map((asset) => (
               editingAssetId === asset.id ? (
                 <article className="catalog-admin-row editing" key={asset.id}>
                   <Field label="Name" value={asset.name} onChange={(name) => updateDraftAsset(asset, { name })} />
+                  <label className="field">
+                    <span>Kind</span>
+                    <select value={asset.kind || 'component'} onChange={(event) => updateDraftAsset(asset, { kind: event.target.value })}>
+                      <option value="component">Component</option>
+                      <option value="system">System</option>
+                    </select>
+                  </label>
                   <label className="field">
                     <span>Type</span>
                     <select value={asset.type} onChange={(event) => updateDraftAsset(asset, { type: event.target.value })}>
@@ -1650,6 +1773,22 @@ export function AdminConsole({
                       <option value="critical">Critical</option>
                     </select>
                   </label>
+                  <label className="field">
+                    <span>Status</span>
+                    <select value={asset.status || 'active'} onChange={(event) => updateDraftAsset(asset, { status: event.target.value })}>
+                      <option value="active">Active</option>
+                      <option value="proposed">Proposed</option>
+                      <option value="deprecated">Deprecated</option>
+                      <option value="retired">Retired</option>
+                    </select>
+                  </label>
+                  <Field label="Aliases" value={(asset.aliases ?? []).join(', ')} onChange={(aliases) => updateDraftAsset(asset, { aliases: aliases.split(',').map((alias) => alias.trim()).filter(Boolean) })} />
+                  {(asset.status === 'deprecated' || asset.status === 'retired') ? (
+                    <>
+                      <Field label="Replacement asset ID" value={asset.replacementAssetId || ''} onChange={(replacementAssetId) => updateDraftAsset(asset, { replacementAssetId })} />
+                      <TextareaField label="Update advisory" value={asset.updateMessage || ''} onChange={(updateMessage) => updateDraftAsset(asset, { updateMessage })} />
+                    </>
+                  ) : null}
                   <TextareaField label="Description" value={asset.description} onChange={(description) => updateDraftAsset(asset, { description })} />
                   <div className="admin-row-actions">
                     <button className="secondary-action compact-action" type="button" onClick={() => void submitAssetSave(asset)}>
@@ -1673,8 +1812,9 @@ export function AdminConsole({
                   <span className="catalog-type-icon"><AdminSectionIcon section="catalog" size={18} /></span>
                   <div>
                     <strong>{asset.name}</strong>
-                    <small>{getCatalogItem(asset.type as ComponentType)?.label || asset.type} • {asset.owner || 'No owner'}</small>
+                    <small>{catalogAssetKindLabel(asset.kind)} · {getCatalogItem(asset.type as ComponentType)?.label || asset.type} • {asset.owner || 'No owner'}</small>
                   </div>
+                  <span className={`admin-status-pill ${asset.status || 'active'}`}>{catalogAssetStatusLabel(asset.status)}</span>
                   <span className={`admin-status-pill ${asset.criticality}`}>{asset.criticality}</span>
                   <span>{asset.usedInDesignCount} design{asset.usedInDesignCount === 1 ? '' : 's'}</span>
                   <div className="admin-row-actions">
@@ -1785,9 +1925,15 @@ export function AdminConsole({
                 <strong>Okta setup notes</strong>
                 <span>Create an OIDC Web Application in Okta, use Authorization Code flow, register exact sign-in/sign-out redirect URIs, then copy Client ID, Client Secret, and issuer. Include openid profile email; add groups when group-based role mapping is configured.</span>
               </div>
-              <button className="primary-action full-width" type="button" onClick={() => onSaveSignIn(signInDraft)}>
-                Save sign-in settings
-              </button>
+			  {signInVerificationMessage ? <div className={signInVerification === 'verified' ? 'admin-inline-success' : 'admin-inline-error'}>{signInVerificationMessage}</div> : null}
+			  <div className="admin-action-row">
+				<button className="secondary-action" type="button" disabled={!signInDraft.ssoEnabled || signInVerification === 'checking'} onClick={() => void verifyOIDC()}>
+				  <BadgeCheck size={16} /> {signInVerification === 'checking' ? 'Verifying...' : 'Verify OIDC'}
+				</button>
+				<button className="primary-action" type="button" onClick={() => onSaveSignIn(signInDraft)}>
+				  Save sign-in settings
+				</button>
+			  </div>
             </div>
           ) : (
             <div className="analysis-empty">

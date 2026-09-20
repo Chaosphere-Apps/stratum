@@ -1,4 +1,4 @@
-import { useMemo, useState, type CSSProperties, type DragEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent } from 'react'
 import {
   Brain,
   Cloud,
@@ -182,16 +182,16 @@ function CanvasNodeToolbar({
 }) {
   return (
     <NodeToolbar className="rf-node-toolbar nodrag nopan" isVisible={isVisible} position={Position.Top} offset={14}>
-      <button type="button" title="Edit details" onClick={() => onRequestSelect?.(componentId)}>
+      <button type="button" title="Edit details" onClick={(event) => { event.stopPropagation(); onRequestSelect?.(componentId) }}>
         <Edit3 size={15} />
       </button>
-      <button type="button" title="Duplicate" onClick={() => onRequestDuplicate?.(componentId)}>
+      <button type="button" title="Duplicate" onClick={(event) => { event.stopPropagation(); onRequestDuplicate?.(componentId) }}>
         <Copy size={15} />
       </button>
-      <button type="button" title="Add note" onClick={() => onRequestSelect?.(componentId)}>
+      <button type="button" title="Add note" onClick={(event) => { event.stopPropagation(); onRequestSelect?.(componentId) }}>
         <StickyNote size={15} />
       </button>
-      <button type="button" title="Delete" onClick={() => onRequestDelete?.(componentId)}>
+      <button className="danger" type="button" title="Delete" onClick={(event) => { event.stopPropagation(); onRequestDelete?.(componentId) }}>
         <Trash2 size={15} />
       </button>
     </NodeToolbar>
@@ -228,12 +228,14 @@ const nodeTypes = {
   architecture: ArchitectureNode,
 }
 
+const emptySelection: string[] = []
+
 export function ReactFlowCanvasProvider({
   design,
   selectedComponentId,
   selectedConnectorId,
-  selectedComponentIds = [],
-  selectedConnectorIds = [],
+  selectedComponentIds = emptySelection,
+  selectedConnectorIds = emptySelection,
   onSelectComponent,
   onSelectConnector,
   onSelectionChange,
@@ -255,8 +257,18 @@ export function ReactFlowCanvasProvider({
   const selectedConnectorIdSet = useMemo(() => new Set(selectedConnectorIds), [selectedConnectorIds])
   const hasTraversalFocus = traversalComponentIds.size > 0 || traversalConnectorIds.size > 0
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<Node<ArchitectureNodeData>, Edge> | null>(null)
+  const canvasRef = useRef<HTMLDivElement | null>(null)
+  const [contextMenu, setContextMenu] = useState<{
+    x: number
+    y: number
+    componentId: string
+    componentIds: string[]
+    label: string
+  } | null>(null)
+  const nodeCallbacksRef = useRef({ onDeleteComponents, onDuplicateComponent, onResizeComponent, onSelectComponent })
+  nodeCallbacksRef.current = { onDeleteComponents, onDuplicateComponent, onResizeComponent, onSelectComponent }
 
-  const nodes = useMemo<Node<ArchitectureNodeData>[]>(
+  const projectedNodes = useMemo<Node<ArchitectureNodeData>[]>(
     () =>
       [...design.components]
         .sort((left, right) => {
@@ -279,10 +291,10 @@ export function ReactFlowCanvasProvider({
             inTraversal: traversalComponentIds.has(component.id),
             activeTraversal: component.id === traversalFocus?.activeComponentId,
             dimmedByTraversal: hasTraversalFocus && !traversalComponentIds.has(component.id) && component.type !== 'frame.cloud',
-            onResizeEnd: onResizeComponent,
-            onRequestDelete: (componentId) => onDeleteComponents?.([componentId]),
-            onRequestDuplicate: onDuplicateComponent,
-            onRequestSelect: onSelectComponent,
+            onResizeEnd: (componentId, size) => nodeCallbacksRef.current.onResizeComponent?.(componentId, size),
+            onRequestDelete: (componentId) => nodeCallbacksRef.current.onDeleteComponents?.([componentId]),
+            onRequestDuplicate: (componentId) => nodeCallbacksRef.current.onDuplicateComponent?.(componentId),
+            onRequestSelect: (componentId) => nodeCallbacksRef.current.onSelectComponent?.(componentId),
           },
           style: {
             width: component.metadata.size?.width ?? (component.type === 'frame.cloud' ? 540 : 230),
@@ -293,10 +305,6 @@ export function ReactFlowCanvasProvider({
     [
       design.components,
       hasTraversalFocus,
-      onDeleteComponents,
-      onDuplicateComponent,
-      onResizeComponent,
-      onSelectComponent,
       readOnly,
       selectedComponentId,
       selectedComponentIdSet,
@@ -304,6 +312,20 @@ export function ReactFlowCanvasProvider({
       traversalFocus?.activeComponentId,
     ],
   )
+  const [nodes, setNodes] = useState<Node<ArchitectureNodeData>[]>(projectedNodes)
+
+  useEffect(() => {
+    setNodes(projectedNodes)
+  }, [projectedNodes])
+
+  useEffect(() => {
+    if (!contextMenu) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setContextMenu(null)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [contextMenu])
 
   const edges = useMemo<Edge[]>(
     () =>
@@ -381,22 +403,18 @@ export function ReactFlowCanvasProvider({
       return
     }
     const removed = changes.filter((change): change is NodeChange & { type: 'remove' } => change.type === 'remove')
+    setNodes((current) => applyNodeChanges(changes, current))
     if (removed.length) {
       onDeleteComponents?.(removed.map((change) => change.id))
-      return
     }
-
-    applyNodeChanges(changes, nodes).forEach((node) => {
-      const changed = changes.find((change) => 'id' in change && change.id === node.id)
-      if (changed?.type === 'position' && node.position) {
-        onMoveComponent?.(node.id, node.position, node.parentId)
-      }
-    })
   }
 
   const handleNodeDragStop: OnNodeDrag<Node<ArchitectureNodeData>> = (_, node) => {
     if (readOnly) return
-    if (node.data.component.type === 'frame.cloud') return
+    if (node.data.component.type === 'frame.cloud') {
+      onMoveComponent?.(node.id, node.position, node.parentId)
+      return
+    }
     const width = Number(node.style?.width ?? node.width ?? 230)
     const height = Number(node.style?.height ?? node.height ?? 78)
     const nodeAbsolute = node.parentId
@@ -417,7 +435,10 @@ export function ReactFlowCanvasProvider({
         center.y <= framePosition.y + frameSize.height
       )
     })
-    if (nextParent?.id === node.parentId) return
+    if (nextParent?.id === node.parentId) {
+      onMoveComponent?.(node.id, node.position, node.parentId)
+      return
+    }
     if (nextParent) {
       const framePosition = nextParent.metadata.position ?? { x: 0, y: 0 }
       onMoveComponent?.(node.id, { x: nodeAbsolute.x - framePosition.x, y: nodeAbsolute.y - framePosition.y }, nextParent.id)
@@ -425,7 +446,9 @@ export function ReactFlowCanvasProvider({
     }
     if (node.parentId) {
       onMoveComponent?.(node.id, nodeAbsolute, undefined)
+      return
     }
+    onMoveComponent?.(node.id, node.position, undefined)
   }
 
   const handleEdgesChange: OnEdgesChange<Edge> = (changes: EdgeChange[]) => {
@@ -481,7 +504,7 @@ export function ReactFlowCanvasProvider({
 
   return (
     <ReactFlowProvider>
-      <div className="react-flow-canvas">
+      <div className="react-flow-canvas" ref={canvasRef}>
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -494,7 +517,7 @@ export function ReactFlowCanvasProvider({
           nodesConnectable={!readOnly}
           elementsSelectable
           edgesReconnectable={!readOnly}
-          deleteKeyCode={readOnly ? null : ['Backspace', 'Delete']}
+          deleteKeyCode={null}
           connectOnClick={!readOnly}
           connectionMode={ConnectionMode.Loose}
           reconnectRadius={18}
@@ -519,14 +542,37 @@ export function ReactFlowCanvasProvider({
           onDrop={handleDrop}
           onNodeDragStop={handleNodeDragStop}
           onNodeClick={(_, node) => {
+            setContextMenu(null)
             onSelectComponent?.(node.id)
+          }}
+          onNodeContextMenu={(event, node) => {
+            event.preventDefault()
+            const bounds = canvasRef.current?.getBoundingClientRect()
+            if (!bounds) return
+            const componentIds = selectedComponentIdSet.has(node.id) && selectedComponentIds.length > 1
+              ? selectedComponentIds
+              : [node.id]
+            if (!selectedComponentIdSet.has(node.id)) onSelectComponent?.(node.id)
+            setContextMenu({
+              x: Math.min(event.clientX - bounds.left, bounds.width - 224),
+              y: Math.min(event.clientY - bounds.top, bounds.height - (readOnly ? 96 : 174)),
+              componentId: node.id,
+              componentIds,
+              label: node.data.component.name || getCatalogItem(node.data.component.type).label,
+            })
           }}
           onEdgeClick={(_, edge) => {
             onSelectConnector?.(edge.id)
           }}
           onPaneClick={() => {
+            setContextMenu(null)
             onSelectComponent?.('')
           }}
+          onPaneContextMenu={(event) => {
+            event.preventDefault()
+            setContextMenu(null)
+          }}
+          onMove={() => setContextMenu(null)}
           connectionLineType={ConnectionLineType.SmoothStep}
           connectionRadius={42}
           defaultEdgeOptions={{
@@ -539,6 +585,42 @@ export function ReactFlowCanvasProvider({
           <Background variant={BackgroundVariant.Dots} gap={28} size={1.2} color="#cbd5e1" />
           <Controls position="bottom-right" />
         </ReactFlow>
+        {contextMenu ? (
+          <div
+            className="rf-context-menu nodrag nopan"
+            role="menu"
+            aria-label={`Actions for ${contextMenu.label}`}
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+            onContextMenu={(event) => event.preventDefault()}
+          >
+            <div className="rf-context-menu-heading">
+              <strong>{contextMenu.componentIds.length > 1 ? `${contextMenu.componentIds.length} components` : contextMenu.label}</strong>
+              <span>{readOnly ? 'View only' : 'Component actions'}</span>
+            </div>
+            <button type="button" role="menuitem" onClick={() => {
+              onSelectComponent?.(contextMenu.componentId)
+              setContextMenu(null)
+            }}>
+              <Edit3 size={16} /> Inspect details
+            </button>
+            {!readOnly ? (
+              <>
+                <button type="button" role="menuitem" onClick={() => {
+                  onDuplicateComponent?.(contextMenu.componentId)
+                  setContextMenu(null)
+                }}>
+                  <Copy size={16} /> Duplicate
+                </button>
+                <button className="danger" type="button" role="menuitem" onClick={() => {
+                  onDeleteComponents?.(contextMenu.componentIds)
+                  setContextMenu(null)
+                }}>
+                  <Trash2 size={16} /> Delete{contextMenu.componentIds.length > 1 ? ` ${contextMenu.componentIds.length}` : ''}
+                </button>
+              </>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </ReactFlowProvider>
   )

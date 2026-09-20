@@ -38,21 +38,27 @@ type StorageEngine struct {
 	databaseURL string
 	pendingDB   *PostgresRepository
 	pendingURL  string
+	postgres    PostgresOptions
 }
 
 func NewStorageEngine(ctx context.Context, databaseURL string) (*StorageEngine, error) {
+	return NewStorageEngineWithOptions(ctx, databaseURL, DefaultPostgresOptions())
+}
+
+func NewStorageEngineWithOptions(ctx context.Context, databaseURL string, postgresOptions PostgresOptions) (*StorageEngine, error) {
 	cache := NewMemoryRepository()
 	engine := &StorageEngine{
 		cache:        cache,
 		active:       cache,
 		activeCloser: func() {},
 		mode:         StorageModeStateless,
+		postgres:     postgresOptions,
 	}
 	databaseURL = strings.TrimSpace(databaseURL)
 	if databaseURL == "" {
 		return engine, nil
 	}
-	repo, err := NewPostgresRepository(ctx, databaseURL)
+	repo, err := NewPostgresRepositoryWithOptions(ctx, databaseURL, postgresOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +95,14 @@ func (e *StorageEngine) Status(ctx context.Context) StorageStatus {
 	activeURL := e.databaseURL
 	pendingURL := e.pendingURL
 	databaseConfigured := e.databaseURL != "" || e.pendingURL != ""
-	databaseConnected := mode == StorageModeDatabase || pending != nil
+	databaseConnected := false
+	if mode == StorageModeDatabase {
+		if postgres, ok := active.(*PostgresRepository); ok {
+			databaseConnected = postgres.Ping(ctx) == nil
+		}
+	} else if pending != nil {
+		databaseConnected = pending.Ping(ctx) == nil
+	}
 	e.mu.RUnlock()
 
 	status := StorageStatus{
@@ -147,12 +160,7 @@ func (e *StorageEngine) TestDatabase(ctx context.Context, databaseURL string) er
 	if databaseURL == "" {
 		return errors.New("database url is required")
 	}
-	repo, err := NewPostgresRepository(ctx, databaseURL)
-	if err != nil {
-		return err
-	}
-	repo.Close()
-	return nil
+	return TestPostgresConnection(ctx, databaseURL, e.postgres)
 }
 
 func (e *StorageEngine) ConfigureDatabase(ctx context.Context, databaseURL string) (StorageStatus, error) {
@@ -160,7 +168,7 @@ func (e *StorageEngine) ConfigureDatabase(ctx context.Context, databaseURL strin
 	if databaseURL == "" {
 		return StorageStatus{}, errors.New("database url is required")
 	}
-	repo, err := NewPostgresRepository(ctx, databaseURL)
+	repo, err := NewPostgresRepositoryWithOptions(ctx, databaseURL, e.postgres)
 	if err != nil {
 		return StorageStatus{}, err
 	}

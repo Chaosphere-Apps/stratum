@@ -2,6 +2,8 @@
 
 Public product and technical documentation for Stratum.
 
+- [Engineering Onboarding](onboarding.md)
+
 ## Architecture
 
 - [System Architecture](system-architecture.md)
@@ -24,8 +26,10 @@ Public product and technical documentation for Stratum.
 ## Backend
 
 - [Backend Service](backend.md)
+- [PostgreSQL Operations and Migrations](postgres-operations.md)
 - [Backend Production Readiness](backend-production-readiness.md)
 - [All-in-One Image](all-in-one-image.md)
+- [Testing Strategy](testing.md)
 
 ## Administration
 

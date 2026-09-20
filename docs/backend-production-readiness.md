@@ -17,12 +17,13 @@ This note captures the backend hardening state before publishing the repository.
 - Local sign-in now uses password hashes and bearer session tokens instead of browser-side user switching.
 - Postgres-backed storage preserves exact structured design JSON and creates versions on save.
 - Deterministic analysis is isolated under `internal/analysis`.
+- PostgreSQL migrations are versioned SQL files, transactionally applied, checksum-protected, and serialized with a database advisory lock.
+- The release image contains a dedicated migration command, and production can disable application startup migrations.
+- PostgreSQL pool limits and connection lifetimes are explicit rather than dependent on host CPU defaults.
 
 ## Known Gaps Before Real Enterprise Production
 
-- Authorization is role-aware for admin endpoints, but workspace membership and design-level permissions are still not tenant-safe yet.
 - Rate limiting and abuse protection are not implemented.
-- Database migrations are embedded in startup code; production should use explicit migration files and release workflow.
 - Secrets should move to deployment-managed secret storage.
 - TLS termination is expected at an ingress/proxy layer, not inside the Go process.
 - AI provider keys are currently stored in backend persistence; enterprise deployments should move them to KMS/secret-manager backed encryption and add audit trails.
@@ -32,8 +33,7 @@ This note captures the backend hardening state before publishing the repository.
 ## Recommended Next Backend Steps
 
 1. Add real users, auth sessions, and workspace membership.
-2. Split database migrations into versioned migration files.
-3. Add request IDs, structured audit events, and Prometheus-style metrics.
-4. Add rate limiting around REST writes, analysis runs, and AI-provider verification.
-5. Add an AI analysis worker interface separate from HTTP request handling.
-6. Add integration tests against Postgres through Docker Compose or testcontainers.
+2. Add request IDs, structured audit events, and Prometheus-style metrics.
+3. Extend the existing authentication and AI-chat rate limits to general REST writes, analysis runs, and AI-provider verification.
+4. Add an AI analysis worker interface separate from HTTP request handling.
+5. Add shared pub/sub before running multiple collaboration-enabled backend replicas.

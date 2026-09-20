@@ -73,17 +73,13 @@ Inline badges:
 
 Badges should open the relevant inspector section directly.
 
-## 6. Pair Designer Panel
+## 6. Architecture Copilot
 
-The pair designer is an AI side panel that can operate in modes:
+The Architecture Copilot is a persistent, design-scoped side sheet. It is not a blank general-purpose chat: every answer is grounded in the selected design graph, requirements, and deterministic analysis evidence.
 
-- **Clarify:** ask requirement questions.
-- **Suggest:** propose components, connectors, metadata, or alternatives.
-- **Critique:** explain risks in selected area.
-- **Complete:** identify missing fields needed by suites.
-- **Explain:** turn a design region into readable architecture prose.
+Conversations may follow the working design or be pinned to an immutable saved version. Responses can cite components and connectors; selecting a citation focuses that object on the canvas. Copilot suggestions never modify the design without an explicit human action.
 
-The panel should cite exact design objects and requirements when making suggestions.
+Useful questions include:
 
 Example actions:
 
@@ -93,6 +89,8 @@ Example actions:
 - "Generate a first-pass reliability review."
 - "Explain why this queue exists."
 - "What should I ask the product team?"
+
+The centrally managed AI provider must be enabled before chat is available. Conversation messages are stored separately from the versioned design document.
 
 ## 7. Analysis Suite Panel
 
@@ -105,6 +103,8 @@ The suite panel should make analysis feel actionable:
 - A recommendation can be converted into a design task or reviewer comment.
 
 The user should see when analysis is based on assumptions.
+
+Design Review can target either the working design or an older saved version. Review lenses let users concentrate the synthesis on security, scalability, reliability, data, operability, or cost while deterministic checks remain the evidence baseline. The selected version and lens must remain visible throughout the review.
 
 ## 8. Structured Language Inspector
 
@@ -134,7 +134,15 @@ Review mode should support a design review conversation:
 
 This mode turns the product from a drawing tool into a review artifact.
 
-## 10. MVP Screens
+## 10. Concurrent Editing
+
+Stratum shows authenticated users and tab counts for the currently open design. Presence is informational; it never replaces ACL enforcement.
+
+Document updates use optimistic concurrency against a server-issued document revision. Autosaves are serialized so one browser cannot race its own prior save. If another tab or user saves a different document first, Stratum preserves the local draft, pauses canvas editing, and asks the user to either load the server document or explicitly keep the local document. It must never silently discard either side.
+
+This is conflict-safe collaborative editing, not field-level or CRDT merging. Shared cursors, selections, and operation-level merging can build on the same design-scoped session model later without weakening the current save guarantees.
+
+## 11. MVP Screens
 
 Minimum viable screens:
 
@@ -149,4 +157,3 @@ Minimum viable screens:
 - Structured export view.
 
 The first screen after creating a design should be the usable workspace, not a marketing or documentation page.
-

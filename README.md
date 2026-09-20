@@ -11,6 +11,7 @@ Stratum should feel like a focused Miro or Excalidraw-style canvas for system de
 ## 2. Document Map
 
 - [Docs Index](docs/): public product and technical documentation.
+- [Engineering Onboarding](docs/onboarding.md): repository map, local workflow, and change checklist.
 - [UI Service](docs/ui.md): React Flow canvas, component catalog, inspectors, backend sync, and structured JSON export.
 - [Backend Service](docs/backend.md): Go backend for workspaces, designs, versions, WebSocket sync, Postgres storage, and deterministic analysis.
 - [Backend Production Readiness](docs/backend-production-readiness.md): Hardened areas, known production gaps, and next backend steps.

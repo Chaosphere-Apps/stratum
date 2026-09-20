@@ -6,7 +6,13 @@ import (
 	"strings"
 )
 
-const PromptVersion = "stratum-analysis-v1"
+const PromptVersion = "stratum-analysis-v2"
+
+type ReviewOptions struct {
+	Focus         string
+	VersionID     string
+	VersionNumber int
+}
 
 type AIReview struct {
 	Status          string          `json:"status"`
@@ -41,6 +47,16 @@ type AIReviewEnvelope struct {
 }
 
 func BuildSystemPrompt() string {
+	return BuildReviewSystemPrompt(ReviewOptions{})
+}
+
+func BuildReviewSystemPrompt(options ReviewOptions) string {
+	focus := strings.TrimSpace(options.Focus)
+	if focus == "" || focus == "full" {
+		focus = "a balanced full architecture review"
+	} else {
+		focus = "a deep review focused on " + focus
+	}
 	return strings.TrimSpace(`
 You are Stratum's enterprise system-design reviewer.
 You review structured architecture diagrams using deterministic evidence plus senior architecture judgement.
@@ -84,10 +100,14 @@ Return only valid JSON with this exact shape:
   ],
   "openQuestions": ["question that blocks a confident review"]
 }
-`)
+`) + "\n\nReview objective: " + focus + "."
 }
 
 func BuildUserPrompt(raw json.RawMessage, report Report) (string, error) {
+	return BuildReviewUserPrompt(raw, report, ReviewOptions{})
+}
+
+func BuildReviewUserPrompt(raw json.RawMessage, report Report, options ReviewOptions) (string, error) {
 	reportJSON, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return "", err
@@ -100,7 +120,11 @@ func BuildUserPrompt(raw json.RawMessage, report Report) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("Deterministic report:\n%s\n\nStructured design JSON:\n%s", reportJSON, designJSON), nil
+	versionContext := "current working design"
+	if options.VersionNumber > 0 {
+		versionContext = fmt.Sprintf("saved version v%d (%s)", options.VersionNumber, options.VersionID)
+	}
+	return fmt.Sprintf("Review target: %s\nDeterministic report:\n%s\n\nStructured design JSON:\n%s", versionContext, reportJSON, designJSON), nil
 }
 
 func AttachAIReview(report Report, review AIReview) Report {
