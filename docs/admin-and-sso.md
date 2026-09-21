@@ -4,10 +4,31 @@ Stratum starts in onboarding mode when no users exist. The first user created fr
 
 Admins can open the Admin Console from the top navigation to manage:
 
-- Users and product roles: admin, architect, reviewer, and member.
-- User status: active or disabled.
-- Sign-in methods: local password sign-in and SSO.
-- Okta OpenID Connect settings.
+- Users, product roles, account status, and password-reset links.
+- Access groups and direct or group grants for workspaces and designs.
+- Local password sign-in and Okta SSO.
+- The governed component catalog.
+- PostgreSQL storage configuration and migration from stateless mode.
+- The organization AI provider used by analysis and design chat.
+- Telemetry and MCP capability settings.
+
+Configuration writes return visible success or failure feedback. Stored secrets are redacted from subsequent API responses and are not sent back to the browser.
+
+## AI provider
+
+Stratum supports OpenAI, Anthropic, OpenRouter, Google AI Studio (Gemini), and custom OpenAI-compatible endpoints. Configure one provider for the organization, enter its model and API key, and verify it before enabling AI features. A saved configuration is presented as configured state rather than repopulating the secret form.
+
+Custom provider URLs must use HTTPS and cannot target private, loopback, link-local, or otherwise unsafe network addresses unless the deployment explicitly enables private provider URLs. Keep that override disabled for managed providers and internet-facing installations.
+
+AI chat is read-only by default. Users may grant read-and-edit access to one conversation only when they already have edit access to the current working design. This does not bypass backend permissions or document validation.
+
+## Storage
+
+When no `DATABASE_URL` is configured, Stratum uses an in-memory repository and displays a stateless-mode warning. Only administrators receive the shortcut to database settings. Test the database connection before applying it, and use a least-privileged runtime role in production. See [PostgreSQL operations](postgres-operations.md) for migration and rollout guidance.
+
+## Access administration
+
+Workspace permissions control reading, design creation, and management. Design permissions separately control reading, editing, commenting, reviewing, and management. Grants may target a user or an access group. The backend evaluates effective permissions for every request; UI visibility is only a usability aid.
 
 ## Okta OIDC Settings
 

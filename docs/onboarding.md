@@ -14,7 +14,7 @@ Stratum is a self-hosted architecture workspace. The React UI edits a semantic d
 - `backend/internal/store/`: repository contract plus memory and PostgreSQL implementations.
 - `backend/internal/domain/`: durable shared domain types.
 - `backend/internal/analysis/`: deterministic and AI-assisted analysis.
-- `docs/`: product, architecture, operations, and testing references.
+- `docs/`: user, administration, operations, service, and testing references.
 
 Read `backend/AGENTS.md` and `ui/AGENTS.md` before changing either service. The detailed service guides are `docs/backend.md` and `docs/ui.md`.
 
@@ -38,4 +38,4 @@ On an empty store, the browser presents first-admin setup. Authentication settin
 4. Run `GOCACHE="$PWD/.gocache" go test ./...` from `backend/`.
 5. Run `npm test`, `npm run lint`, and `npm run build` from `ui/`.
 
-For production and migration details, see `docs/backend-production-readiness.md`, `docs/postgres-operations.md`, and `docs/testing.md`.
+For production and migration details, see `docs/all-in-one-image.md`, `docs/postgres-operations.md`, and `docs/testing.md`.

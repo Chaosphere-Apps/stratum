@@ -1,20 +1,16 @@
-# System Design Evaluator Backend
+# Stratum backend
 
-Production-oriented Go backend for the system design evaluator.
+Go API, authorization, persistence, collaboration, and analysis service for Stratum.
 
-## Current Scope
+## Current scope
 
-- Guest workspace only.
-- Guest profile.
-- Multiple workspaces.
-- Designs under workspaces.
-- Design versions created on save.
-- WebSocket API for workspace snapshots, conflict-safe design updates, and editor presence.
-- Postgres repository with exact structured JSON document storage.
-- Separate design-doc storage for rich written context so large docs do not travel with every canvas save.
-- Structured design analysis across requirements, topology, traffic, consistency, availability, security, and data.
-- In-memory fallback repository for tests and quick local runs.
-- Modular package boundaries for later Rust analyzers, AI workers, and collaboration services.
+- First-admin setup, local sessions, password reset, and Okta OIDC.
+- Users, roles, access groups, and direct or group workspace/design grants.
+- Workspaces, designs, exact structured documents, versions, reviews, comments, and notifications.
+- WebSocket snapshots, conflict-safe design updates, and editor presence.
+- PostgreSQL persistence with a stateless in-memory mode for evaluation and tests.
+- Deterministic design analysis and centrally configured AI analysis/chat.
+- Catalog governance, telemetry configuration, storage administration, and MCP capability settings.
 
 ## Run
 
@@ -45,7 +41,7 @@ Defaults:
 Production-relevant configuration:
 
 - `ALLOWED_ORIGINS`: comma-separated browser origins allowed for REST CORS and WebSocket upgrades.
-- `AUTO_MIGRATE`: defaults to `true` for simple installations. Set it to `false` in controlled production deployments and run `/migrate up` before starting a new backend release.
+- `AUTO_MIGRATE`: defaults to `true` for simple installations. Set it to `false` in controlled production deployments and run the image's `/migrate up` command before starting a new backend release.
 - `DATABASE_MAX_CONNECTIONS`, `DATABASE_MIN_CONNECTIONS`: per-process Postgres pool bounds. Defaults are `20` and `2`.
 - `DATABASE_MAX_CONN_LIFETIME`, `DATABASE_MAX_CONN_IDLE_TIME`, `DATABASE_HEALTH_CHECK_PERIOD`: pool lifecycle controls.
 - `MIGRATION_LOCK_TIMEOUT`, `MIGRATION_STATEMENT_TIMEOUT`: bound migration lock waits and individual migration execution.

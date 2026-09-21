@@ -1,59 +1,73 @@
 # Stratum
 
-## 1. Purpose
+Stratum is a self-hosted architecture workspace for teams to design, review, and govern software systems. It combines a semantic system canvas, requirements, request journeys, documentation, version review, deterministic analysis, AI-assisted architecture work, and enterprise access controls in one place.
 
-Build an enterprise-first system design workspace where teams can draw, store, version, evaluate, and export architecture designs.
+## What you can do
 
-The product is inspired by interview-focused tools such as Mockingly.ai and LeetSys, but the first target is not candidate interview practice. The first target is engineering teams that need a durable place to reason about AI system designs, backend architectures, product infrastructure, and platform trade-offs.
+- Organize architecture designs in private or shared workspaces.
+- Model systems with typed components, connectors, flows, notes, and structured requirements.
+- Capture functional requirements, consistency expectations, availability targets, SLA, traffic, and capacity context.
+- Save immutable versions, request reviews, record comments, and track design changes.
+- Run evidence-based checks across topology, scale, reliability, security, data, and operability.
+- Use design-scoped AI chat in read-only mode or explicitly grant read-and-edit access for one conversation.
+- Attach design documentation and export the structured design for use outside Stratum.
+- Govern users, roles, groups, workspace/design permissions, catalog assets, SSO, AI providers, storage, and integrations from the Admin Console.
 
-Stratum should feel like a focused Miro or Excalidraw-style canvas for system design, with built-in architecture components, structured metadata, AI analysis, version history, and exportable design language.
+Access is enforced by the backend. The UI shows whether a workspace or design is view-only or editable before it is opened.
 
-## 2. Document Map
+## Quick start
 
-- [Docs Index](docs/): public product and technical documentation.
-- [Engineering Onboarding](docs/onboarding.md): repository map, local workflow, and change checklist.
-- [UI Service](docs/ui.md): React Flow canvas, component catalog, inspectors, backend sync, and structured JSON export.
-- [Backend Service](docs/backend.md): Go backend for workspaces, designs, versions, WebSocket sync, Postgres storage, and deterministic analysis.
-- [Backend Production Readiness](docs/backend-production-readiness.md): Hardened areas, known production gaps, and next backend steps.
-- [System Architecture](docs/system-architecture.md): High-level technical architecture and major services.
-- [Platform and Tech Stack](docs/platform-and-tech-stack.md): Frontend, backend, storage, AI, and deployment tradeoffs.
-- [Domain Model](docs/domain-model.md): Core workspace, design, component, connector, version, and analysis objects.
-- [Structured Design Language](docs/structured-design-language.md): Machine-readable design representation used for validation, exports, diffs, and AI evaluation.
-- [Evaluation Engine](docs/evaluation-engine.md): How AI analysis, scoring, evidence, and recommendations should work.
-- [Evaluation Suites](docs/evaluation-suites.md): Modular suites for requirements, traffic, consistency, reliability, security, observability, cost, and AI risk.
+The simplest self-hosted deployment is the all-in-one image with an external PostgreSQL database:
 
-## Local Stack
+```bash
+docker pull ghcr.io/chaosphere-apps/stratum-allinone:latest
+docker run --rm \
+  -p 8080:8080 \
+  -e DATABASE_URL='postgres://stratum:change-me@host.docker.internal:5432/stratum?sslmode=disable' \
+  -e PUBLIC_URL='http://localhost:8080' \
+  -e ALLOWED_ORIGINS='http://localhost:8080' \
+  ghcr.io/chaosphere-apps/stratum-allinone:latest
+```
 
-Run the persistent backend stack:
+Open `http://localhost:8080`. On a new installation, create the first account; it becomes the organization administrator. Replace the example database credentials and use TLS-verified PostgreSQL before production use.
+
+For a source checkout, start PostgreSQL and the backend from the repository root:
 
 ```bash
 docker compose up -d backend
 ```
 
-This starts the Go backend on `http://127.0.0.1:8081` and Postgres on `127.0.0.1:5432` with a named Docker volume, so workspaces and designs survive backend restarts.
+Then start the UI:
 
-## 3. Short Product Definition
+```bash
+cd ui
+npm ci
+npm run dev
+```
 
-An enterprise system design evaluator is a persistent architecture workspace that lets teams:
+The UI is available at `http://127.0.0.1:5173` and connects to the backend at `http://127.0.0.1:8081`.
 
-- Create system design diagrams using fixed architecture-aware components.
-- Connect components with typed data, control, event, and dependency relationships.
-- Add requirements, assumptions, capacity estimates, constraints, and business context.
-- Attach their own AI systems, prompts, agents, or architecture proposals.
-- Run AI analysis against company-specific rubrics.
-- Store every design as a versioned artifact.
-- Compare versions and track design maturity over time.
-- Export diagrams and structured architecture definitions for reviews, docs, tickets, audits, and implementation planning.
+Without `DATABASE_URL`, Stratum runs in stateless in-memory mode. That mode is suitable for evaluation only: data is lost when the backend restarts. Administrators can configure PostgreSQL from the storage settings.
 
-## 4. Initial Product Bet
+## Documentation
 
-Most AI design tools produce text or one-off diagrams. Most whiteboards are flexible but semantically weak. Most enterprise architecture tools are heavyweight and slow.
+- [User guide](docs/user-guide.md): workspaces, designs, canvas, analysis, AI chat, reviews, and permissions.
+- [Administration and SSO](docs/admin-and-sso.md): identity, access, providers, integrations, and Okta configuration.
+- [All-in-one deployment](docs/all-in-one-image.md): container image, runtime settings, and production notes.
+- [PostgreSQL operations](docs/postgres-operations.md): migrations, rollout, roles, backups, and readiness.
+- [Engineering onboarding](docs/onboarding.md): repository map and development workflow.
+- [Backend reference](docs/backend.md) and [UI reference](docs/ui.md): service-specific development information.
+- [Testing](docs/testing.md): local and CI verification strategy.
 
-The opportunity is a middle layer:
+The complete documentation index is in [docs/README.md](docs/README.md).
 
-- Fast and visual enough for product and engineering teams.
-- Structured enough for automated analysis.
-- Versioned enough to become a design system of record.
-- AI-native enough to evaluate designs continuously.
+## Release verification
 
-The first wedge should be enterprise teams building or evaluating AI-backed systems, because they already need stronger review loops around latency, cost, reliability, privacy, model risk, fallback behavior, observability, and data flow.
+Run the complete backend and UI test suites from the repository root:
+
+```bash
+make test
+make test-e2e
+```
+
+See [Testing Stratum](docs/testing.md) for database integration tests, coverage gates, and individual commands.
