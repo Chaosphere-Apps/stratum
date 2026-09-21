@@ -9,6 +9,12 @@ import {
   Server,
 } from 'lucide-react'
 import { isPotentialCatalogMatch, normalizedCatalogLabel } from '../app/designUtils'
+import {
+  catalogAssetAdvisoryText,
+  catalogAssetKindLabel,
+  catalogAssetStatusLabel,
+  isCatalogAssetActionable,
+} from '../app/catalogGovernance'
 import type { BackendCatalogAsset } from '../backendApi'
 import type { BackendDesign } from '../backendSync'
 import { connectorTypeDescription, connectorTypeLabel, connectorTypeOptions } from '../canvas/connectorVisuals'
@@ -92,9 +98,13 @@ export function ComponentInspector({
         enterpriseAsset: {
           assetId: asset.id,
           name: asset.name,
+          kind: asset.kind,
           type: asset.type,
           owner: asset.owner,
           criticality: asset.criticality,
+          status: asset.status,
+          replacementAssetId: asset.replacementAssetId,
+          updateMessage: asset.updateMessage,
           linkedAt: new Date().toISOString(),
         },
       },
@@ -125,13 +135,30 @@ export function ComponentInspector({
         <div className="section-title">Enterprise Catalog</div>
         {component.metadata.enterpriseAsset ? (
           <div className="catalog-link-summary">
-            <span className="shared-entity-badge">Shared entity</span>
+            <div className="catalog-link-badges">
+              <span className="shared-entity-badge">Shared entity</span>
+              <span className={`catalog-mini-pill ${linkedAsset?.kind ?? component.metadata.enterpriseAsset.kind ?? 'component'}`}>
+                {catalogAssetKindLabel(linkedAsset?.kind ?? component.metadata.enterpriseAsset.kind)}
+              </span>
+              <span className={`catalog-mini-pill ${linkedAsset?.status ?? component.metadata.enterpriseAsset.status ?? 'active'}`}>
+                {catalogAssetStatusLabel(linkedAsset?.status ?? component.metadata.enterpriseAsset.status)}
+              </span>
+            </div>
             <strong>{linkedAsset?.name ?? component.metadata.enterpriseAsset.name}</strong>
             <small>
               {linkedAsset
                 ? `${linkedAsset.usedInDesignCount} linked design${linkedAsset.usedInDesignCount === 1 ? '' : 's'}`
                 : 'Catalog asset not visible or deleted'}
             </small>
+            {isCatalogAssetActionable(linkedAsset ?? component.metadata.enterpriseAsset) ? (
+              <div className="catalog-governance-warning" role="alert">
+                <strong>Architecture guidance</strong>
+                <span>{catalogAssetAdvisoryText(linkedAsset ?? component.metadata.enterpriseAsset)}</span>
+                {(linkedAsset?.replacementAssetId ?? component.metadata.enterpriseAsset.replacementAssetId) ? (
+                  <small>Replacement: {linkedAsset?.replacementAssetId ?? component.metadata.enterpriseAsset.replacementAssetId}</small>
+                ) : null}
+              </div>
+            ) : null}
             <button className="text-button" type="button" onClick={unlinkCatalogAsset}>
               Unlink from catalog
             </button>
@@ -145,7 +172,7 @@ export function ComponentInspector({
                   <button className="catalog-suggestion" type="button" key={asset.id} onClick={() => linkCatalogAsset(asset)}>
                     <span>{asset.name}</span>
                     <small>
-                      {asset.type} • {asset.usedInDesignCount} use{asset.usedInDesignCount === 1 ? '' : 's'}
+                      {catalogAssetStatusLabel(asset.status)} • {asset.type} • {asset.usedInDesignCount} use{asset.usedInDesignCount === 1 ? '' : 's'}
                     </small>
                   </button>
                 ))}
@@ -163,7 +190,7 @@ export function ComponentInspector({
                 <option value="">Choose from catalog...</option>
                 {catalogAssets.map((asset) => (
                   <option key={asset.id} value={asset.id}>
-                    {asset.name} ({asset.type})
+                    {asset.name} ({catalogAssetStatusLabel(asset.status)} · {asset.type})
                   </option>
                 ))}
               </select>

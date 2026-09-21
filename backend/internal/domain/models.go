@@ -1,11 +1,16 @@
 package domain
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
-const GuestWorkspaceID = "guest-workspace"
+const (
+	GuestWorkspaceID    = "guest-workspace"
+	MaxDesignNameLength = 120
+)
 
 type User struct {
 	ID           string    `json:"id"`
@@ -27,6 +32,7 @@ type SignInConfig struct {
 	OktaDomain            string    `json:"oktaDomain"`
 	Issuer                string    `json:"issuer"`
 	ClientID              string    `json:"clientId"`
+	ClientSecret          string    `json:"-"`
 	ClientSecretSet       bool      `json:"clientSecretSet"`
 	RedirectURI           string    `json:"redirectUri"`
 	PostLogoutRedirectURI string    `json:"postLogoutRedirectUri"`
@@ -36,6 +42,22 @@ type SignInConfig struct {
 	ReviewerGroup         string    `json:"reviewerGroup"`
 	JITProvisioning       bool      `json:"jitProvisioning"`
 	UpdatedAt             time.Time `json:"updatedAt"`
+}
+
+type OIDCIdentity struct {
+	Provider    string
+	Subject     string
+	Email       string
+	DisplayName string
+	Role        string
+	Groups      []string
+}
+
+type OIDCFlow struct {
+	StateHash    string
+	Nonce        string
+	CodeVerifier string
+	ExpiresAt    time.Time
 }
 
 type PasswordResetToken struct {
@@ -99,26 +121,33 @@ type TelemetryIntegrationFilter struct {
 }
 
 type CatalogAsset struct {
-	ID                string          `json:"id"`
-	Name              string          `json:"name"`
-	NormalizedName    string          `json:"normalizedName"`
-	Type              string          `json:"type"`
-	Owner             string          `json:"owner"`
-	Description       string          `json:"description"`
-	Criticality       string          `json:"criticality"`
-	Tags              []string        `json:"tags"`
-	Metadata          json.RawMessage `json:"metadata,omitempty"`
-	CreatedBy         string          `json:"createdBy"`
-	CreatedAt         time.Time       `json:"createdAt"`
-	UpdatedAt         time.Time       `json:"updatedAt"`
-	UsedInDesignCount int             `json:"usedInDesignCount"`
+	ID                 string          `json:"id"`
+	Name               string          `json:"name"`
+	NormalizedName     string          `json:"normalizedName"`
+	Kind               string          `json:"kind"`
+	Type               string          `json:"type"`
+	Owner              string          `json:"owner"`
+	Description        string          `json:"description"`
+	Criticality        string          `json:"criticality"`
+	Status             string          `json:"status"`
+	Aliases            []string        `json:"aliases"`
+	ReplacementAssetID string          `json:"replacementAssetId"`
+	UpdateMessage      string          `json:"updateMessage"`
+	Tags               []string        `json:"tags"`
+	Metadata           json.RawMessage `json:"metadata,omitempty"`
+	CreatedBy          string          `json:"createdBy"`
+	CreatedAt          time.Time       `json:"createdAt"`
+	UpdatedAt          time.Time       `json:"updatedAt"`
+	UsedInDesignCount  int             `json:"usedInDesignCount"`
 }
 
 type Workspace struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	OwnerID         string    `json:"ownerId"`
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
+	EffectiveAccess string    `json:"effectiveAccess,omitempty"`
 }
 
 type WorkspaceAccess struct {
@@ -158,18 +187,24 @@ type WorkspaceGroupAccess struct {
 }
 
 type Design struct {
-	ID             string          `json:"id"`
-	WorkspaceID    string          `json:"workspaceId"`
-	Name           string          `json:"name"`
-	Access         string          `json:"access"`
-	Title          string          `json:"title"`
-	Document       json.RawMessage `json:"document"`
-	CanvasSnapshot json.RawMessage `json:"canvasSnapshot,omitempty"`
-	VersionNumber  int             `json:"versionNumber"`
-	VersionRemarks string          `json:"-"`
-	CreatedBy      string          `json:"createdBy"`
-	CreatedAt      time.Time       `json:"createdAt"`
-	UpdatedAt      time.Time       `json:"updatedAt"`
+	ID               string          `json:"id"`
+	WorkspaceID      string          `json:"workspaceId"`
+	Name             string          `json:"name"`
+	Access           string          `json:"access"`
+	Title            string          `json:"title"`
+	Document         json.RawMessage `json:"document"`
+	DocumentRevision string          `json:"documentRevision"`
+	CanvasSnapshot   json.RawMessage `json:"canvasSnapshot,omitempty"`
+	VersionNumber    int             `json:"versionNumber"`
+	VersionRemarks   string          `json:"-"`
+	CreatedBy        string          `json:"createdBy"`
+	CreatedAt        time.Time       `json:"createdAt"`
+	UpdatedAt        time.Time       `json:"updatedAt"`
+	EffectiveAccess  string          `json:"effectiveAccess,omitempty"`
+}
+
+func DesignRevision(document []byte) string {
+	return fmt.Sprintf("sha256:%x", sha256.Sum256(document))
 }
 
 type DesignAccess struct {
@@ -233,6 +268,36 @@ type DesignComment struct {
 	ComponentID string    `json:"componentId,omitempty"`
 	ConnectorID string    `json:"connectorId,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
+}
+
+type AIConversation struct {
+	ID          string    `json:"id"`
+	WorkspaceID string    `json:"workspaceId"`
+	DesignID    string    `json:"designId"`
+	VersionID   string    `json:"versionId,omitempty"`
+	Title       string    `json:"title"`
+	AccessMode  string    `json:"accessMode"`
+	CreatedBy   string    `json:"createdBy"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+type AIMessageReference struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
+
+type AIMessage struct {
+	ID             string               `json:"id"`
+	ConversationID string               `json:"conversationId"`
+	Role           string               `json:"role"`
+	Content        string               `json:"content"`
+	References     []AIMessageReference `json:"references,omitempty"`
+	Provider       string               `json:"provider,omitempty"`
+	Model          string               `json:"model,omitempty"`
+	CreatedBy      string               `json:"createdBy,omitempty"`
+	CreatedAt      time.Time            `json:"createdAt"`
 }
 
 type DesignReviewRequest struct {

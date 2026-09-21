@@ -115,6 +115,27 @@ export function normalizedCatalogLabel(value: string) {
   return value.trim().toLowerCase().replace(/\s+/g, ' ')
 }
 
+export function analysisReadinessLabel(score: number) {
+  if (score <= 0) return 'Not ready'
+  if (score < 40) return 'Foundation missing'
+  if (score < 70) return 'Needs definition'
+  if (score < 85) return 'Reviewable'
+  return 'Strong foundation'
+}
+
+export function analysisFindingMatchesFocus(focus: string, suite: string) {
+  if (focus === 'full') return true
+  const suitesByFocus: Record<string, string[]> = {
+    security: ['security'],
+    scalability: ['traffic', 'topology'],
+    reliability: ['availability', 'topology', 'integrity'],
+    data: ['data', 'consistency'],
+    operability: ['availability', 'topology', 'integrity'],
+    cost: ['traffic', 'data', 'topology'],
+  }
+  return (suitesByFocus[focus] ?? []).includes(suite)
+}
+
 export function isPotentialCatalogMatch(left: string, right: string) {
   const normalizedLeft = normalizedCatalogLabel(left)
   const normalizedRight = normalizedCatalogLabel(right)

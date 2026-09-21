@@ -10,6 +10,11 @@ func TestLoadUsesDefaultsAndParsesEnvironment(t *testing.T) {
 	t.Setenv("BACKEND_ADDR", ":9090")
 	t.Setenv("ALLOWED_ORIGINS", " https://app.example.com, ,http://localhost:5173 ")
 	t.Setenv("DATABASE_URL", "postgres://example")
+	t.Setenv("AUTO_MIGRATE", "false")
+	t.Setenv("DATABASE_MAX_CONNECTIONS", "32")
+	t.Setenv("DATABASE_MIN_CONNECTIONS", "4")
+	t.Setenv("MIGRATION_STATEMENT_TIMEOUT", "7m")
+	t.Setenv("STARTUP_TIMEOUT", "90s")
 	t.Setenv("SHUTDOWN_TIMEOUT", "25s")
 	t.Setenv("READ_HEADER_TIMEOUT", "bad-duration")
 	t.Setenv("MAX_REQUEST_BODY_BYTES", "8192")
@@ -37,6 +42,12 @@ func TestLoadUsesDefaultsAndParsesEnvironment(t *testing.T) {
 	if !cfg.AllowPrivateAIProviderURLs {
 		t.Fatal("expected boolean env to parse true")
 	}
+	if cfg.DatabaseAutoMigrate || cfg.DatabaseMaxConnections != 32 || cfg.DatabaseMinConnections != 4 {
+		t.Fatalf("database config not applied: %#v", cfg)
+	}
+	if cfg.MigrationStatementTimeout != 7*time.Minute || cfg.StartupTimeout != 90*time.Second {
+		t.Fatalf("migration/startup timeouts not applied: %#v", cfg)
+	}
 }
 
 func TestLoadFallsBackForBlankAndInvalidValues(t *testing.T) {
@@ -49,5 +60,8 @@ func TestLoadFallsBackForBlankAndInvalidValues(t *testing.T) {
 	}
 	if cfg.AllowPrivateAIProviderURLs {
 		t.Fatal("invalid boolean should fall back to false")
+	}
+	if !cfg.DatabaseAutoMigrate || cfg.DatabaseMaxConnections != 20 || cfg.DatabaseMinConnections != 2 {
+		t.Fatalf("database defaults not applied: %#v", cfg)
 	}
 }

@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - "backend/**"
+      - "docker-compose.test.yml"
+      - "Makefile"
       - ".github/workflows/backend-ci.yml"
       - "docker-compose.yml"
   push:
@@ -11,6 +13,8 @@ on:
       - main
     paths:
       - "backend/**"
+      - "docker-compose.test.yml"
+      - "Makefile"
       - ".github/workflows/backend-ci.yml"
       - "docker-compose.yml"
   workflow_dispatch:
@@ -23,8 +27,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  backend:
-    name: Test and build backend
+  unit:
+    name: Unit, race, and build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -49,11 +53,66 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Test
-        run: go test ./...
+      - name: Test with race detector and coverage
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Report coverage
+        run: |
+          go tool cover -func=coverage.out | tail -1
+          total="$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')"
+          awk -v coverage="$total" 'BEGIN { if (coverage + 0 < 43) { print "backend coverage " coverage "% is below required 43%"; exit 1 } }'
+
+      - name: Enforce HTTP feature coverage
+        run: |
+          go test -coverprofile=httpapi-coverage.out ./internal/httpapi
+          total="$(go tool cover -func=httpapi-coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')"
+          awk -v coverage="$total" 'BEGIN { if (coverage + 0 < 50) { print "HTTP API coverage " coverage "% is below required 50%"; exit 1 } }'
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/coverage.out
+          if-no-files-found: error
 
       - name: Build binary
-        run: go build -o /tmp/stratum-backend ./cmd/server
+        run: |
+          go build -o /tmp/stratum-backend ./cmd/server
+          go build -o /tmp/stratum-migrate ./cmd/migrate
 
       - name: Build Docker image
         run: docker build -t stratum-backend-ci .
+
+  postgres-integration:
+    name: PostgreSQL integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: stratum_test
+          POSTGRES_USER: stratum_test
+          POSTGRES_PASSWORD: stratum_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U stratum_test -d stratum_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      TEST_DATABASE_URL: postgres://stratum_test:stratum_test_password@127.0.0.1:5432/stratum_test?sslmode=disable
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Run PostgreSQL integration tests
+        run: go test -race -tags=integration ./internal/store ./internal/httpapi

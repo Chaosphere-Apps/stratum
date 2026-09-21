@@ -12,11 +12,24 @@ This backend is the production core for Stratum: workspaces, designs, versions, 
 - `internal/httpapi`: REST routes, WebSocket upgrade, CORS, request handling, provider verification.
 - `internal/analysis`: deterministic analysis suites and scoring.
 
+Large packages are organized by business capability rather than by transport
+verb or storage technology:
+
+- `internal/app/*_service.go`: use-case orchestration for identity, workspaces,
+  designs, versions, docs/reviews, ACL, catalog, analysis, and AI chat.
+- `internal/httpapi/*_handlers.go`: thin transport adapters grouped by the same
+  capabilities; shared middleware and runtime handlers remain separate.
+- `internal/store/memory_*.go` and `postgres_*.go`: behaviorally equivalent
+  repository implementations, with shared normalization/scanning helpers kept
+  explicit.
+
 ## Engineering Philosophy
 
 - Keep the domain model semantic and durable. The design document should remain useful outside any one UI renderer.
 - Prefer small package boundaries over a large service object. Analysis, storage, realtime, and HTTP should evolve independently.
 - Treat production readiness as a default posture: explicit limits, timeouts, validation, safe errors, and observable behavior.
+- Build backend behavior for a premium enterprise product: user-visible actions must be reliable, explainable, and consistent after refresh.
+- Start with the product workflow before the endpoint. Save/load, ACL, review lifecycle, catalog governance, integrations, and analysis should work as coherent systems, not isolated routes.
 - Keep deterministic analysis separate from future AI analysis. AI should enrich or explain, not replace the structured checks.
 - Avoid premature framework gravity. Use the Go standard library where it is enough; add dependencies only when they clearly reduce risk or complexity.
 - Preserve exact structured design JSON when saving versions. Do not normalize away fields that users or future analyzers may need.
@@ -29,6 +42,10 @@ This backend is the production core for Stratum: workspaces, designs, versions, 
 - Do not put long-running AI calls directly in request handlers. Introduce a worker/job boundary when that work becomes real.
 - Keep Postgres as the source of truth for persisted designs; in-memory storage is for tests and local fallback only.
 - If changing storage behavior, update both Postgres and memory repositories and add/adjust tests.
+- Do not add dead endpoints or UI-backed routes that only partially work. Return clear errors for unsupported behavior and keep frontend-visible state truthful.
+- Do not compromise reliability for speed of implementation. Data loss, inconsistent authorization, and broken version/review transitions are release blockers.
+- Treat integrations as optional plug-ins. A failing telemetry, AI, MCP, or SSO integration must not break the core whiteboard, save/load, or review paths.
+- Keep migrations forward-only, deterministic, and safe to apply automatically at startup.
 
 ## Quality Bar
 

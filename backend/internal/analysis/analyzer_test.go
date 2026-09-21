@@ -18,11 +18,64 @@ func TestAnalyzeFindsMissingSignals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Analyze returned error: %v", err)
 	}
-	if report.Score >= 80 {
-		t.Fatalf("score = %d, want below 80 for empty design", report.Score)
+	if report.Score != 0 {
+		t.Fatalf("score = %d, want 0 for empty design", report.Score)
+	}
+	if report.Signals["foundationCompleteness"] != 0 {
+		t.Fatalf("foundation completeness = %v, want 0", report.Signals["foundationCompleteness"])
+	}
+	if !strings.Contains(report.Summary, "Not ready for architectural review") {
+		t.Fatalf("empty design summary is not actionable: %q", report.Summary)
 	}
 	assertFinding(t, report, "requirements", "Use case is missing")
 	assertFinding(t, report, "topology", "No architecture components modeled")
+	assertFinding(t, report, "availability", "Availability and recovery targets are missing")
+}
+
+func TestAnalyzeCapsIncompleteArchitectureAndRewardsReviewableEvidence(t *testing.T) {
+	partial, err := New().Analyze(json.RawMessage(`{
+		"schemaVersion":"sde-ui/v0.1","id":"partial","title":"Partial",
+		"requirementBrief":{"useCase":"Serve requests","functionalRequirements":"Return a response","targetRps":100},
+		"components":[{"id":"svc","type":"compute.service","name":"API","purpose":"Serve requests","metadata":{}}],
+		"connectors":[]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partial.Score > 65 || partial.Score <= 0 {
+		t.Fatalf("partial single-component score = %d, want 1..65", partial.Score)
+	}
+
+	reviewable, err := New().Analyze(json.RawMessage(`{
+		"schemaVersion":"sde-ui/v0.1","id":"ready","title":"Checkout",
+		"requirementBrief":{
+			"useCase":"Customers place orders","functionalRequirements":"Create an order and return its status",
+			"nonFunctionalRequirements":"Multi-AZ deployment with automated failover","targetRps":800,
+			"availabilityRequirement":"99.95%","sla":"p95 500ms","consistencyNotes":"strong read-after-write"
+		},
+		"components":[
+			{"id":"client","type":"client.web","name":"Web","purpose":"Customer checkout","owner":"Web","metadata":{}},
+			{"id":"edge","type":"edge.api_gateway","name":"Gateway","purpose":"Authenticate and route","owner":"Platform","metadata":{}},
+			{"id":"auth","type":"security.identity","name":"Identity","purpose":"Authenticate customers","owner":"Security","metadata":{}},
+			{"id":"svc","type":"compute.service","name":"Checkout","purpose":"Create orders","owner":"Payments","criticality":"critical","metadata":{"notes":"multi-AZ replicas"}},
+			{"id":"db","type":"data.sql_database","name":"Orders","purpose":"Own durable order state","owner":"Payments","criticality":"critical","metadata":{}}
+		],
+		"connectors":[
+			{"id":"c1","fromComponentId":"client","toComponentId":"edge","type":"synchronous","protocol":"https","timeoutMs":450},
+			{"id":"c2","fromComponentId":"edge","toComponentId":"auth","type":"synchronous","protocol":"https","timeoutMs":100},
+			{"id":"c3","fromComponentId":"edge","toComponentId":"svc","type":"synchronous","protocol":"https","timeoutMs":300},
+			{"id":"c4","fromComponentId":"svc","toComponentId":"db","type":"synchronous","protocol":"tls","timeoutMs":150}
+		]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reviewable.Score < 75 {
+		t.Fatalf("reviewable design score = %d, want at least 75; findings=%#v", reviewable.Score, reviewable.Findings)
+	}
+	if reviewable.Signals["foundationCompleteness"] < 90 {
+		t.Fatalf("foundation completeness = %v, want at least 90", reviewable.Signals["foundationCompleteness"])
+	}
 }
 
 func TestAnalyzeIgnoresFramesForComponentCount(t *testing.T) {

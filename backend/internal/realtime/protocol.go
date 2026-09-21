@@ -21,6 +21,7 @@ type ProtocolError struct {
 type UpsertDesignPayload struct {
 	Design         json.RawMessage `json:"design"`
 	CanvasSnapshot json.RawMessage `json:"canvasSnapshot,omitempty"`
+	BaseRevision   string          `json:"baseRevision"`
 }
 
 type WorkspaceSnapshotPayload struct {
@@ -31,10 +32,27 @@ type DesignUpdatedPayload struct {
 	Design domain.Design `json:"design"`
 }
 
+type DesignConflictPayload struct {
+	Design domain.Design `json:"design"`
+}
+
+type PresenceMember struct {
+	UserID       string `json:"userId"`
+	DisplayName  string `json:"displayName"`
+	Role         string `json:"role"`
+	DesignID     string `json:"designId,omitempty"`
+	SessionCount int    `json:"sessionCount"`
+}
+
+type PresenceUpdatedPayload struct {
+	Members []PresenceMember `json:"members"`
+}
+
 const (
 	MessageWorkspaceSnapshot = "workspace.snapshot"
 	MessageDesignUpsert      = "design.upsert"
 	MessageDesignUpdated     = "design.updated"
+	MessagePresenceUpdated   = "presence.updated"
 	MessagePing              = "ping"
 	MessagePong              = "pong"
 	MessageError             = "error"

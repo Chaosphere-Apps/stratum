@@ -53,7 +53,7 @@ func TestWorkspacePolicyWithRolesUserGrantsAndGroupGrants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser group member returned error: %v", err)
 	}
-	workspace, err := repo.CreateWorkspace(ctx, "Platform")
+	workspace, err := repo.CreateWorkspace(ctx, "Platform", architect.ID)
 	if err != nil {
 		t.Fatalf("CreateWorkspace returned error: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestWorkspacePolicyWithRolesUserGrantsAndGroupGrants(t *testing.T) {
 		t.Fatal("admin should manage workspace")
 	}
 	if !authz.CanAccessWorkspace(ctx, architect, workspace.ID, WorkspaceCreateDesign) {
-		t.Fatal("architect should create designs when no explicit ACL exists")
+		t.Fatal("workspace owner should create designs")
 	}
 	if authz.CanAccessWorkspace(ctx, member, workspace.ID, WorkspaceRead) {
 		t.Fatal("member should not read workspace before grant")
@@ -121,7 +121,7 @@ func TestDesignPolicyWithPublicWorkspaceUserAndGroupGrants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser group member returned error: %v", err)
 	}
-	workspace, err := repo.CreateWorkspace(ctx, "Platform")
+	workspace, err := repo.CreateWorkspace(ctx, "Platform", owner.ID)
 	if err != nil {
 		t.Fatalf("CreateWorkspace returned error: %v", err)
 	}

@@ -5,8 +5,8 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"errors"
 	"fmt"
+	"github.com/system-design-evaluator/backend/internal/authn"
 	"strconv"
 	"strings"
 
@@ -17,8 +17,8 @@ const passwordHashIterations = 210000
 
 func hashPassword(password string) (string, error) {
 	password = strings.TrimSpace(password)
-	if len(password) < 8 {
-		return "", errors.New("password must be at least 8 characters")
+	if err := authn.ValidatePassword(password); err != nil {
+		return "", err
 	}
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {

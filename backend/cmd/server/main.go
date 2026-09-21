@@ -18,9 +18,21 @@ import (
 func main() {
 	cfg := config.Load()
 	log := config.Logger()
+	postgresOptions := store.PostgresOptions{
+		AutoMigrate:       cfg.DatabaseAutoMigrate,
+		MaxConns:          int32(cfg.DatabaseMaxConnections),
+		MinConns:          int32(cfg.DatabaseMinConnections),
+		MaxConnLifetime:   cfg.DatabaseMaxConnLifetime,
+		MaxConnIdleTime:   cfg.DatabaseMaxConnIdleTime,
+		HealthCheckPeriod: cfg.DatabaseHealthCheckPeriod,
+		Migration: store.MigrationOptions{
+			LockTimeout:      cfg.MigrationLockTimeout,
+			StatementTimeout: cfg.MigrationStatementTimeout,
+		},
+	}
 
-	startupCtx, cancelStartup := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	storageEngine, err := store.NewStorageEngine(startupCtx, cfg.DatabaseURL)
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), cfg.StartupTimeout)
+	storageEngine, err := store.NewStorageEngineWithOptions(startupCtx, cfg.DatabaseURL, postgresOptions)
 	cancelStartup()
 	if err != nil {
 		log.Error("storage engine init failed", slog.Any("error", err))

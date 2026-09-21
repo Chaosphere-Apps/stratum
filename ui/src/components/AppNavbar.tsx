@@ -85,7 +85,7 @@ export function AppNavbar({
   }, {})
 
   return (
-    <header className="app-navbar">
+    <header className={`app-navbar ${route.screen === 'design' ? 'canvas-navbar' : ''}`}>
       <button className="app-brand" onClick={onHome} title="Go to Stratum home">
         <div className="home-logo">S</div>
         <div>

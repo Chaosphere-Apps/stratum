@@ -11,6 +11,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/system-design-evaluator/backend/internal/domain"
 	"github.com/system-design-evaluator/backend/internal/policy"
+	"github.com/system-design-evaluator/backend/internal/store"
 )
 
 const (
@@ -23,7 +24,9 @@ type Client struct {
 	log         *slog.Logger
 	workspaceID string
 	userID      string
+	displayName string
 	userRole    string
+	designID    string
 	isAdmin     bool
 	send        chan Envelope
 	closeOnce   sync.Once
@@ -36,10 +39,19 @@ func NewClient(conn *websocket.Conn, hub *Hub, log *slog.Logger, workspaceID str
 		log:         log,
 		workspaceID: workspaceID,
 		userID:      userID,
+		displayName: userID,
 		userRole:    userRole,
 		isAdmin:     isAdmin,
 		send:        make(chan Envelope, 32),
 	}
+}
+
+func (c *Client) WithPresence(displayName string, designID string) *Client {
+	if displayName != "" {
+		c.displayName = displayName
+	}
+	c.designID = designID
+	return c
 }
 
 func (c *Client) Run(ctx context.Context) {
@@ -125,8 +137,16 @@ func (c *Client) handleEnvelope(ctx context.Context, envelope Envelope) {
 			c.Send(errorEnvelope(envelope.RequestID, "forbidden", "design edit access is required."))
 			return
 		}
-		design, err := c.hub.UpsertDesign(ctx, c.workspaceID, payload)
+		design, err := c.hub.UpdateDesign(ctx, c.workspaceID, payload)
 		if err != nil {
+			if errors.Is(err, store.ErrDesignConflict) {
+				current, currentErr := c.hub.Repository().GetDesign(ctx, c.workspaceID, designIDFromPayload(payload))
+				if currentErr == nil {
+					encoded, _ := json.Marshal(DesignConflictPayload{Design: current})
+					c.Send(errorEnvelopeWithPayload(envelope.RequestID, "design_conflict", "This design was updated by another editor.", encoded))
+					return
+				}
+			}
 			c.Send(errorEnvelope(envelope.RequestID, "upsert_failed", err.Error()))
 			return
 		}
@@ -143,6 +163,14 @@ func (c *Client) handleEnvelope(ctx context.Context, envelope Envelope) {
 	default:
 		c.Send(errorEnvelope(envelope.RequestID, "unknown_message_type", "Unknown message type."))
 	}
+}
+
+func designIDFromPayload(payload UpsertDesignPayload) string {
+	var document struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(payload.Design, &document)
+	return document.ID
 }
 
 func (c *Client) canEditDesign(ctx context.Context, payload UpsertDesignPayload) bool {
@@ -171,6 +199,12 @@ func errorEnvelope(requestID string, code string, message string) Envelope {
 			Message: message,
 		},
 	}
+}
+
+func errorEnvelopeWithPayload(requestID string, code string, message string, payload json.RawMessage) Envelope {
+	envelope := errorEnvelope(requestID, code, message)
+	envelope.Payload = payload
+	return envelope
 }
 
 func isExpectedClose(err error) bool {

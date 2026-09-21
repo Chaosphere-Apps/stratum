@@ -1,32 +1,20 @@
-# Stratum Docs
+# Stratum documentation
 
-Public product and technical documentation for Stratum.
+The documentation is intentionally organized around using, operating, and contributing to the current product.
 
-## Architecture
+## Use Stratum
 
-- [System Architecture](system-architecture.md)
-- [Platform and Tech Stack Tradeoffs](platform-and-tech-stack.md)
-- [Domain Model](domain-model.md)
-- [Versioning and Exports](versioning-and-exports.md)
+- [User guide](user-guide.md) — workspaces, designs, canvas, requirements, analysis, AI chat, versions, reviews, and access indicators.
+- [Administration and SSO](admin-and-sso.md) — users, groups, access, catalog governance, storage, integrations, AI providers, and Okta.
 
-## Canvas and UI
+## Deploy and operate
 
-- [UI Service](ui.md)
-- [UI Workflows](ui-workflows.md)
+- [All-in-one image](all-in-one-image.md) — build and run the combined UI/API container.
+- [PostgreSQL operations and migrations](postgres-operations.md) — production migration and database guidance.
 
-## Evaluation
+## Develop
 
-- [Structured Design Language](structured-design-language.md)
-- [Formal and Mathematical Architecture Analysis](formal-architecture-analysis.md)
-- [Evaluation Engine](evaluation-engine.md)
-- [Evaluation Suites](evaluation-suites.md)
-
-## Backend
-
-- [Backend Service](backend.md)
-- [Backend Production Readiness](backend-production-readiness.md)
-- [All-in-One Image](all-in-one-image.md)
-
-## Administration
-
-- [Administration and SSO](admin-and-sso.md)
+- [Engineering onboarding](onboarding.md) — repository structure and change workflow.
+- [Backend reference](backend.md) — configuration, API surface, WebSocket behavior, and service boundaries.
+- [UI reference](ui.md) — local frontend development and backend URL resolution.
+- [Testing](testing.md) — unit, integration, browser, coverage, and release checks.

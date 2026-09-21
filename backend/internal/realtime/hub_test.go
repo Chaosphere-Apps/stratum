@@ -3,6 +3,7 @@ package realtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"testing"
 
@@ -60,6 +61,54 @@ func TestHubUpsertDesignDropsInvalidCanvasSnapshot(t *testing.T) {
 	}
 }
 
+func TestHubUpdateDesignUsesOptimisticConcurrency(t *testing.T) {
+	ctx := context.Background()
+	repo := store.NewMemoryRepository()
+	design, err := repo.CreateDesign(ctx, domain.GuestWorkspaceID, "Design", []byte(`{"id":"design-1","title":"Design"}`), "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub := NewHub(repo, slog.Default())
+	firstDocument := json.RawMessage(`{"id":"` + design.ID + `","title":"First editor"}`)
+	staleDocument := json.RawMessage(`{"id":"` + design.ID + `","title":"Stale editor"}`)
+
+	if _, err := hub.UpdateDesign(ctx, domain.GuestWorkspaceID, UpsertDesignPayload{
+		Design:       firstDocument,
+		BaseRevision: design.DocumentRevision,
+	}); err != nil {
+		t.Fatalf("first update returned error: %v", err)
+	}
+	_, err = hub.UpdateDesign(ctx, domain.GuestWorkspaceID, UpsertDesignPayload{
+		Design:       staleDocument,
+		BaseRevision: design.DocumentRevision,
+	})
+	if !errors.Is(err, store.ErrDesignConflict) {
+		t.Fatalf("stale update error = %v, want ErrDesignConflict", err)
+	}
+}
+
+func TestHubPresenceAggregatesTabsPerUserAndDesign(t *testing.T) {
+	hub := NewHub(store.NewMemoryRepository(), slog.Default())
+	firstTab := NewClient(nil, hub, slog.Default(), "workspace-1", "user-1", "architect", false).WithPresence("Ada", "design-1")
+	secondTab := NewClient(nil, hub, slog.Default(), "workspace-1", "user-1", "architect", false).WithPresence("Ada", "design-1")
+	reviewer := NewClient(nil, hub, slog.Default(), "workspace-1", "user-2", "reviewer", false).WithPresence("Grace", "design-2")
+
+	hub.Subscribe("workspace-1", firstTab)
+	hub.Subscribe("workspace-1", secondTab)
+	hub.Subscribe("workspace-1", reviewer)
+	members := hub.presenceMembers("workspace-1")
+
+	if len(members) != 2 {
+		t.Fatalf("presence members = %#v, want two principals", members)
+	}
+	if members[0].DisplayName != "Ada" || members[0].SessionCount != 2 || members[0].DesignID != "design-1" {
+		t.Fatalf("aggregated Ada presence = %#v", members[0])
+	}
+	if members[1].DisplayName != "Grace" || members[1].SessionCount != 1 || members[1].DesignID != "design-2" {
+		t.Fatalf("Grace presence = %#v", members[1])
+	}
+}
+
 func TestClientCanEditDesignBranches(t *testing.T) {
 	ctx := context.Background()
 
@@ -84,7 +133,7 @@ func TestClientCanEditDesignBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("new design requires workspace create or manage access", func(t *testing.T) {
+	t.Run("new design is denied on websocket even with workspace create access", func(t *testing.T) {
 		repo := store.NewMemoryRepository()
 		if _, err := repo.CreateFirstAdmin(ctx, "Admin", "admin@example.com", "password123"); err != nil {
 			t.Fatalf("CreateFirstAdmin returned error: %v", err)
@@ -109,8 +158,8 @@ func TestClientCanEditDesignBranches(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("GrantWorkspaceAccess returned error: %v", err)
 		}
-		if !client.canEditDesign(ctx, payload) {
-			t.Fatal("new design should be allowed with workspace create grant")
+		if client.canEditDesign(ctx, payload) {
+			t.Fatal("new design should use the authorized REST create endpoint before websocket updates")
 		}
 	})
 

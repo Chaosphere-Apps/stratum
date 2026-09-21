@@ -22,5 +22,9 @@ about-stratum/
 
 # Logs and editor state
 *.log
+artifacts/
+ui/coverage/
+ui/playwright-report/
+ui/test-results/
 .idea/
 .vscode/

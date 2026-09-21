@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -9,28 +10,43 @@ import (
 	"github.com/system-design-evaluator/backend/internal/lifecycle"
 )
 
+var ErrDesignConflict = errors.New("design was updated by another editor")
+
 type WorkspaceRepository interface {
 	GetOrCreateGuestWorkspace(ctx context.Context) (domain.Workspace, error)
 	ListWorkspaces(ctx context.Context) ([]domain.Workspace, error)
 	ListWorkspacesPage(ctx context.Context, options PageOptions) ([]domain.Workspace, PageInfo, error)
 	GetWorkspace(ctx context.Context, workspaceID string) (domain.Workspace, error)
-	CreateWorkspace(ctx context.Context, name string) (domain.Workspace, error)
+	CreateWorkspace(ctx context.Context, name string, ownerID string) (domain.Workspace, error)
+	ListAccessibleWorkspacesPage(ctx context.Context, scope AccessScope, options PageOptions) ([]domain.Workspace, PageInfo, error)
 	DeleteWorkspace(ctx context.Context, workspaceID string) error
 }
 
 type DesignRepository interface {
 	ListDesigns(ctx context.Context, workspaceID string) ([]domain.Design, error)
 	ListDesignsPage(ctx context.Context, workspaceID string, options PageOptions) ([]domain.Design, PageInfo, error)
+	ListAccessibleDesignsPage(ctx context.Context, workspaceID string, scope AccessScope, options PageOptions) ([]domain.Design, PageInfo, error)
 	GetDesign(ctx context.Context, workspaceID string, designID string) (domain.Design, error)
 	CreateDesign(ctx context.Context, workspaceID string, name string, document []byte, createdBy string) (domain.Design, error)
 	UpdateDesignMetadata(ctx context.Context, workspaceID string, designID string, name string, access string) (domain.Design, error)
 	UpsertDesign(ctx context.Context, design domain.Design) (domain.Design, error)
+	UpdateDesignDocument(ctx context.Context, workspaceID string, designID string, document []byte, canvasSnapshot []byte, expectedRevision string) (domain.Design, error)
 	DeleteDesign(ctx context.Context, workspaceID string, designID string) error
 	ListDesignVersions(ctx context.Context, workspaceID string, designID string) ([]domain.DesignVersion, error)
 	ListDesignVersionsPage(ctx context.Context, workspaceID string, designID string, options PageOptions) ([]domain.DesignVersion, PageInfo, error)
 	CreateDesignVersion(ctx context.Context, workspaceID string, designID string, createdBy string, remarks string) (domain.DesignVersion, error)
+	UpdateDraftDesignVersion(ctx context.Context, workspaceID string, designID string, versionID string, document []byte, canvasSnapshot []byte, remarks string) (domain.DesignVersion, error)
 	UpdateDesignVersionStatus(ctx context.Context, workspaceID string, designID string, versionID string, status string) (domain.DesignVersion, error)
 	DeleteDesignVersion(ctx context.Context, workspaceID string, designID string, versionID string) error
+}
+
+// AccessScope describes the authenticated principal used by storage-level
+// visibility queries. Filtering in the query is required so pagination cannot
+// hide authorized records behind inaccessible rows.
+type AccessScope struct {
+	UserID   string
+	IsAdmin  bool
+	GroupIDs []string
 }
 
 type DesignDocRepository interface {
@@ -39,6 +55,15 @@ type DesignDocRepository interface {
 	CreateDesignDoc(ctx context.Context, workspaceID string, designID string, title string, body string, format string) (domain.DesignDoc, error)
 	UpdateDesignDoc(ctx context.Context, workspaceID string, designID string, docID string, title string, body string, format string) (domain.DesignDoc, error)
 	DeleteDesignDoc(ctx context.Context, workspaceID string, designID string, docID string) error
+}
+
+type AIConversationRepository interface {
+	ListAIConversations(ctx context.Context, workspaceID string, designID string) ([]domain.AIConversation, error)
+	GetAIConversation(ctx context.Context, workspaceID string, designID string, conversationID string) (domain.AIConversation, error)
+	CreateAIConversation(ctx context.Context, conversation domain.AIConversation) (domain.AIConversation, error)
+	UpdateAIConversationAccess(ctx context.Context, workspaceID string, designID string, conversationID string, accessMode string) (domain.AIConversation, error)
+	ListAIMessages(ctx context.Context, conversationID string, limit int) ([]domain.AIMessage, error)
+	CreateAIMessage(ctx context.Context, message domain.AIMessage) (domain.AIMessage, error)
 }
 
 type CollaborationRepository interface {
@@ -58,7 +83,12 @@ type CollaborationRepository interface {
 	ResetPasswordWithToken(ctx context.Context, token string, password string) (domain.User, error)
 	DeleteUser(ctx context.Context, userID string) error
 	GetSignInConfig(ctx context.Context) (domain.SignInConfig, error)
+	GetSignInConfigWithSecret(ctx context.Context) (domain.SignInConfig, error)
 	UpdateSignInConfig(ctx context.Context, config domain.SignInConfig, clientSecret string) (domain.SignInConfig, error)
+	CreateOIDCFlow(ctx context.Context, flow domain.OIDCFlow) error
+	ConsumeOIDCFlow(ctx context.Context, state string) (domain.OIDCFlow, error)
+	ResolveOIDCUser(ctx context.Context, identity domain.OIDCIdentity, jitProvisioning bool) (domain.User, error)
+	SyncUserAccessGroups(ctx context.Context, userID string, externalGroupNames []string) error
 	GetAIProviderConfig(ctx context.Context) (domain.AIProviderConfig, error)
 	GetAIProviderConfigWithSecret(ctx context.Context) (domain.AIProviderConfig, error)
 	UpdateAIProviderConfig(ctx context.Context, config domain.AIProviderConfig, apiKey string) (domain.AIProviderConfig, error)
@@ -112,6 +142,7 @@ type Repository interface {
 	WorkspaceRepository
 	DesignRepository
 	DesignDocRepository
+	AIConversationRepository
 	CollaborationRepository
 	AccessRepository
 	CatalogRepository

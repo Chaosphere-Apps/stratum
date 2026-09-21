@@ -11,6 +11,13 @@ export interface BackendProfile {
 }
 
 interface ProfileResponse extends BackendProfile {}
+
+export class BackendDesignConflictError extends Error {
+  constructor(public readonly design: BackendDesign) {
+    super('This design was updated by another editor.')
+    this.name = 'BackendDesignConflictError'
+  }
+}
 export interface BackendPageInfo {
   nextCursor?: string
   hasMore: boolean
@@ -65,6 +72,16 @@ export interface BackendSignInConfig {
   jitProvisioning: boolean
   updatedAt: string
 }
+export interface PublicAuthConfig {
+  localPasswordEnabled: boolean
+  ssoEnabled: boolean
+  provider: string
+  ssoStartUrl: string
+  passwordPolicy: PasswordPolicy
+}
+export interface PasswordPolicy {
+  minimumLength: number
+}
 export interface BackendAIProviderConfig {
   enabled: boolean
   provider: string
@@ -115,10 +132,15 @@ export interface BackendCatalogAsset {
   id: string
   name: string
   normalizedName: string
+  kind: string
   type: string
   owner: string
   description: string
   criticality: string
+  status: string
+  aliases: string[]
+  replacementAssetId: string
+  updateMessage: string
   tags: string[]
   metadata?: Record<string, unknown>
   createdBy: string
@@ -170,6 +192,17 @@ export interface BackendWorkspaceGroupAccess {
   createdAt: string
   updatedAt: string
 }
+export interface BackendWorkspaceSharePrincipal {
+  id: string
+  type: 'user' | 'group'
+  name: string
+  description: string
+}
+export interface BackendWorkspaceShareInput {
+  principalType: 'user' | 'group'
+  principalId: string
+  accessLevel: 'viewer' | 'contributor' | 'manager'
+}
 export interface BackendDesignGroupAccess {
   workspaceId: string
   designId: string
@@ -208,6 +241,51 @@ export interface BackendDesignVersion {
   createdBy: string
   createdAt: string
   updatedAt: string
+}
+export interface BackendAIConversation {
+  id: string
+  workspaceId: string
+  designId: string
+  versionId?: string
+  title: string
+  accessMode: 'read' | 'read_write'
+  createdBy: string
+  createdAt: string
+  updatedAt: string
+}
+export interface BackendAIMessageReference {
+  kind: 'component' | 'connector'
+  id: string
+  name?: string
+}
+export interface BackendAIMessage {
+  id: string
+  conversationId: string
+  role: 'user' | 'assistant'
+  content: string
+  references?: BackendAIMessageReference[]
+  provider?: string
+  model?: string
+  createdBy?: string
+  createdAt: string
+}
+interface AIConversationsResponse {
+  conversations: BackendAIConversation[]
+}
+interface AIConversationResponse {
+  conversation: BackendAIConversation
+}
+interface AIMessagesResponse {
+  conversation: BackendAIConversation
+  messages: BackendAIMessage[]
+}
+interface AIMessageResponse {
+  userMessage: BackendAIMessage
+  assistantMessage: BackendAIMessage
+  followUps: string[]
+  designUpdated: boolean
+  updatedDesign?: BackendDesign
+  updateSummary?: string
 }
 interface CatalogAssetsResponse {
   assets: BackendCatalogAsset[]
@@ -365,12 +443,16 @@ interface WorkspacesResponse {
 interface WorkspaceResponse {
   workspace: BackendWorkspace
 }
+interface WorkspaceSharePrincipalsResponse {
+  principals: BackendWorkspaceSharePrincipal[]
+}
 interface DesignsResponse {
   designs: BackendDesign[]
   page?: BackendPageInfo
 }
 interface DesignResponse {
   design: BackendDesign
+  version?: BackendDesignVersion
 }
 export interface BackendDesignDoc {
   id: string
@@ -462,6 +544,10 @@ function apiBaseUrl() {
   return ''
 }
 
+export function oidcSignInURL() {
+  return `${apiBaseUrl()}/api/auth/oidc/start`
+}
+
 function pageQuery(options?: BackendPageOptions) {
   const params = new URLSearchParams()
   const query = options?.query?.trim()
@@ -491,9 +577,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const body = await response.text().catch(() => '')
     let message = body
     try {
-      const parsed = body ? (JSON.parse(body) as { error?: string }) : null
+      const parsed = body ? (JSON.parse(body) as { error?: string; design?: BackendDesign }) : null
+      if (response.status === 409 && parsed?.design) throw new BackendDesignConflictError(parsed.design)
       message = parsed?.error ?? body
-    } catch {
+    } catch (error) {
+      if (error instanceof BackendDesignConflictError) throw error
       message = body
     }
     throw new Error(`Backend request failed: ${response.status}${message ? ` - ${message}` : ''}`)
@@ -509,6 +597,11 @@ export function fetchProfile() {
 
 export function fetchSetupStatus() {
   return request<SetupStatusResponse>('/api/setup/status')
+}
+
+export async function fetchAuthConfig() {
+  const response = await request<Omit<PublicAuthConfig, 'ssoStartUrl'>>('/api/auth/config')
+  return { ...response, ssoStartUrl: oidcSignInURL() }
 }
 
 export function fetchStorageStatus() {
@@ -592,14 +685,28 @@ export function updateSignInConfig(input: Partial<BackendSignInConfig> & { clien
   })
 }
 
+export function verifySignInConfig() {
+  return request<{ verified: boolean }>('/api/admin/sign-in/verify', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+}
+
 export function fetchAIProviderConfig() {
   return request<AIProviderConfigResponse>('/api/admin/ai-provider')
 }
 
 export function updateAIProviderConfig(input: Partial<BackendAIProviderConfig> & { apiKey?: string }) {
+	const payload = {
+		enabled: Boolean(input.enabled),
+		provider: input.provider ?? '',
+		model: input.model ?? '',
+		baseUrl: input.baseUrl ?? '',
+		...(input.apiKey ? { apiKey: input.apiKey } : {}),
+	}
   return request<AIProviderConfigResponse>('/api/admin/ai-provider', {
     method: 'PATCH',
-    body: JSON.stringify(input),
+    body: JSON.stringify(payload),
   })
 }
 
@@ -656,10 +763,15 @@ export function fetchCatalogAssets(query = '', options?: Omit<BackendPageOptions
 
 export function createCatalogAsset(input: {
   name: string
+  kind?: string
   type: string
   owner?: string
   description?: string
   criticality?: string
+  status?: string
+  aliases?: string[]
+  replacementAssetId?: string
+  updateMessage?: string
   tags?: string[]
   metadata?: Record<string, unknown>
 }) {
@@ -697,10 +809,14 @@ export function fetchWorkspaces(options?: BackendPageOptions) {
   return request<WorkspacesResponse>(`/api/workspaces${pageQuery(options)}`)
 }
 
-export function createWorkspace(name: string) {
+export function fetchWorkspaceSharePrincipals() {
+  return request<WorkspaceSharePrincipalsResponse>('/api/workspace-share-principals')
+}
+
+export function createWorkspace(input: { name: string; shares?: BackendWorkspaceShareInput[] }) {
   return request<WorkspaceResponse>('/api/workspaces', {
     method: 'POST',
-    body: JSON.stringify({ name }),
+    body: JSON.stringify(input),
   })
 }
 
@@ -863,7 +979,7 @@ export function revokeDesignGroupAccess(workspaceId: string, designId: string, g
 export function saveDesignDocument(
   workspaceId: string,
   designId: string,
-  input: { document: unknown; versionRemarks?: string },
+  input: { document: unknown; baseRevision: string; versionRemarks?: string; versionId?: string },
 ) {
   return request<DesignResponse>(
     `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/document`,
@@ -920,13 +1036,59 @@ export function fetchWorkspaceDesign(workspaceId: string, designId: string) {
   )
 }
 
-export function analyzeDesign(workspaceId: string, designId: string) {
+export function analyzeDesign(
+  workspaceId: string,
+  designId: string,
+  options: { versionId?: string; focus?: string } = {},
+) {
   return request<AnalysisResponse>(
     `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/analysis`,
     {
       method: 'POST',
-      body: JSON.stringify({}),
+      body: JSON.stringify(options),
     },
+  )
+}
+
+export function fetchAIConversations(workspaceId: string, designId: string) {
+  return request<AIConversationsResponse>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/ai/conversations`,
+  )
+}
+
+export function createAIConversation(
+  workspaceId: string,
+  designId: string,
+  input: { title?: string; versionId?: string; accessMode?: 'read' | 'read_write' },
+) {
+  return request<AIConversationResponse>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/ai/conversations`,
+    { method: 'POST', body: JSON.stringify(input) },
+  )
+}
+
+export function updateAIConversationAccess(
+  workspaceId: string,
+  designId: string,
+  conversationId: string,
+  accessMode: 'read' | 'read_write',
+) {
+  return request<AIConversationResponse>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/ai/conversations/${encodeURIComponent(conversationId)}`,
+    { method: 'PATCH', body: JSON.stringify({ accessMode }) },
+  )
+}
+
+export function fetchAIMessages(workspaceId: string, designId: string, conversationId: string) {
+  return request<AIMessagesResponse>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/ai/conversations/${encodeURIComponent(conversationId)}/messages`,
+  )
+}
+
+export function sendAIMessage(workspaceId: string, designId: string, conversationId: string, content: string) {
+  return request<AIMessageResponse>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/ai/conversations/${encodeURIComponent(conversationId)}/messages`,
+    { method: 'POST', body: JSON.stringify({ content }) },
   )
 }
 
