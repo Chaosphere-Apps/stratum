@@ -312,6 +312,9 @@ func (ctx *analysisContext) runConsistencySuite() {
 }
 
 func (ctx *analysisContext) runAvailabilitySuite() {
+	if blank(ctx.document.RequirementBrief.AvailabilityRequirement) && blank(ctx.document.RequirementBrief.SLA) {
+		ctx.add("medium", "availability", "Availability and recovery targets are missing", "The design has no availability objective, latency SLA, recovery target, or failure tolerance to evaluate.", "", "", "Capture availability, latency, RTO/RPO, and acceptable degradation for critical journeys.")
+	}
 	availability := parseAvailability(ctx.document.RequirementBrief.AvailabilityRequirement)
 	if availability > 0 {
 		ctx.signals["availabilityTarget"] = availability
@@ -418,15 +421,107 @@ func (ctx *analysisContext) report() Report {
 	}
 	sort.Slice(suites, func(i, j int) bool { return suites[i].Name < suites[j].Name })
 
-	score := clampInt(100-int(math.Round(totalPenalty/1.8)), 0, 100)
+	riskScore := clampInt(100-int(math.Round(totalPenalty/1.8)), 0, 100)
+	foundationScore := ctx.foundationScore()
+	ctx.signals["foundationCompleteness"] = float64(foundationScore)
+	score := min(riskScore, foundationScore)
 	summary := "Structured analysis completed across requirements, topology, traffic, consistency, availability, security, and data."
-	if len(ctx.findings) == 0 {
+	if len(ctx.realComponents()) == 0 {
+		summary = "Not ready for architectural review. Model the critical request path and capture its requirements before using the readiness score for a design decision."
+	} else if foundationScore < 50 {
+		summary = "Early architecture draft. Core design evidence is still missing; complete the requirements and critical data flow before reviewing production readiness."
+	} else if score < 75 {
+		summary = "Architecture review identified material gaps. Resolve the highest-severity findings and document the missing operating targets before approval."
+	} else if len(ctx.findings) == 0 {
 		summary = "Structured analysis found no base issues. The design is ready for deeper mathematical and AI review."
 	}
 	sort.SliceStable(ctx.findings, func(i, j int) bool {
 		return severityPenalty(ctx.findings[i].Severity) > severityPenalty(ctx.findings[j].Severity)
 	})
 	return Report{Summary: summary, Score: score, Findings: ctx.findings, Signals: ctx.signals, Suites: suites, Workflow: deterministicWorkflow()}
+}
+
+func (ctx *analysisContext) foundationScore() int {
+	brief := ctx.document.RequirementBrief
+	realComponents := ctx.realComponents()
+	if len(realComponents) == 0 {
+		return 0
+	}
+
+	score := 0
+	if !blank(brief.UseCase) || !blank(brief.ProblemStatement) {
+		score += 10
+	}
+	if !blank(brief.FunctionalRequirements) {
+		score += 10
+	}
+	if !blank(brief.NonFunctionalRequirements) {
+		score += 5
+	}
+	if brief.TargetRPS != nil || !blank(brief.TrafficNotes) {
+		score += 10
+	}
+	if !blank(brief.ConsistencyNotes) {
+		score += 8
+	}
+	if !blank(brief.AvailabilityRequirement) || !blank(brief.SLA) {
+		score += 8
+	}
+
+	score += 15
+	if len(ctx.document.Connectors) > 0 {
+		score += 12
+	}
+
+	componentsWithPurpose := 0
+	criticalComponents := 0
+	ownedCriticalComponents := 0
+	for _, component := range realComponents {
+		if !blank(component.Purpose) {
+			componentsWithPurpose++
+		}
+		if isCritical(component) {
+			criticalComponents++
+			if !blank(component.Owner) {
+				ownedCriticalComponents++
+			}
+		}
+	}
+	score += int(math.Round(6 * float64(componentsWithPurpose) / float64(len(realComponents))))
+	if criticalComponents == 0 {
+		score += 4
+	} else {
+		score += int(math.Round(4 * float64(ownedCriticalComponents) / float64(criticalComponents)))
+	}
+
+	if len(ctx.document.Connectors) > 0 {
+		validConnectors := 0
+		for _, connector := range ctx.document.Connectors {
+			_, sourceExists := ctx.componentsByID[connector.FromComponentID]
+			_, targetExists := ctx.componentsByID[connector.ToComponentID]
+			if sourceExists && targetExists {
+				validConnectors++
+			}
+		}
+		score += int(math.Round(4 * float64(validConnectors) / float64(len(ctx.document.Connectors))))
+	}
+	if ctx.hasTypePrefix("client.") || ctx.hasTypePrefix("edge.") || ctx.hasTypePrefix("external.") {
+		score += 3
+	}
+	if ctx.hasTypePrefix("compute.") {
+		score += 3
+	}
+	if ctx.hasTypePrefix("data.") {
+		score += 2
+	}
+
+	if len(realComponents) == 1 {
+		return min(score, 65)
+	}
+	if len(ctx.document.Connectors) == 0 {
+		return min(score, 40)
+	}
+	return clampInt(score, 0, 100)
 }
 
 func (ctx *analysisContext) realComponents() []component {

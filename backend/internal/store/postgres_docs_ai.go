@@ -127,7 +127,7 @@ func (r *PostgresRepository) ListAIConversations(ctx context.Context, workspaceI
 		return nil, err
 	}
 	rows, err := r.pool.Query(ctx, `
-SELECT id, workspace_id, design_id, COALESCE(version_id, ''), title, created_by, created_at, updated_at
+SELECT id, workspace_id, design_id, COALESCE(version_id, ''), title, access_mode, created_by, created_at, updated_at
 FROM ai_conversations
 WHERE workspace_id = $1 AND design_id = $2
 ORDER BY updated_at DESC
@@ -139,7 +139,7 @@ ORDER BY updated_at DESC
 	items := []domain.AIConversation{}
 	for rows.Next() {
 		var item domain.AIConversation
-		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.DesignID, &item.VersionID, &item.Title, &item.CreatedBy, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.DesignID, &item.VersionID, &item.Title, &item.AccessMode, &item.CreatedBy, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -150,11 +150,11 @@ ORDER BY updated_at DESC
 func (r *PostgresRepository) GetAIConversation(ctx context.Context, workspaceID string, designID string, conversationID string) (domain.AIConversation, error) {
 	var item domain.AIConversation
 	err := r.pool.QueryRow(ctx, `
-SELECT id, workspace_id, design_id, COALESCE(version_id, ''), title, created_by, created_at, updated_at
+SELECT id, workspace_id, design_id, COALESCE(version_id, ''), title, access_mode, created_by, created_at, updated_at
 FROM ai_conversations
 WHERE workspace_id = $1 AND design_id = $2 AND id = $3
 `, workspaceID, designID, conversationID).Scan(
-		&item.ID, &item.WorkspaceID, &item.DesignID, &item.VersionID, &item.Title, &item.CreatedBy, &item.CreatedAt, &item.UpdatedAt,
+		&item.ID, &item.WorkspaceID, &item.DesignID, &item.VersionID, &item.Title, &item.AccessMode, &item.CreatedBy, &item.CreatedAt, &item.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.AIConversation{}, errors.New("AI conversation not found")
@@ -181,11 +181,12 @@ func (r *PostgresRepository) CreateAIConversation(ctx context.Context, conversat
 		}
 	}
 	now := r.clock().UTC()
-	conversation.ID = fmt.Sprintf("ai_conversation_%d", now.UnixNano())
+	conversation.ID = fmt.Sprintf("chat_%d", now.UnixNano())
 	conversation.Title = strings.TrimSpace(conversation.Title)
 	if conversation.Title == "" {
 		conversation.Title = "Architecture discussion"
 	}
+	conversation.AccessMode = normalizedAIConversationAccess(conversation.AccessMode)
 	conversation.CreatedAt = now
 	conversation.UpdatedAt = now
 	var versionID any
@@ -193,9 +194,9 @@ func (r *PostgresRepository) CreateAIConversation(ctx context.Context, conversat
 		versionID = conversation.VersionID
 	}
 	_, err = tx.Exec(ctx, `
-INSERT INTO ai_conversations (id, workspace_id, design_id, version_id, title, created_by, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
-`, conversation.ID, conversation.WorkspaceID, conversation.DesignID, versionID, conversation.Title, conversation.CreatedBy, now)
+INSERT INTO ai_conversations (id, workspace_id, design_id, version_id, title, access_mode, created_by, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+`, conversation.ID, conversation.WorkspaceID, conversation.DesignID, versionID, conversation.Title, conversation.AccessMode, conversation.CreatedBy, now)
 	if err != nil {
 		return domain.AIConversation{}, err
 	}
@@ -203,6 +204,22 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
 		return domain.AIConversation{}, err
 	}
 	return conversation, nil
+}
+
+func (r *PostgresRepository) UpdateAIConversationAccess(ctx context.Context, workspaceID string, designID string, conversationID string, accessMode string) (domain.AIConversation, error) {
+	var item domain.AIConversation
+	err := r.pool.QueryRow(ctx, `
+UPDATE ai_conversations
+SET access_mode = $4, updated_at = $5
+WHERE workspace_id = $1 AND design_id = $2 AND id = $3
+RETURNING id, workspace_id, design_id, COALESCE(version_id, ''), title, access_mode, created_by, created_at, updated_at
+`, workspaceID, designID, conversationID, normalizedAIConversationAccess(accessMode), r.clock().UTC()).Scan(
+		&item.ID, &item.WorkspaceID, &item.DesignID, &item.VersionID, &item.Title, &item.AccessMode, &item.CreatedBy, &item.CreatedAt, &item.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.AIConversation{}, errors.New("AI conversation not found")
+	}
+	return item, err
 }
 
 func (r *PostgresRepository) ListAIMessages(ctx context.Context, conversationID string, limit int) ([]domain.AIMessage, error) {

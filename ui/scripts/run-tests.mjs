@@ -1,32 +1,15 @@
 import { spawnSync } from 'node:child_process'
+import { readdirSync } from 'node:fs'
 
-const batches = [
-  [
-    'tests/designModel.test.ts',
-    'tests/designUtils.test.ts',
-    'tests/formatAndStorage.test.ts',
-    'tests/journeyModel.test.ts',
-    'tests/navigation.test.ts',
-    'tests/versionLifecycle.test.ts',
-    'tests/backendApi.test.ts',
-  ],
-  [
-    'tests/authScreens.test.tsx',
-    'tests/formFields.test.tsx',
-    'tests/statusAndErrors.test.tsx',
-    'tests/homeScreen.test.tsx',
-    'tests/appNavbar.test.tsx',
-    'tests/canvasInteractions.test.ts',
-    'tests/canvasLayout.test.ts',
-    'tests/catalogGovernance.test.ts',
-    'tests/designLifecycleModals.test.tsx',
-  'tests/inspectorPanels.test.tsx',
-  'tests/collaborationPanels.test.tsx',
-  'tests/aiImportModals.test.tsx',
-  'tests/richTextDocEditor.test.tsx',
-  'tests/reactFlowCanvasProvider.test.tsx',
-  ],
-]
+const testFiles = readdirSync('tests')
+  .filter((file) => /\.test\.tsx?$/.test(file))
+  .sort()
+  .map((file) => `tests/${file}`)
+
+if (testFiles.length === 0) throw new Error('No UI test files discovered')
+
+const midpoint = Math.ceil(testFiles.length / 2)
+const batches = [testFiles.slice(0, midpoint), testFiles.slice(midpoint)].filter((batch) => batch.length > 0)
 
 for (const files of batches) {
   const result = spawnSync(process.execPath, ['./node_modules/vitest/vitest.mjs', 'run', ...files], {

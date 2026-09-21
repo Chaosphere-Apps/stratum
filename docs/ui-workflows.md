@@ -90,7 +90,7 @@ Example actions:
 - "Explain why this queue exists."
 - "What should I ask the product team?"
 
-The centrally managed AI provider must be enabled before chat is available. Conversation messages are stored separately from the versioned design document.
+The centrally managed AI provider must be enabled before chat is available. Conversation messages are stored separately from the versioned design document. New conversations are read-only by default. A user with edit access can opt a working-design conversation into **Read + edit**; saved-version chats remain read-only, and the panel explains the active scope before the user sends a message.
 
 ## 7. Analysis Suite Panel
 

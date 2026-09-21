@@ -57,7 +57,16 @@ jobs:
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
 
       - name: Report coverage
-        run: go tool cover -func=coverage.out | tail -1
+        run: |
+          go tool cover -func=coverage.out | tail -1
+          total="$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')"
+          awk -v coverage="$total" 'BEGIN { if (coverage + 0 < 43) { print "backend coverage " coverage "% is below required 43%"; exit 1 } }'
+
+      - name: Enforce HTTP feature coverage
+        run: |
+          go test -coverprofile=httpapi-coverage.out ./internal/httpapi
+          total="$(go tool cover -func=httpapi-coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')"
+          awk -v coverage="$total" 'BEGIN { if (coverage + 0 < 50) { print "HTTP API coverage " coverage "% is below required 50%"; exit 1 } }'
 
       - name: Upload coverage
         if: always()

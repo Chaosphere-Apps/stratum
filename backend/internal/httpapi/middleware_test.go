@@ -50,6 +50,46 @@ func TestDecodeJSONRejectsOversizedBody(t *testing.T) {
 	}
 }
 
+func TestJSONRequestErrorExplainsSafeValidationFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		max  int64
+		want string
+	}{
+		{name: "unknown field", body: `{"name":"Workspace","apiKeySet":true}`, max: 1024, want: `request contains unsupported field "apiKeySet"`},
+		{name: "malformed", body: `{"name":`, max: 1024, want: "request body contains malformed JSON"},
+		{name: "oversized", body: `{"name":"Workspace"}`, max: 4, want: "request body exceeds the allowed size"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(test.body))
+			recorder := httptest.NewRecorder()
+			var body struct {
+				Name string `json:"name"`
+			}
+			err := decodeJSON(recorder, request, test.max, &body)
+			if got := jsonRequestError(err); got != test.want {
+				t.Fatalf("jsonRequestError() = %q, want %q (decode error: %v)", got, test.want, err)
+			}
+		})
+	}
+}
+
+func TestServerErrorsRemainPrivateUnlessExplicitlyMarkedPublic(t *testing.T) {
+	privateRecorder := httptest.NewRecorder()
+	writeError(privateRecorder, http.StatusServiceUnavailable, "database password leaked")
+	if strings.Contains(privateRecorder.Body.String(), "database password") || !strings.Contains(privateRecorder.Body.String(), "internal server error") {
+		t.Fatalf("private server error was not sanitized: %q", privateRecorder.Body.String())
+	}
+
+	publicRecorder := httptest.NewRecorder()
+	writePublicError(publicRecorder, http.StatusServiceUnavailable, "The AI provider is temporarily unavailable.")
+	if !strings.Contains(publicRecorder.Body.String(), "temporarily unavailable") {
+		t.Fatalf("trusted public error was hidden: %q", publicRecorder.Body.String())
+	}
+}
+
 func TestValidateProviderEndpointRejectsPrivateAddress(t *testing.T) {
 	if err := validateProviderEndpoint("http://127.0.0.1:11434", false); err == nil {
 		t.Fatal("expected private provider URL to be rejected")

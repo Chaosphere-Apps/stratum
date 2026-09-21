@@ -4,7 +4,8 @@ Stratum uses a risk-based test strategy. Coverage is a release gate, but the pur
 
 ## Quality goals
 
-- At least 90% statement coverage in both backend and frontend before a production release.
+- Coverage cannot fall below the checked-in CI floors. The floors are ratchets, not completion targets: backend is currently 43% statements with a separate 50% HTTP feature boundary; UI is 26% statements, 31% branches, 28% functions, and 27% lines.
+- The long-term production target is 90% for testable business modules. Large orchestration shells are additionally protected by browser workflows rather than line coverage alone.
 - Every authorization decision, lifecycle transition, persistence operation, and destructive canvas action has a behavioral test.
 - Tests are deterministic, parallel-safe, and do not depend on developer data.
 - External systems are exercised through protocol-compatible local fakes; PostgreSQL is exercised against a real database.
@@ -48,11 +49,13 @@ Tests should prefer accessible queries and user interactions. Pure graph transfo
 
 ### Browser workflows
 
-Playwright protects only high-value cross-surface workflows:
+Playwright protects high-value cross-surface workflows. The currently automated workflow covers first-admin setup, private workspace creation, name-only design creation, component creation, save, and reload persistence.
 
-- first-admin setup and local sign-in;
-- create a private workspace and share it;
-- create a design, add/connect/delete components, save, reload, and reopen;
+The following workflows remain required additions before they can be described as fully covered:
+
+- local sign-in after setup and password reset;
+- workspace sharing with direct and group grants;
+- connect, move, resize, and delete canvas components;
 - create a version, request review, review it, and promote the reviewed version;
 - enforce workspace/design ACLs for another user;
 - configure stateless/database mode and verify persistence warnings.
@@ -77,7 +80,7 @@ Coverage output is written under `artifacts/coverage/`. Generated coverage and b
 
 ## Coverage policy
 
-The release target is 90% statements for each service, with critical packages held to a stronger behavioral standard:
+Coverage is enforced in CI and ratcheted upward as scenarios are added. It is not currently accurate to claim 90% repository coverage. Critical packages are held to a stronger behavioral standard:
 
 | Surface | Required behavior |
 | --- | --- |

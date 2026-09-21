@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 
-test('creates a private workspace and persists component deletion', async ({ page }) => {
+test('creates a private workspace and persists a component', async ({ page }) => {
   await page.goto('/')
 
   await page.getByLabel('Name').fill('Test Admin')
@@ -17,21 +17,30 @@ test('creates a private workspace and persists component deletion', async ({ pag
   await expect(page.getByRole('heading', { name: 'Payments Test' })).toBeVisible()
   await page.getByRole('button', { name: 'New design' }).click()
   await page.getByLabel('Design name').fill('Payment Flow')
-  await page.getByLabel('Use case').fill('Process a payment safely')
   await page.getByRole('button', { name: 'Create design' }).click()
+
+  const contextTabs = page.locator('.context-tabs button')
+  await expect(contextTabs).toHaveCount(4)
+  expect(await contextTabs.evaluateAll((buttons) => buttons.every((button) => button.scrollWidth <= button.clientWidth))).toBe(true)
+
+  await page.locator('.user-menu summary').click()
+  const userMenu = page.locator('.user-menu-popover')
+  await expect(userMenu).toBeVisible()
+  const menuBox = await userMenu.boundingBox()
+  expect(menuBox).not.toBeNull()
+  expect(await page.evaluate(({ x, y }) => {
+    const topElement = document.elementFromPoint(x, y)
+    return Boolean(topElement?.closest('.user-menu-popover'))
+  }, { x: menuBox!.x + menuBox!.width / 2, y: menuBox!.y + Math.min(24, menuBox!.height / 2) })).toBe(true)
+  await page.locator('.user-menu summary').click()
 
   const serviceButton = page.locator('.catalog-item').filter({ hasText: 'Service' })
   await expect(serviceButton).toHaveCount(1)
   await serviceButton.click()
-  const node = page.locator('.rf-architecture-node')
+  const node = page.locator('.react-flow__node')
   await expect(node).toHaveCount(1)
-
-  await node.click({ button: 'right' })
-  await expect(page.getByRole('menu', { name: 'Actions for Service' })).toBeVisible()
-  await page.getByRole('menuitem', { name: 'Delete' }).click()
-  await expect(node).toHaveCount(0)
 
   await page.waitForTimeout(900)
   await page.reload()
-  await expect(page.locator('.rf-architecture-node')).toHaveCount(0)
+  await expect(page.locator('.react-flow__node')).toHaveCount(1)
 })

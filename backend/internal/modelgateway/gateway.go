@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -29,6 +30,14 @@ type Request struct {
 
 type Gateway interface {
 	Complete(context.Context, domain.AIProviderConfig, Request) (string, error)
+}
+
+type ProviderHTTPError struct {
+	StatusCode int
+}
+
+func (e *ProviderHTTPError) Error() string {
+	return fmt.Sprintf("provider rejected the request (HTTP %d)", e.StatusCode)
 }
 
 type HTTPGateway struct {
@@ -62,7 +71,65 @@ func (g *HTTPGateway) Complete(ctx context.Context, config domain.AIProviderConf
 	if strings.EqualFold(config.Provider, "anthropic") {
 		return g.completeAnthropic(ctx, endpoint, config, input)
 	}
+	if strings.EqualFold(config.Provider, "google") {
+		return g.completeGoogle(ctx, endpoint, config, input)
+	}
 	return g.completeOpenAI(ctx, endpoint, config, input)
+}
+
+func (g *HTTPGateway) completeGoogle(ctx context.Context, endpoint string, config domain.AIProviderConfig, input Request) (string, error) {
+	contents := make([]map[string]any, 0, len(input.Messages))
+	for _, message := range input.Messages {
+		role := "user"
+		if strings.EqualFold(message.Role, "assistant") || strings.EqualFold(message.Role, "model") {
+			role = "model"
+		}
+		contents = append(contents, map[string]any{
+			"role":  role,
+			"parts": []map[string]string{{"text": message.Content}},
+		})
+	}
+	generationConfig := map[string]any{"temperature": 0.1}
+	if input.JSONResponse {
+		generationConfig["responseMimeType"] = "application/json"
+	}
+	if input.MaxTokens > 0 {
+		generationConfig["maxOutputTokens"] = input.MaxTokens
+	}
+	payload := map[string]any{
+		"contents":         contents,
+		"generationConfig": generationConfig,
+	}
+	if strings.TrimSpace(input.System) != "" {
+		payload["systemInstruction"] = map[string]any{
+			"parts": []map[string]string{{"text": input.System}},
+		}
+	}
+	model := strings.TrimPrefix(strings.TrimSpace(config.Model), "models/")
+	if model == "" {
+		return "", errors.New("AI model is required")
+	}
+	var parsed struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	path := strings.TrimRight(endpoint, "/") + "/models/" + url.PathEscape(model) + ":generateContent"
+	if err := g.doJSON(ctx, path, config, payload, &parsed); err != nil {
+		return "", err
+	}
+	for _, candidate := range parsed.Candidates {
+		for _, part := range candidate.Content.Parts {
+			if strings.TrimSpace(part.Text) != "" {
+				return strings.TrimSpace(part.Text), nil
+			}
+		}
+	}
+	return "", errors.New("provider returned an empty response")
 }
 
 func (g *HTTPGateway) completeOpenAI(ctx context.Context, endpoint string, config domain.AIProviderConfig, input Request) (string, error) {
@@ -130,34 +197,64 @@ func (g *HTTPGateway) doJSON(ctx context.Context, endpoint string, config domain
 	if err != nil {
 		return err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return errors.New("provider URL is invalid")
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "application/json")
-	if strings.EqualFold(config.Provider, "anthropic") {
-		request.Header.Set("x-api-key", strings.TrimSpace(config.APIKey))
-		request.Header.Set("anthropic-version", "2023-06-01")
-	} else {
-		request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(config.APIKey))
-	}
 	client := g.Client
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	response, err := client.Do(request)
-	if err != nil {
-		return errors.New("provider could not be reached")
+	for attempt := 0; attempt < 3; attempt++ {
+		request, requestErr := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if requestErr != nil {
+			return errors.New("provider URL is invalid")
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Accept", "application/json")
+		if strings.EqualFold(config.Provider, "anthropic") {
+			request.Header.Set("x-api-key", strings.TrimSpace(config.APIKey))
+			request.Header.Set("anthropic-version", "2023-06-01")
+		} else if strings.EqualFold(config.Provider, "google") {
+			request.Header.Set("x-goog-api-key", strings.TrimSpace(config.APIKey))
+		} else {
+			request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(config.APIKey))
+		}
+		response, requestErr := client.Do(request)
+		if requestErr != nil {
+			if attempt < 2 && waitForProviderRetry(ctx, attempt) {
+				continue
+			}
+			return errors.New("provider could not be reached")
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			status := response.StatusCode
+			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 32<<10))
+			_ = response.Body.Close()
+			if isTransientProviderStatus(status) && attempt < 2 && waitForProviderRetry(ctx, attempt) {
+				continue
+			}
+			return &ProviderHTTPError{StatusCode: status}
+		}
+		decodeErr := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(target)
+		_ = response.Body.Close()
+		if decodeErr != nil {
+			return errors.New("provider returned invalid JSON")
+		}
+		return nil
 	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return errors.New("provider rejected the request")
+	return errors.New("provider could not be reached")
+}
+
+func isTransientProviderStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
+}
+
+func waitForProviderRetry(ctx context.Context, attempt int) bool {
+	timer := time.NewTimer(time.Duration(attempt+1) * 250 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(target); err != nil {
-		return errors.New("provider returned invalid JSON")
-	}
-	return nil
 }
 
 func ProviderBaseURL(provider string, baseURL string) (string, error) {
@@ -172,6 +269,8 @@ func ProviderBaseURL(provider string, baseURL string) (string, error) {
 		return "https://api.anthropic.com/v1", nil
 	case "openrouter":
 		return "https://openrouter.ai/api/v1", nil
+	case "google":
+		return "https://generativelanguage.googleapis.com/v1beta", nil
 	default:
 		return "", errors.New("base URL is required for custom providers")
 	}

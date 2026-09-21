@@ -1,6 +1,8 @@
 import type { ComponentType, DesignComponent, DesignDocument, RequirementBrief } from './types'
 import { defaultRedisMetadata } from './catalog'
 
+export const MAX_DESIGN_NAME_LENGTH = 120
+
 export function createEmptyRequirementBrief(input: Partial<RequirementBrief> = {}): RequirementBrief {
   return {
     useCase: input.useCase ?? '',

@@ -61,6 +61,7 @@ type AIConversationRepository interface {
 	ListAIConversations(ctx context.Context, workspaceID string, designID string) ([]domain.AIConversation, error)
 	GetAIConversation(ctx context.Context, workspaceID string, designID string, conversationID string) (domain.AIConversation, error)
 	CreateAIConversation(ctx context.Context, conversation domain.AIConversation) (domain.AIConversation, error)
+	UpdateAIConversationAccess(ctx context.Context, workspaceID string, designID string, conversationID string, accessMode string) (domain.AIConversation, error)
 	ListAIMessages(ctx context.Context, conversationID string, limit int) ([]domain.AIMessage, error)
 	CreateAIMessage(ctx context.Context, message domain.AIMessage) (domain.AIMessage, error)
 }

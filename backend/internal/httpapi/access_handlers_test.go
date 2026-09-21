@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"github.com/system-design-evaluator/backend/internal/config"
 	"github.com/system-design-evaluator/backend/internal/domain"
 	"github.com/system-design-evaluator/backend/internal/realtime"
@@ -11,6 +12,78 @@ import (
 	"testing"
 	"time"
 )
+
+func TestAccessGroupLifecycleThroughHTTP(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	admin, err := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member, err := repo.CreateUser(t.Context(), "Member", "member@example.com", "member", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.GetOrCreateGuestWorkspace(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	token, err := repo.CreateSession(t.Context(), admin.ID, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(config.Config{}, realtime.NewHub(repo, config.Logger()), config.Logger())
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.AddCookie(&http.Cookie{Name: "stratum_session", Value: token})
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	created := request(http.MethodPost, "/api/admin/access/groups", `{"name":"Platform architects","description":"Architecture owners","oktaGroupName":"platform-architects"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create group status=%d body=%q", created.Code, created.Body.String())
+	}
+	var createdBody struct {
+		Group domain.AccessGroup `json:"group"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &createdBody); err != nil {
+		t.Fatal(err)
+	}
+	groupID := createdBody.Group.ID
+	if groupID == "" {
+		t.Fatalf("created group=%#v", createdBody.Group)
+	}
+
+	updated := request(http.MethodPatch, "/api/admin/access/groups/"+groupID, `{"name":"Platform architecture","description":"Updated","oktaGroupName":"platform-architecture"}`)
+	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), "Platform architecture") {
+		t.Fatalf("update group status=%d body=%q", updated.Code, updated.Body.String())
+	}
+	members := request(http.MethodPut, "/api/admin/access/groups/"+groupID+"/members", `{"userIds":["`+member.ID+`"]}`)
+	if members.Code != http.StatusOK || !strings.Contains(members.Body.String(), member.ID) {
+		t.Fatalf("replace group members status=%d body=%q", members.Code, members.Body.String())
+	}
+	listedMembers := request(http.MethodGet, "/api/admin/access/groups/"+groupID+"/members", "")
+	if listedMembers.Code != http.StatusOK || !strings.Contains(listedMembers.Body.String(), member.ID) {
+		t.Fatalf("list group members status=%d body=%q", listedMembers.Code, listedMembers.Body.String())
+	}
+
+	grant := request(http.MethodPost, "/api/workspaces/"+domain.GuestWorkspaceID+"/group-access", `{"groupId":"`+groupID+`","canRead":true,"canCreateDesign":true}`)
+	if grant.Code != http.StatusOK {
+		t.Fatalf("grant workspace group access status=%d body=%q", grant.Code, grant.Body.String())
+	}
+	revoke := request(http.MethodDelete, "/api/workspaces/"+domain.GuestWorkspaceID+"/group-access/"+groupID, "")
+	if revoke.Code != http.StatusNoContent {
+		t.Fatalf("revoke workspace group access status=%d body=%q", revoke.Code, revoke.Body.String())
+	}
+	deleted := request(http.MethodDelete, "/api/admin/access/groups/"+groupID, "")
+	if deleted.Code != http.StatusNoContent {
+		t.Fatalf("delete group status=%d body=%q", deleted.Code, deleted.Body.String())
+	}
+	groups := request(http.MethodGet, "/api/admin/access/groups", "")
+	if groups.Code != http.StatusOK || strings.Contains(groups.Body.String(), groupID) {
+		t.Fatalf("deleted group remained status=%d body=%q", groups.Code, groups.Body.String())
+	}
+}
 
 func TestAccessGrantRejectsEmptyPermissions(t *testing.T) {
 	repo := store.NewMemoryRepository()

@@ -148,6 +148,42 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, target a
 	return nil
 }
 
+func jsonRequestError(err error) string {
+	if err == nil {
+		return "request body is invalid"
+	}
+	var maxBytesError *http.MaxBytesError
+	if errors.As(err, &maxBytesError) {
+		return "request body exceeds the allowed size"
+	}
+	if errors.Is(err, io.EOF) {
+		return "request body is required"
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return "request body contains malformed JSON"
+	}
+	message := err.Error()
+	if strings.HasPrefix(message, "json: unknown field ") {
+		field := strings.TrimPrefix(message, "json: unknown field ")
+		return "request contains unsupported field " + field
+	}
+	var syntaxError *json.SyntaxError
+	if errors.As(err, &syntaxError) {
+		return "request body contains malformed JSON"
+	}
+	var typeError *json.UnmarshalTypeError
+	if errors.As(err, &typeError) {
+		if typeError.Field != "" {
+			return "request field " + typeError.Field + " has the wrong value type"
+		}
+		return "request body contains a value with the wrong type"
+	}
+	if message == "request body must contain a single JSON document" {
+		return message
+	}
+	return "request body is invalid"
+}
+
 func pageOptionsFromRequest(r *http.Request) store.PageOptions {
 	query := r.URL.Query()
 	limit, _ := strconv.Atoi(query.Get("limit"))
@@ -162,6 +198,12 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	if status >= http.StatusInternalServerError {
 		message = "internal server error"
 	}
+	writeJSON(w, status, map[string]string{"error": message})
+}
+
+// writePublicError is reserved for messages assembled entirely from trusted,
+// server-owned text. Never pass database, provider response, or raw error text.
+func writePublicError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 

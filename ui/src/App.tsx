@@ -18,6 +18,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronsLeftRight,
+  ClipboardList,
   Copy,
   FilePlus2,
   Download,
@@ -32,10 +33,10 @@ import {
   RotateCcw,
   Route,
   Save,
+  ScanSearch,
   Search,
   Send,
   SlidersHorizontal,
-  Sparkles,
   SkipBack,
   SkipForward,
   Trash2,
@@ -49,6 +50,8 @@ import {
   type AppRoute,
 } from './app/navigation'
 import {
+  analysisFindingMatchesFocus,
+  analysisReadinessLabel,
   buildPrimaryJourney,
   isBackendOfflineMessage,
   isPotentialCatalogMatch,
@@ -146,7 +149,7 @@ import {
   type DesignAnalysisReport,
 } from './backendApi'
 import { useBackendDesignSync, type BackendWorkspace } from './backendSync'
-import { createComponent, createEmptyDesign, createEmptyRequirementBrief, toExportableDesign, touchDesign } from './designModel'
+import { createComponent, createEmptyDesign, createEmptyRequirementBrief, MAX_DESIGN_NAME_LENGTH, toExportableDesign, touchDesign } from './designModel'
 import { clearSavedDesign, loadDesignDocument, saveDesignDocument } from './storage'
 import type {
   ComponentType,
@@ -318,7 +321,7 @@ export function App() {
   const [cloneError, setCloneError] = useState<string | null>(null)
   const [deletedDesignIds, setDeletedDesignIds] = useState<Set<string>>(() => new Set())
   const [newDesignBriefOpen, setNewDesignBriefOpen] = useState(false)
-  const [newDesignTitle, setNewDesignTitle] = useState('Untitled system design')
+  const [newDesignTitle, setNewDesignTitle] = useState('')
   const [newDesignBrief, setNewDesignBrief] = useState<RequirementBrief>(() => createEmptyRequirementBrief())
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [versionState, setVersionState] = useState<'idle' | 'loading' | 'saving' | 'saved' | 'error'>('idle')
@@ -441,6 +444,10 @@ export function App() {
     }
   }, [activeJourney, activeJourneyStepIndex, canvasMode])
   const isCanvasReadOnly = canvasMode !== 'design' || Boolean(versionPreview) || Boolean(designConflict)
+  const hasPendingDesignChanges = useMemo(
+    () => Boolean(lastSyncedDocumentRef.current) && JSON.stringify(design) !== lastSyncedDocumentRef.current,
+    [design, saveState],
+  )
 
   useEffect(() => {
     designRef.current = design
@@ -522,16 +529,18 @@ export function App() {
   }, [authenticated])
 
   useEffect(() => {
+    if (!authChecked || !authenticated || setupRequired || passwordSetupRequired) return
     void refreshCollaboration()
-  }, [activeWorkspaceId, selectedDesignId])
+  }, [activeWorkspaceId, selectedDesignId, authChecked, authenticated, setupRequired, passwordSetupRequired])
 
   useEffect(() => {
-    if (view === 'admin' && !setupRequired) void refreshAdmin()
-  }, [view, setupRequired, authenticated])
+    if (view === 'admin' && authChecked && authenticated && !setupRequired && !passwordSetupRequired) void refreshAdmin()
+  }, [view, authChecked, setupRequired, passwordSetupRequired, authenticated])
 
   useEffect(() => {
     let cancelled = false
     async function loadDesignDocs() {
+      if (!authChecked || !authenticated || setupRequired || passwordSetupRequired) return
       if (!selectedDesignId) {
         setDesignDocs([])
         setDirtyDocIds(new Set())
@@ -560,11 +569,12 @@ export function App() {
     return () => {
       cancelled = true
     }
-  }, [activeWorkspaceId, selectedDesignId])
+  }, [activeWorkspaceId, selectedDesignId, authChecked, authenticated, setupRequired, passwordSetupRequired])
 
   useEffect(() => {
     let cancelled = false
     async function loadVersions() {
+      if (!authChecked || !authenticated || setupRequired || passwordSetupRequired) return
       if (!selectedDesignId) {
         setDesignVersions([])
         setVersionState('idle')
@@ -587,12 +597,12 @@ export function App() {
     return () => {
       cancelled = true
     }
-  }, [activeWorkspaceId, selectedDesignId])
+  }, [activeWorkspaceId, selectedDesignId, authChecked, authenticated, setupRequired, passwordSetupRequired])
 
   const backendSync = useBackendDesignSync({
     workspaceId: activeWorkspaceId,
     selectedDesignId,
-    enabled: view === 'canvas' && Boolean(selectedDesignId),
+    enabled: authChecked && authenticated && !setupRequired && !passwordSetupRequired && view === 'canvas' && Boolean(selectedDesignId),
     onRemoteDesign: (remoteDesign, source) => {
       const localDocument = JSON.stringify(designRef.current)
       const remoteDocument = JSON.stringify(remoteDesign.document)
@@ -639,11 +649,12 @@ export function App() {
   }, [activeWorkspaceId, backendSync.designs, deletedDesignIds, design, designName])
 
   useEffect(() => {
+    if (!authChecked || !authenticated || setupRequired || passwordSetupRequired) return
     const timer = window.setTimeout(() => {
       void refreshHome(activeWorkspaceId)
     }, 200)
     return () => window.clearTimeout(timer)
-  }, [activeWorkspaceId, homeDesignSearch, homeWorkspaceSearch])
+  }, [activeWorkspaceId, homeDesignSearch, homeWorkspaceSearch, authChecked, authenticated, setupRequired, passwordSetupRequired])
 
   useEffect(() => {
     function handlePopState() {
@@ -655,6 +666,7 @@ export function App() {
   }, [])
 
   useEffect(() => {
+    if (!authChecked || !authenticated || setupRequired || passwordSetupRequired) return
     if (route.screen !== 'design') {
       hydratedRouteDesignRef.current = null
       return
@@ -683,7 +695,7 @@ export function App() {
     return () => {
       cancelled = true
     }
-  }, [route])
+  }, [route, authChecked, authenticated, setupRequired, passwordSetupRequired])
 
   useEffect(() => {
     if (!selectedDesignId) return
@@ -1174,7 +1186,7 @@ export function App() {
   function openNewDesignBrief() {
     if (homeAction) return
     setHomeError(null)
-    setNewDesignTitle('Untitled system design')
+    setNewDesignTitle('')
     setNewDesignBrief(createEmptyRequirementBrief())
     setNewDesignBriefOpen(true)
   }
@@ -1550,8 +1562,13 @@ export function App() {
     try {
       const response = await updateAIProviderConfig(nextConfig)
       setAIConnection(response.aiProvider)
+		return true
     } catch (error) {
-      setAdminError(error instanceof Error ? error.message : 'Could not save AI provider settings')
+		const detail = error instanceof Error
+			? error.message.replace(/^Backend request failed: \d+\s*-\s*/, '')
+			: 'The backend did not accept the provider configuration.'
+		setAdminError(`AI provider was not saved. ${detail}`)
+		return false
     }
   }
 
@@ -2440,7 +2457,7 @@ export function App() {
             onGeneratePasswordResetLink={generatePasswordResetLink}
             onDeleteUser={(userId) => void removeAdminUser(userId)}
             onSaveSignIn={(config) => void saveSignIn(config)}
-            onSaveAIProvider={(config) => void saveAIProvider(config)}
+            onSaveAIProvider={saveAIProvider}
             onSaveMCP={(config) => void saveMCP(config)}
             onSaveTelemetry={(config) => void saveTelemetryIntegration(config)}
             onAddCatalogAsset={addCatalogAsset}
@@ -2885,7 +2902,7 @@ export function App() {
               disabled={!selectedDesignId}
               title="Analyse design"
             >
-              <Sparkles size={16} /> <span>{analysisState === 'running' ? 'Analysing' : 'Analyse'}</span>
+              <ScanSearch size={16} /> <span>{analysisState === 'running' ? 'Analysing' : 'Analyse'}</span>
             </button>
             <button className="command compact" onClick={() => setAIChatOpen(true)} disabled={!selectedDesignId} title="Ask the architecture copilot">
               <MessageSquare size={16} /> <span>Ask AI</span>
@@ -3114,7 +3131,20 @@ export function App() {
             versions={designVersions}
             currentVersionId={versionPreview?.version.id}
             providerEnabled={Boolean(aiConnection?.enabled && aiConnection.apiKeySet)}
+            canEditDesign={!isCanvasReadOnly && !hasPendingDesignChanges && homeDesigns.find((item) => item.id === selectedDesignId)?.effectiveAccess !== 'read'}
+            writeAccessReason={versionPreview
+              ? 'Saved versions are read-only.'
+              : homeDesigns.find((item) => item.id === selectedDesignId)?.effectiveAccess === 'read'
+                ? 'You do not have edit access to this design.'
+                : hasPendingDesignChanges
+                  ? 'Wait for the current design changes to save before enabling AI edits.'
+                  : undefined}
             onClose={() => setAIChatOpen(false)}
+            onDesignUpdated={(updatedDesign) => {
+              loadDesignIntoWorkspace(updatedDesign.document, updatedDesign.name, updatedDesign.documentRevision)
+              setHomeDesigns((current) => current.map((item) => item.id === updatedDesign.id ? { ...updatedDesign, effectiveAccess: item.effectiveAccess } : item))
+              setSaveState('saved')
+            }}
             onSelectReference={(reference: BackendAIMessageReference) => {
               setAIChatOpen(false)
               if (reference.kind === 'component') {
@@ -3251,7 +3281,7 @@ function AnalysisModal({
               Close
             </button>
             <button className="primary-action" type="button" onClick={onRunAnalysis} disabled={analysisState === 'running'}>
-              <Sparkles size={17} /> {analysisState === 'running' ? 'Analysing...' : 'Run analysis'}
+              <ScanSearch size={17} /> {analysisState === 'running' ? 'Analysing...' : 'Run analysis'}
             </button>
           </div>
         </div>
@@ -3278,7 +3308,7 @@ function AnalysisModal({
 
           <section className="analysis-result-panel analysis-report-panel">
             <div className="inspector-heading">
-              <Sparkles size={18} />
+              <ScanSearch size={18} />
               <div>
                 <strong>Findings</strong>
                 <span>Requirements, graph integrity, traffic, consistency, availability, and security</span>
@@ -3290,7 +3320,7 @@ function AnalysisModal({
               <div className="analysis-report">
                 <div className="analysis-score-card">
                   <strong>{analysisReport.score}</strong>
-                  <span>Readiness score</span>
+                  <span>{analysisReadinessLabel(analysisReport.score)} · Readiness score</span>
                 </div>
                 <p>{analysisReport.summary}</p>
                 {analysisReport.workflow?.length ? (
@@ -3362,8 +3392,8 @@ function AnalysisModal({
                   </div>
                 ) : null}
                 <div className="analysis-finding-list">
-                  {analysisReport.findings.length ? (
-                    analysisReport.findings.map((finding) => (
+                  {analysisReport.findings.some((finding) => analysisFindingMatchesFocus(focus, finding.suite)) ? (
+                    analysisReport.findings.filter((finding) => analysisFindingMatchesFocus(focus, finding.suite)).map((finding) => (
                       <article className={`analysis-finding ${finding.severity}`} key={`${finding.suite}-${finding.title}`}>
                         <span>{finding.severity} · {finding.suite}</span>
                         <strong>{finding.title}</strong>
@@ -3374,8 +3404,8 @@ function AnalysisModal({
                     ))
                   ) : (
                     <div className="analysis-empty">
-                      <strong>No major gaps found</strong>
-                      <span>The structured design has enough base signals for deeper evaluation.</span>
+                      <strong>No findings for this review lens</strong>
+                      <span>Try the complete architecture lens or add more design evidence.</span>
                     </div>
                   )}
                 </div>
@@ -3909,7 +3939,7 @@ function RequirementPanel({
   )
 }
 
-function NewDesignBriefModal({
+export function NewDesignBriefModal({
   title,
   brief,
   isCreating,
@@ -3926,56 +3956,123 @@ function NewDesignBriefModal({
   onCancel: () => void
   onCreate: () => void
 }) {
+  const [detailsOpen, setDetailsOpen] = useState(false)
+
   function update(patch: Partial<RequirementBrief>) {
     onBriefChange(createEmptyRequirementBrief({ ...brief, ...patch }))
   }
 
   return (
-    <div className="modal-backdrop" role="presentation">
+    <div className="modal-backdrop design-brief-backdrop" role="presentation">
       <section className="design-brief-modal" role="dialog" aria-modal="true" aria-labelledby="new-design-title">
-        <div className="modal-heading">
-          <div>
+        <header className="design-brief-header">
+          <div className="modal-heading">
             <p className="eyebrow">New design</p>
-            <h2 id="new-design-title">Capture project context first</h2>
-            <span>These requirements become the base for structured analysis.</span>
+            <h2 id="new-design-title">Create a new design</h2>
+            <span>Give it a clear name now. You can add context before creating, or refine it later.</span>
           </div>
-        </div>
+          <div className="modal-actions design-brief-actions">
+            <button className="secondary-action" type="button" onClick={onCancel} disabled={isCreating}>
+              Cancel
+            </button>
+            <button className="primary-action" type="button" onClick={onCreate} disabled={isCreating || !title.trim()}>
+              {isCreating ? 'Creating...' : 'Create design'}
+            </button>
+          </div>
+        </header>
 
-        <div className="brief-form-grid">
-          <Field label="Design name" value={title} onChange={onTitleChange} />
-          <NumberField label="Target RPS" value={brief.targetRps} onChange={(targetRps) => update({ targetRps })} />
-          <TextareaField label="Use case" value={brief.useCase} onChange={(useCase) => update({ useCase })} />
-          <TextareaField
-            label="Functional requirements"
-            value={brief.functionalRequirements}
-            onChange={(functionalRequirements) => update({ functionalRequirements })}
-          />
-          <TextareaField
-            label="Consistency requirements"
-            value={brief.consistencyNotes}
-            onChange={(consistencyNotes) => update({ consistencyNotes })}
-          />
-          <Field
-            label="Availability requirements"
-            value={brief.availabilityRequirement}
-            onChange={(availabilityRequirement) => update({ availabilityRequirement })}
-          />
-          <Field label="SLA" value={brief.sla} onChange={(sla) => update({ sla })} />
-          <TextareaField
-            label="Non-functional requirements"
-            value={brief.nonFunctionalRequirements}
-            onChange={(nonFunctionalRequirements) => update({ nonFunctionalRequirements })}
-          />
-          <TextareaField label="Open questions" value={brief.openQuestions} onChange={(openQuestions) => update({ openQuestions })} />
-        </div>
+        <div className="design-brief-content">
+          <section className="design-name-section" aria-labelledby="design-name-section-title">
+            <div>
+              <h3 id="design-name-section-title">Name your design</h3>
+              <span>Required</span>
+            </div>
+            <Field
+              label="Design name"
+              value={title}
+              maxLength={MAX_DESIGN_NAME_LENGTH}
+              showCharacterCount
+              onChange={onTitleChange}
+            />
+          </section>
 
-        <div className="modal-actions">
-          <button className="secondary-action" type="button" onClick={onCancel} disabled={isCreating}>
-            Cancel
-          </button>
-          <button className="primary-action" type="button" onClick={onCreate} disabled={isCreating}>
-            {isCreating ? 'Creating...' : 'Create design'}
-          </button>
+          <section className={`design-details-prompt ${detailsOpen ? 'expanded' : ''}`}>
+            <div className="design-details-prompt-copy">
+              <div className="design-details-icon"><ClipboardList size={18} /></div>
+              <div>
+                <strong>Start with better context</strong>
+                <span>Recommended — requirements and measurable targets help your team review and analyze this design.</span>
+              </div>
+            </div>
+            <button
+              className="secondary-action design-details-toggle"
+              type="button"
+              aria-expanded={detailsOpen}
+              aria-controls="new-design-details"
+              onClick={() => setDetailsOpen((current) => !current)}
+            >
+              {detailsOpen ? 'Hide details' : 'Add requirements and targets'}
+              <ChevronDown size={16} aria-hidden="true" />
+            </button>
+          </section>
+
+          {detailsOpen ? (
+            <div id="new-design-details" className="design-details-form">
+              <section className="design-form-section" aria-labelledby="requirements-section-title">
+                <div className="design-form-section-heading">
+                  <div>
+                    <span>1</span>
+                    <div>
+                      <h3 id="requirements-section-title">Requirements</h3>
+                      <p>Describe what the system must do and the constraints it must respect.</p>
+                    </div>
+                  </div>
+                </div>
+                <div className="brief-form-grid requirements-grid">
+                  <TextareaField label="Use case" value={brief.useCase} onChange={(useCase) => update({ useCase })} />
+                  <TextareaField
+                    label="Functional requirements"
+                    value={brief.functionalRequirements}
+                    onChange={(functionalRequirements) => update({ functionalRequirements })}
+                  />
+                  <TextareaField
+                    label="Consistency requirements"
+                    value={brief.consistencyNotes}
+                    onChange={(consistencyNotes) => update({ consistencyNotes })}
+                  />
+                  <TextareaField
+                    label="Non-functional requirements"
+                    value={brief.nonFunctionalRequirements}
+                    onChange={(nonFunctionalRequirements) => update({ nonFunctionalRequirements })}
+                  />
+                </div>
+              </section>
+
+              <section className="design-form-section" aria-labelledby="targets-section-title">
+                <div className="design-form-section-heading">
+                  <div>
+                    <span>2</span>
+                    <div>
+                      <h3 id="targets-section-title">Service levels and scale</h3>
+                      <p>Add measurable expectations when they are known.</p>
+                    </div>
+                  </div>
+                </div>
+                <div className="brief-form-grid targets-grid">
+                  <Field
+                    label="Availability requirement"
+                    value={brief.availabilityRequirement}
+                    onChange={(availabilityRequirement) => update({ availabilityRequirement })}
+                  />
+                  <Field label="SLA" value={brief.sla} onChange={(sla) => update({ sla })} />
+                  <NumberField label="Target RPS" value={brief.targetRps} onChange={(targetRps) => update({ targetRps })} />
+                  <TextareaField label="Traffic notes" value={brief.trafficNotes} onChange={(trafficNotes) => update({ trafficNotes })} />
+                </div>
+              </section>
+            </div>
+          ) : null}
+
+          <p className="design-brief-footnote">Open questions and additional context can be captured from Requirements after the design is created.</p>
         </div>
       </section>
     </div>

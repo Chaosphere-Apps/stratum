@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  analysisFindingMatchesFocus,
+  analysisReadinessLabel,
   buildPrimaryJourney,
   catalogAssetUsageLabel,
   isBackendOfflineMessage,
@@ -20,6 +22,20 @@ describe('design utilities', () => {
     expect(isPotentialCatalogMatch('', 'purchase')).toBe(false)
     expect(catalogAssetUsageLabel(1)).toBe('1 design')
     expect(catalogAssetUsageLabel(2)).toBe('2 designs')
+  })
+
+  it('labels readiness honestly and maps review lenses to relevant suites', () => {
+    expect(analysisReadinessLabel(0)).toBe('Not ready')
+    expect(analysisReadinessLabel(25)).toBe('Foundation missing')
+    expect(analysisReadinessLabel(55)).toBe('Needs definition')
+    expect(analysisReadinessLabel(75)).toBe('Reviewable')
+    expect(analysisReadinessLabel(90)).toBe('Strong foundation')
+
+    expect(analysisFindingMatchesFocus('full', 'security')).toBe(true)
+    expect(analysisFindingMatchesFocus('scalability', 'traffic')).toBe(true)
+    expect(analysisFindingMatchesFocus('scalability', 'security')).toBe(false)
+    expect(analysisFindingMatchesFocus('data', 'consistency')).toBe(true)
+    expect(analysisFindingMatchesFocus('unknown', 'topology')).toBe(false)
   })
 
   it('excludes frames and notes from journeys', () => {

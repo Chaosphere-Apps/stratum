@@ -66,6 +66,7 @@ describe('backend API contracts', () => {
     { name: 'analyze design', run: () => api.analyzeDesign('space', 'design'), path: '/api/workspaces/space/designs/design/analysis', method: 'POST' },
     { name: 'AI conversations', run: () => api.fetchAIConversations('space', 'design'), path: '/api/workspaces/space/designs/design/ai/conversations' },
     { name: 'create AI conversation', run: () => api.createAIConversation('space', 'design', { versionId: 'version' }), path: '/api/workspaces/space/designs/design/ai/conversations', method: 'POST' },
+    { name: 'update AI conversation access', run: () => api.updateAIConversationAccess('space', 'design', 'chat/1', 'read_write'), path: '/api/workspaces/space/designs/design/ai/conversations/chat%2F1', method: 'PATCH' },
     { name: 'AI messages', run: () => api.fetchAIMessages('space', 'design', 'chat/1'), path: '/api/workspaces/space/designs/design/ai/conversations/chat%2F1/messages' },
     { name: 'send AI message', run: () => api.sendAIMessage('space', 'design', 'chat/1', 'Review this'), path: '/api/workspaces/space/designs/design/ai/conversations/chat%2F1/messages', method: 'POST' },
     { name: 'design docs', run: () => api.fetchDesignDocs('space', 'design'), path: '/api/workspaces/space/designs/design/docs' },
@@ -99,6 +100,28 @@ describe('backend API contracts', () => {
 
     fetchMock.mockRejectedValueOnce(new Error('connection refused'))
     await expect(api.fetchProfile()).rejects.toThrow('Backend unavailable: connection refused')
+  })
+
+  it('sends only writable AI provider fields and never echoes response metadata', async () => {
+	await api.updateAIProviderConfig({
+		enabled: true,
+		provider: 'google',
+		model: 'gemini-2.5-flash',
+		baseUrl: '',
+		apiKey: 'new-secret',
+		apiKeySet: true,
+		verifiedAt: '2026-09-21T00:00:00Z',
+		updatedAt: '2026-09-21T00:00:00Z',
+	})
+
+	const [, init] = fetchMock.mock.calls[0]
+	expect(JSON.parse(init.body as string)).toEqual({
+		enabled: true,
+		provider: 'google',
+		model: 'gemini-2.5-flash',
+		baseUrl: '',
+		apiKey: 'new-secret',
+	})
   })
 
   it('handles empty success responses', async () => {

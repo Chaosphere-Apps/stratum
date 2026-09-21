@@ -2,8 +2,11 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"github.com/system-design-evaluator/backend/internal/domain"
 	"github.com/system-design-evaluator/backend/internal/store"
+	"strings"
+	"unicode/utf8"
 )
 
 type DesignService struct {
@@ -33,10 +36,21 @@ func (s DesignService) Get(ctx context.Context, workspaceID string, designID str
 }
 
 func (s DesignService) Create(ctx context.Context, workspaceID string, name string, document []byte, createdBy string) (domain.Design, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return domain.Design{}, fmt.Errorf("design name is required")
+	}
+	if utf8.RuneCountInString(name) > domain.MaxDesignNameLength {
+		return domain.Design{}, fmt.Errorf("design name must be %d characters or fewer", domain.MaxDesignNameLength)
+	}
 	return s.repo().CreateDesign(ctx, workspaceID, name, document, createdBy)
 }
 
 func (s DesignService) UpdateMetadata(ctx context.Context, workspaceID string, designID string, name string, access string) (domain.Design, error) {
+	name = strings.TrimSpace(name)
+	if utf8.RuneCountInString(name) > domain.MaxDesignNameLength {
+		return domain.Design{}, fmt.Errorf("design name must be %d characters or fewer", domain.MaxDesignNameLength)
+	}
 	return s.repo().UpdateDesignMetadata(ctx, workspaceID, designID, name, access)
 }
 

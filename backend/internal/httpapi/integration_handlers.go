@@ -10,6 +10,7 @@ import (
 	"github.com/system-design-evaluator/backend/internal/modelgateway"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -38,18 +39,26 @@ func (s *Server) handleUpdateAIProviderConfig(w http.ResponseWriter, r *http.Req
 		APIKey   string `json:"apiKey"`
 	}
 	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		message := jsonRequestError(err)
+		s.log.Warn("ai_provider_update_rejected", "stage", "request_validation", "reason", message)
+		writeError(w, http.StatusBadRequest, message)
 		return
 	}
 	verifyKey := strings.TrimSpace(body.APIKey)
+	current, currentErr := s.services.Identity.GetAIProviderConfigWithSecret(r.Context())
+	providerChanged := currentErr == nil && !strings.EqualFold(strings.TrimSpace(current.Provider), strings.TrimSpace(body.Provider))
+	if providerChanged && verifyKey == "" {
+		writeError(w, http.StatusBadRequest, "API key is required when changing AI providers")
+		return
+	}
 	if body.Enabled && verifyKey == "" {
-		current, err := s.services.Identity.GetAIProviderConfigWithSecret(r.Context())
-		if err == nil {
+		if currentErr == nil {
 			verifyKey = current.APIKey
 		}
 	}
 	if body.Enabled || verifyKey != "" {
-		if err := verifyAIProvider(r.Context(), body.Provider, body.BaseURL, verifyKey, s.cfg.AllowPrivateAIProviderURLs); err != nil {
+		if err := verifyAIProvider(r.Context(), body.Provider, body.Model, body.BaseURL, verifyKey, s.cfg.AllowPrivateAIProviderURLs); err != nil {
+			s.log.Warn("ai_provider_update_rejected", "stage", "provider_verification", "provider", strings.ToLower(strings.TrimSpace(body.Provider)), "reason", err.Error())
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -285,7 +294,7 @@ func (s *Server) handleDeleteCatalogAsset(w http.ResponseWriter, r *http.Request
 func (s *Server) handleListNotifications(w http.ResponseWriter, r *http.Request) {
 	user, err := s.currentUser(r)
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"notifications": []domain.Notification{}})
+		writeError(w, http.StatusUnauthorized, "user is required")
 		return
 	}
 	notifications, err := s.services.Identity.ListNotifications(r.Context(), user.ID)
@@ -323,7 +332,7 @@ func (s *Server) handleVerifyAIProvider(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if err := verifyAIProvider(r.Context(), body.Provider, body.BaseURL, body.APIKey, s.cfg.AllowPrivateAIProviderURLs); err != nil {
+	if err := verifyAIProvider(r.Context(), body.Provider, body.Model, body.BaseURL, body.APIKey, s.cfg.AllowPrivateAIProviderURLs); err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":      false,
 			"message": err.Error(),
@@ -339,8 +348,8 @@ func (s *Server) handleVerifyAIProvider(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-func verifyAIProvider(ctx context.Context, provider string, baseURL string, apiKey string, allowPrivateURLs bool) error {
-	provider = strings.TrimSpace(provider)
+func verifyAIProvider(ctx context.Context, provider string, model string, baseURL string, apiKey string, allowPrivateURLs bool) error {
+	provider = strings.ToLower(strings.TrimSpace(provider))
 	apiKey = strings.TrimSpace(apiKey)
 	if provider == "" {
 		return errors.New("provider is required")
@@ -358,6 +367,8 @@ func verifyAIProvider(ctx context.Context, provider string, baseURL string, apiK
 			endpoint = "https://api.anthropic.com/v1"
 		case "openrouter":
 			endpoint = "https://openrouter.ai/api/v1"
+		case "google":
+			endpoint = "https://generativelanguage.googleapis.com/v1beta"
 		default:
 			return errors.New("base URL is required for custom providers")
 		}
@@ -366,13 +377,23 @@ func verifyAIProvider(ctx context.Context, provider string, baseURL string, apiK
 		return err
 	}
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(endpoint, "/")+"/models", nil)
+	modelsPath := strings.TrimRight(endpoint, "/") + "/models"
+	if provider == "google" {
+		model = strings.TrimPrefix(strings.TrimSpace(model), "models/")
+		if model == "" {
+			return errors.New("model is required")
+		}
+		modelsPath += "/" + url.PathEscape(model)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsPath, nil)
 	if err != nil {
 		return errors.New("provider URL is invalid")
 	}
 	if provider == "anthropic" {
 		request.Header.Set("x-api-key", apiKey)
 		request.Header.Set("anthropic-version", "2023-06-01")
+	} else if provider == "google" {
+		request.Header.Set("x-goog-api-key", apiKey)
 	} else {
 		request.Header.Set("Authorization", "Bearer "+apiKey)
 	}
@@ -385,7 +406,10 @@ func verifyAIProvider(ctx context.Context, provider string, baseURL string, apiK
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return errors.New("provider rejected the credentials")
+		if provider == "google" && response.StatusCode == http.StatusNotFound {
+			return errors.New("Google AI Studio could not find the configured model; choose a model available to this API key")
+		}
+		return errors.New("provider rejected the credentials or configured model")
 	}
 	return nil
 }
@@ -580,13 +604,15 @@ func providerBaseURL(provider string, baseURL string) (string, error) {
 	if endpoint != "" {
 		return endpoint, nil
 	}
-	switch strings.TrimSpace(provider) {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "openai":
 		return "https://api.openai.com/v1", nil
 	case "anthropic":
 		return "https://api.anthropic.com/v1", nil
 	case "openrouter":
 		return "https://openrouter.ai/api/v1", nil
+	case "google":
+		return "https://generativelanguage.googleapis.com/v1beta", nil
 	default:
 		return "", errors.New("base URL is required for custom providers")
 	}

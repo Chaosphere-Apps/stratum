@@ -248,6 +248,7 @@ export interface BackendAIConversation {
   designId: string
   versionId?: string
   title: string
+  accessMode: 'read' | 'read_write'
   createdBy: string
   createdAt: string
   updatedAt: string
@@ -282,6 +283,9 @@ interface AIMessageResponse {
   userMessage: BackendAIMessage
   assistantMessage: BackendAIMessage
   followUps: string[]
+  designUpdated: boolean
+  updatedDesign?: BackendDesign
+  updateSummary?: string
 }
 interface CatalogAssetsResponse {
   assets: BackendCatalogAsset[]
@@ -693,9 +697,16 @@ export function fetchAIProviderConfig() {
 }
 
 export function updateAIProviderConfig(input: Partial<BackendAIProviderConfig> & { apiKey?: string }) {
+	const payload = {
+		enabled: Boolean(input.enabled),
+		provider: input.provider ?? '',
+		model: input.model ?? '',
+		baseUrl: input.baseUrl ?? '',
+		...(input.apiKey ? { apiKey: input.apiKey } : {}),
+	}
   return request<AIProviderConfigResponse>('/api/admin/ai-provider', {
     method: 'PATCH',
-    body: JSON.stringify(input),
+    body: JSON.stringify(payload),
   })
 }
 
@@ -1048,11 +1059,23 @@ export function fetchAIConversations(workspaceId: string, designId: string) {
 export function createAIConversation(
   workspaceId: string,
   designId: string,
-  input: { title?: string; versionId?: string },
+  input: { title?: string; versionId?: string; accessMode?: 'read' | 'read_write' },
 ) {
   return request<AIConversationResponse>(
     `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/ai/conversations`,
     { method: 'POST', body: JSON.stringify(input) },
+  )
+}
+
+export function updateAIConversationAccess(
+  workspaceId: string,
+  designId: string,
+  conversationId: string,
+  accessMode: 'read' | 'read_write',
+) {
+  return request<AIConversationResponse>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/ai/conversations/${encodeURIComponent(conversationId)}`,
+    { method: 'PATCH', body: JSON.stringify({ accessMode }) },
   )
 }
 

@@ -58,6 +58,8 @@ Production-relevant configuration:
 - `READ_HEADER_TIMEOUT`, `READ_TIMEOUT`, `WRITE_TIMEOUT`, `IDLE_TIMEOUT`: HTTP server timeout controls.
 - `ALLOW_PRIVATE_AI_PROVIDER_URLS`: defaults to `false`; keep it disabled unless a deployment intentionally verifies private/self-hosted AI endpoints.
 - AI provider settings are managed through the Admin console and persisted server-side. The deterministic analysis path does not require AI configuration. AI chat is limited per user and design to protect provider capacity; distributed deployments should additionally enforce provider quotas at the gateway.
+- AI completion calls retry bounded transient provider failures (`429`, `502`, `503`, and `504`). Exhausted retries return a curated, non-sensitive explanation to the chat UI; raw provider bodies and arbitrary backend errors remain private.
+- Supported managed AI providers are OpenAI, Anthropic, OpenRouter, and Google AI Studio (Gemini), plus a custom OpenAI-compatible endpoint. Google credentials use the Gemini API's `x-goog-api-key` header, provider verification checks that the configured Gemini model is available to the key, and secrets are never returned by the settings API after they are stored.
 
 ## REST API
 
@@ -83,6 +85,7 @@ Production-relevant configuration:
 - `POST /api/workspaces/{workspaceID}/designs/{designID}/analysis` accepts an optional saved `versionId` and review `focus` (`full`, `security`, `scalability`, `reliability`, `data`, `operability`, or `cost`).
 - `GET /api/workspaces/{workspaceID}/designs/{designID}/ai/conversations`
 - `POST /api/workspaces/{workspaceID}/designs/{designID}/ai/conversations`
+- `PATCH /api/workspaces/{workspaceID}/designs/{designID}/ai/conversations/{conversationID}`
 - `GET /api/workspaces/{workspaceID}/designs/{designID}/ai/conversations/{conversationID}/messages`
 - `POST /api/workspaces/{workspaceID}/designs/{designID}/ai/conversations/{conversationID}/messages`
 - `GET /api/workspaces/{workspaceID}/designs/{designID}/versions`
@@ -92,7 +95,7 @@ Production-relevant configuration:
 - `PATCH /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}`
 - `DELETE /api/workspaces/{workspaceID}/designs/{designID}/docs/{docID}`
 
-AI conversations are persisted separately from the versioned design document. A conversation can be pinned to one saved version; otherwise it follows the current working design. The model receives deterministic analysis evidence and a structured design context, while returned component and connector references are validated against the selected document before storage.
+AI conversations are persisted separately from the versioned design document. New IDs use the compact `chat_…` prefix; existing `ai_conversation_…` IDs remain valid because identifiers are opaque. A conversation can be pinned to one saved version; otherwise it follows the current working design. Each conversation has an explicit `accessMode`: `read` is the default, while `read_write` is allowed only for the working design and only while the user retains design-edit permission. The backend rechecks that permission on every message. Model-proposed writes must preserve the design identity and schema, stay within request and graph limits, use unique IDs, reference valid connector endpoints, and pass optimistic revision control before they are stored. Read-only chat sends a compact architecture projection without canvas geometry, while write-enabled chat receives the canonical document required for a validated replacement. Recent history is bounded by message count and character budget so follow-ups retain continuity without unbounded prompt growth. Returned component and connector references are validated against the selected document before storage.
 
 ## Test
 

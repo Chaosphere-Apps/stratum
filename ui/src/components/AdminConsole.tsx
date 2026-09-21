@@ -4,6 +4,7 @@ import {
   ArrowDown,
   ArrowUp,
   BadgeCheck,
+  BrainCircuit,
   Boxes,
   Braces,
   CheckCircle2,
@@ -21,7 +22,6 @@ import {
   Server,
   Settings,
   ShieldCheck,
-  Sparkles,
   Upload,
   Users,
   UserCheck,
@@ -82,7 +82,7 @@ function AdminSectionIcon({ section, size = 18 }: { section: AdminSection; size?
   if (section === 'workspaces') return <Boxes size={size} />
   if (section === 'catalog') return <Database size={size} />
   if (section === 'identity') return <LockKeyhole size={size} />
-  if (section === 'ai') return <Sparkles size={size} />
+  if (section === 'ai') return <BrainCircuit size={size} />
   if (section === 'integrations') return <Server size={size} />
   if (section === 'security') return <BadgeCheck size={size} />
   return <Settings size={size} />
@@ -143,7 +143,7 @@ export function AdminConsole({
   onGeneratePasswordResetLink: (userId: string) => Promise<{ resetLink: string; expiresAt: string }>
   onDeleteUser: (userId: string) => void
   onSaveSignIn: (config: BackendSignInConfig & { clientSecret?: string }) => void
-  onSaveAIProvider: (config: Partial<BackendAIProviderConfig> & { apiKey?: string }) => void
+  onSaveAIProvider: (config: Partial<BackendAIProviderConfig> & { apiKey?: string }) => Promise<boolean>
   onSaveMCP: (config: BackendMCPConfig) => void
   onSaveTelemetry: (config: Partial<BackendTelemetryIntegrationConfig> & { secret?: string }) => void
   onAddCatalogAsset: (input: {
@@ -193,6 +193,9 @@ export function AdminConsole({
 	const [signInVerification, setSignInVerification] = useState<'idle' | 'checking' | 'verified' | 'error'>('idle')
 	const [signInVerificationMessage, setSignInVerificationMessage] = useState('')
   const [aiDraft, setAIDraft] = useState<(BackendAIProviderConfig & { apiKey?: string }) | null>(aiProviderConfig)
+	const [aiConfigurationEditing, setAIConfigurationEditing] = useState(!aiProviderConfig?.apiKeySet)
+	const [aiSaveState, setAISaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+	const [aiSavedAt, setAISavedAt] = useState('')
   const [mcpDraft, setMCPDraft] = useState<BackendMCPConfig | null>(mcpConfig)
   const [telemetryDraft, setTelemetryDraft] = useState<(BackendTelemetryIntegrationConfig & { secret?: string }) | null>(telemetryConfig)
   const [activeIntegration, setActiveIntegration] = useState<'telemetry' | 'mcp'>('telemetry')
@@ -249,8 +252,32 @@ export function AdminConsole({
 			setSignInVerificationMessage(error instanceof Error ? error.message : 'OIDC verification failed')
 		}
 	}
+	function updateAIDraft(patch: Partial<BackendAIProviderConfig & { apiKey?: string }>) {
+		setAISaveState('idle')
+		setAIDraft((current) => current ? { ...current, ...patch } : current)
+	}
+
+	async function saveAIProviderSettings() {
+		if (!aiDraft || aiSaveState === 'saving') return
+		setAISaveState('saving')
+		try {
+			const saved = await onSaveAIProvider(aiDraft)
+			if (saved) {
+				setAISavedAt(new Date().toISOString())
+				setAISaveState('saved')
+				setAIConfigurationEditing(false)
+				return
+			}
+			setAISaveState('error')
+		} catch {
+			setAISaveState('error')
+		}
+	}
   useEffect(() => setSignInDraft(signInConfig), [signInConfig])
-  useEffect(() => setAIDraft(aiProviderConfig), [aiProviderConfig])
+  useEffect(() => {
+	setAIDraft(aiProviderConfig)
+	setAIConfigurationEditing(!aiProviderConfig?.apiKeySet)
+  }, [aiProviderConfig])
   useEffect(() => setMCPDraft(mcpConfig), [mcpConfig])
   useEffect(() => setTelemetryDraft(telemetryConfig), [telemetryConfig])
   useEffect(() => {
@@ -797,8 +824,6 @@ export function AdminConsole({
           />
         </label>
       </section>
-      {error ? <div className="home-error admin-page-error"><span>{error}</span></div> : null}
-
       <div className="admin-center-layout">
         <aside className="admin-section-nav" aria-label="Admin sections">
           {visibleAdminSections.map((section) => {
@@ -830,6 +855,7 @@ export function AdminConsole({
               <p>{activeSectionCopy.description}</p>
             </div>
           </header>
+		  {error ? <div className="home-error admin-page-error" role="alert"><span>{error}</span></div> : null}
 
           {activeSection === 'overview' ? (
             <>
@@ -1945,13 +1971,39 @@ export function AdminConsole({
 
         <div className="admin-panel ai-admin-panel" hidden={activeSection !== 'ai'}>
           <div className="admin-panel-heading">
-            <span><Sparkles size={18} /></span>
+            <span><BrainCircuit size={18} /></span>
             <div>
               <strong>AI analysis provider</strong>
               <p>Manage the centrally approved model used for design review synthesis.</p>
             </div>
           </div>
-          {aiDraft ? (
+          {aiDraft ? (aiDraft.apiKeySet && !aiConfigurationEditing ? (
+            <div className="signin-form admin-ai-configured">
+              <div className="admin-ai-status">
+                <span className={aiDraft.enabled ? 'admin-status-pill active' : 'admin-status-pill disabled'}>
+                  {aiDraft.enabled ? 'AI provider active' : 'AI provider configured but disabled'}
+                </span>
+                <small>{aiVerifiedAt ? `Verified ${formatCompactDateTime(aiVerifiedAt)}` : 'Credential is stored securely'}</small>
+              </div>
+              <div className="admin-ai-configured-card">
+                <span><ShieldCheck size={20} /></span>
+                <div>
+                  <strong>{aiDraft.provider === 'google' ? 'Google AI Studio (Gemini)' : aiDraft.provider}</strong>
+                  <p>{aiDraft.model}</p>
+                  <small>The API key is stored by the backend and is never returned to this browser.</small>
+                </div>
+              </div>
+              {aiSaveState === 'saved' ? (
+                <div className="admin-inline-success ai-save-success" role="status">
+                  <CheckCircle2 size={18} />
+                  <span><strong>AI provider saved and verified</strong><small>{formatCompactDateTime(aiSavedAt)}</small></span>
+                </div>
+              ) : null}
+              <button className="secondary-action" type="button" onClick={() => { setAISaveState('idle'); setAIConfigurationEditing(true) }}>
+                <Settings size={16} /> Change configuration
+              </button>
+            </div>
+          ) : (
             <div className="signin-form">
               <div className="admin-ai-status">
                 <span className={aiDraft.enabled && aiDraft.apiKeySet ? 'admin-status-pill active' : 'admin-status-pill disabled'}>
@@ -1970,7 +2022,7 @@ export function AdminConsole({
                 <input
                   type="checkbox"
                   checked={aiDraft.enabled}
-                  onChange={(event) => setAIDraft({ ...aiDraft, enabled: event.target.checked })}
+				  onChange={(event) => updateAIDraft({ enabled: event.target.checked })}
                 />
                 <span>
                   <strong>Use AI for analysis synthesis</strong>
@@ -1991,25 +2043,48 @@ export function AdminConsole({
                       onChange={(event) => {
                         const provider = event.target.value
                         const defaultModel =
-                          provider === 'anthropic' ? 'claude-3-5-sonnet-latest' : provider === 'openai' ? 'gpt-4.1' : aiDraft.model
-                        setAIDraft({ ...aiDraft, provider, model: defaultModel })
+                          provider === 'anthropic'
+                            ? 'claude-3-5-sonnet-latest'
+                            : provider === 'google'
+                              ? 'gemini-2.5-flash'
+                              : provider === 'openai'
+                                ? 'gpt-4.1'
+                                : aiDraft.model
+						updateAIDraft({ provider, model: defaultModel, baseUrl: '', apiKey: '', apiKeySet: false })
                       }}
                     >
                       <option value="openai">OpenAI</option>
                       <option value="anthropic">Anthropic</option>
+                      <option value="google">Google AI Studio (Gemini)</option>
                       <option value="openrouter">OpenRouter</option>
                       <option value="custom">OpenAI-compatible</option>
                     </select>
                   </label>
-                  <Field label="Model" value={aiDraft.model} onChange={(model) => setAIDraft({ ...aiDraft, model })} />
+				  <Field label="Model" value={aiDraft.model} onChange={(model) => updateAIDraft({ model })} />
                 </div>
-                <Field label="Base URL" value={aiDraft.baseUrl} onChange={(baseUrl) => setAIDraft({ ...aiDraft, baseUrl })} />
+                <Field
+                  label={aiDraft.provider === 'custom' ? 'Base URL' : 'Base URL (optional override)'}
+                  value={aiDraft.baseUrl}
+				  onChange={(baseUrl) => updateAIDraft({ baseUrl })}
+                />
                 <Field
                   label={aiDraft.apiKeySet ? 'API key (stored)' : 'API key'}
                   type="password"
                   value={aiDraft.apiKey ?? ''}
-                  onChange={(apiKey) => setAIDraft({ ...aiDraft, apiKey })}
+				  onChange={(apiKey) => updateAIDraft({ apiKey })}
                 />
+                {aiDraft.provider === 'google' ? (
+                  <div className="provider-key-guidance">
+                    <KeyRound size={18} />
+                    <span>
+                      Create or copy a Gemini API key in{' '}
+                      <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">
+                        Google AI Studio
+                      </a>
+                      , then paste it above. Stratum sends it only from the backend and never returns the saved key to the browser.
+                    </span>
+                  </div>
+                ) : null}
               </div>
 
               <div className="okta-guidance">
@@ -2020,11 +2095,25 @@ export function AdminConsole({
                 </span>
               </div>
 
-              <button className="primary-action full-width" type="button" onClick={() => onSaveAIProvider(aiDraft)}>
-                Save and verify AI provider
+			  {aiSaveState === 'saved' ? (
+				<div className="admin-inline-success ai-save-success" role="status">
+				  <CheckCircle2 size={18} />
+				  <span>
+					<strong>AI provider saved and verified</strong>
+					<small>{aiDraft.provider} · {aiDraft.model} · {formatCompactDateTime(aiSavedAt)}</small>
+				  </span>
+				</div>
+			  ) : null}
+			  <button
+				className="primary-action full-width"
+				type="button"
+				disabled={aiSaveState === 'saving'}
+				onClick={() => void saveAIProviderSettings()}
+			  >
+				<BadgeCheck size={17} /> {aiSaveState === 'saving' ? 'Saving and verifying...' : 'Save and verify AI provider'}
               </button>
             </div>
-          ) : (
+          )) : (
             <div className="analysis-empty">
               <strong>Loading AI provider</strong>
               <span>Central analysis settings will appear once the backend responds.</span>

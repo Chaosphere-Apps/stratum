@@ -187,6 +187,7 @@ describe('HomeScreen', () => {
     })
 
     expect(screen.getByText('No matching workspaces')).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: 'Recent' }))
     expect(screen.getByText('No matching designs')).toBeTruthy()
     expect((screen.getByRole('button', { name: 'Creating...' }) as HTMLButtonElement).disabled).toBe(true)
     await user.click(screen.getByRole('button', { name: 'Retry' }))
@@ -210,6 +211,7 @@ describe('HomeScreen', () => {
       onNewDesign,
     })
 
+    await user.click(screen.getByRole('button', { name: 'Recent' }))
     expect(screen.getByText('No designs yet')).toBeTruthy()
     await user.click(screen.getByRole('button', { name: 'Create design' }))
     expect(onNewDesign).toHaveBeenCalledTimes(1)

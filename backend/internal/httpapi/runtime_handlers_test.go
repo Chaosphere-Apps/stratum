@@ -40,6 +40,14 @@ func TestSetupStatusIncludesStatelessStorageStatus(t *testing.T) {
 	if body.Storage.Mode != store.StorageModeStateless || !body.Storage.Stateless || body.Storage.Warning == "" {
 		t.Fatalf("storage status = %#v, want stateless warning status", body.Storage)
 	}
+
+	for _, endpoint := range []string{"/healthz", "/readyz", "/api/storage/status"} {
+		recorder = httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, endpoint, nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%q", endpoint, recorder.Code, recorder.Body.String())
+		}
+	}
 }
 
 func TestAdminStorageRoutesRequireAdminAndValidateInput(t *testing.T) {

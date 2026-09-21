@@ -21,6 +21,14 @@ func TestMemoryRepositoryDeleteDesignRemovesAIChat(t *testing.T) {
 		CreatedBy:   "architect",
 	})
 	requireMemoryAINoError(t, err)
+	if conversation.AccessMode != "read" {
+		t.Fatalf("conversation should default to read access, got %q", conversation.AccessMode)
+	}
+	conversation, err = repo.UpdateAIConversationAccess(ctx, workspace.ID, design.ID, conversation.ID, "read_write")
+	requireMemoryAINoError(t, err)
+	if conversation.AccessMode != "read_write" {
+		t.Fatalf("conversation access mode was not persisted: %#v", conversation)
+	}
 	_, err = repo.CreateAIMessage(ctx, domain.AIMessage{
 		ConversationID: conversation.ID,
 		Role:           "user",

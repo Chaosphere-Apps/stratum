@@ -7,7 +7,10 @@ import (
 	"time"
 )
 
-const GuestWorkspaceID = "guest-workspace"
+const (
+	GuestWorkspaceID    = "guest-workspace"
+	MaxDesignNameLength = 120
+)
 
 type User struct {
 	ID           string    `json:"id"`
@@ -273,6 +276,7 @@ type AIConversation struct {
 	DesignID    string    `json:"designId"`
 	VersionID   string    `json:"versionId,omitempty"`
 	Title       string    `json:"title"`
+	AccessMode  string    `json:"accessMode"`
 	CreatedBy   string    `json:"createdBy"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`

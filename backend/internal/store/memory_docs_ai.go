@@ -64,15 +64,39 @@ func (r *MemoryRepository) CreateAIConversation(ctx context.Context, conversatio
 		}
 	}
 	now := r.clock().UTC()
-	conversation.ID = fmt.Sprintf("ai_conversation_%d", now.UnixNano())
+	conversation.ID = fmt.Sprintf("chat_%d", now.UnixNano())
 	conversation.Title = strings.TrimSpace(conversation.Title)
 	if conversation.Title == "" {
 		conversation.Title = "Architecture discussion"
 	}
+	conversation.AccessMode = normalizedAIConversationAccess(conversation.AccessMode)
 	conversation.CreatedAt = now
 	conversation.UpdatedAt = now
 	r.aiConversations[conversation.ID] = conversation
 	return conversation, nil
+}
+
+func (r *MemoryRepository) UpdateAIConversationAccess(ctx context.Context, workspaceID string, designID string, conversationID string, accessMode string) (domain.AIConversation, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.AIConversation{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	conversation, ok := r.aiConversations[conversationID]
+	if !ok || conversation.WorkspaceID != workspaceID || conversation.DesignID != designID {
+		return domain.AIConversation{}, errors.New("AI conversation not found")
+	}
+	conversation.AccessMode = normalizedAIConversationAccess(accessMode)
+	conversation.UpdatedAt = r.clock().UTC()
+	r.aiConversations[conversationID] = conversation
+	return conversation, nil
+}
+
+func normalizedAIConversationAccess(accessMode string) string {
+	if strings.EqualFold(strings.TrimSpace(accessMode), "read_write") {
+		return "read_write"
+	}
+	return "read"
 }
 
 func (r *MemoryRepository) ListAIMessages(ctx context.Context, conversationID string, limit int) ([]domain.AIMessage, error) {

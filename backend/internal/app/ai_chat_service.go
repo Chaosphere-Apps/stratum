@@ -27,6 +27,10 @@ func (s AIChatService) CreateConversation(ctx context.Context, conversation doma
 	return s.repo().CreateAIConversation(ctx, conversation)
 }
 
+func (s AIChatService) UpdateConversationAccess(ctx context.Context, workspaceID string, designID string, conversationID string, accessMode string) (domain.AIConversation, error) {
+	return s.repo().UpdateAIConversationAccess(ctx, workspaceID, designID, conversationID, accessMode)
+}
+
 func (s AIChatService) ListMessages(ctx context.Context, conversationID string, limit int) ([]domain.AIMessage, error) {
 	return s.repo().ListAIMessages(ctx, conversationID, limit)
 }

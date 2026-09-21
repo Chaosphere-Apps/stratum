@@ -26,9 +26,30 @@ func TestProductDataRoutesRequireSession(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/workspaces"},
 		{http.MethodPost, "/api/workspaces"},
+		{http.MethodGet, "/api/profile"},
+		{http.MethodGet, "/api/users"},
+		{http.MethodPost, "/api/admin/users"},
+		{http.MethodGet, "/api/admin/sign-in"},
+		{http.MethodGet, "/api/admin/ai-provider"},
+		{http.MethodGet, "/api/admin/mcp"},
+		{http.MethodGet, "/api/admin/telemetry"},
+		{http.MethodGet, "/api/admin/storage"},
+		{http.MethodGet, "/api/admin/access/groups"},
+		{http.MethodGet, "/api/catalog/assets"},
+		{http.MethodGet, "/api/notifications"},
+		{http.MethodPost, "/api/ai/provider/verify"},
+		{http.MethodGet, "/api/workspace-share-principals"},
 		{http.MethodGet, "/api/workspaces/guest-workspace/designs"},
+		{http.MethodGet, "/api/workspaces/guest-workspace/access"},
+		{http.MethodGet, "/api/workspaces/guest-workspace/group-access"},
+		{http.MethodGet, "/api/workspaces/guest-workspace/designs/design_1"},
 		{http.MethodPut, "/api/workspaces/guest-workspace/designs/design_1/document"},
+		{http.MethodPost, "/api/workspaces/guest-workspace/designs/design_1/analysis"},
+		{http.MethodGet, "/api/workspaces/guest-workspace/designs/design_1/versions"},
 		{http.MethodGet, "/api/workspaces/guest-workspace/designs/design_1/docs"},
+		{http.MethodGet, "/api/workspaces/guest-workspace/designs/design_1/comments"},
+		{http.MethodGet, "/api/workspaces/guest-workspace/designs/design_1/reviews"},
+		{http.MethodGet, "/api/workspaces/guest-workspace/designs/design_1/ai/conversations"},
 	} {
 		recorder := httptest.NewRecorder()
 		server.Handler().ServeHTTP(recorder, httptest.NewRequest(target.method, target.path, strings.NewReader(`{}`)))
@@ -145,5 +166,87 @@ func TestWriteRoutesRequireExpectedRoles(t *testing.T) {
 	server.Handler().ServeHTTP(recorder, reviewerAnalyze)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("reviewer analyze design status = %d, want %d body=%q", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+}
+
+func TestDesignMetadataAndDeletionLifecycle(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	admin, err := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	design, err := repo.CreateDesign(t.Context(), domain.GuestWorkspaceID, "Original", []byte(`{"title":"Original","components":[]}`), admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := repo.CreateSession(t.Context(), admin.ID, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(config.Config{}, realtime.NewHub(repo, config.Logger()), config.Logger())
+	path := "/api/workspaces/" + design.WorkspaceID + "/designs/" + design.ID
+	request := func(method, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.AddCookie(&http.Cookie{Name: "stratum_session", Value: token})
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	updated := request(http.MethodPatch, `{"name":"Payments v2","access":"private"}`)
+	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), `"name":"Payments v2"`) || !strings.Contains(updated.Body.String(), `"access":"private"`) {
+		t.Fatalf("update metadata status=%d body=%q", updated.Code, updated.Body.String())
+	}
+	fetched := request(http.MethodGet, "")
+	if fetched.Code != http.StatusOK || !strings.Contains(fetched.Body.String(), `"name":"Payments v2"`) {
+		t.Fatalf("get updated design status=%d body=%q", fetched.Code, fetched.Body.String())
+	}
+	deleted := request(http.MethodDelete, "")
+	if deleted.Code != http.StatusNoContent {
+		t.Fatalf("delete design status=%d body=%q", deleted.Code, deleted.Body.String())
+	}
+	missing := request(http.MethodGet, "")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("get deleted design status=%d body=%q", missing.Code, missing.Body.String())
+	}
+}
+
+func TestDesignNameLengthBoundary(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	admin, err := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := repo.CreateSession(t.Context(), admin.ID, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(config.Config{}, realtime.NewHub(repo, config.Logger()), config.Logger())
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.AddCookie(&http.Cookie{Name: "stratum_session", Value: token})
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	boundaryName := strings.Repeat("界", domain.MaxDesignNameLength)
+	created := request(http.MethodPost, "/api/workspaces/"+domain.GuestWorkspaceID+"/designs", fmt.Sprintf(`{"name":%q,"document":{}}`, boundaryName))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("boundary name create status=%d body=%q", created.Code, created.Body.String())
+	}
+	overLimitName := strings.Repeat("a", domain.MaxDesignNameLength+1)
+	rejected := request(http.MethodPost, "/api/workspaces/"+domain.GuestWorkspaceID+"/designs", fmt.Sprintf(`{"name":%q,"document":{}}`, overLimitName))
+	if rejected.Code != http.StatusBadRequest || !strings.Contains(rejected.Body.String(), "120 characters or fewer") {
+		t.Fatalf("over-limit name create status=%d body=%q", rejected.Code, rejected.Body.String())
+	}
+
+	design, err := repo.CreateDesign(t.Context(), domain.GuestWorkspaceID, "Existing", []byte(`{"title":"Existing","components":[]}`), admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataRejected := request(http.MethodPatch, "/api/workspaces/"+design.WorkspaceID+"/designs/"+design.ID, fmt.Sprintf(`{"name":%q}`, overLimitName))
+	if metadataRejected.Code != http.StatusBadRequest || !strings.Contains(metadataRejected.Body.String(), "120 characters or fewer") {
+		t.Fatalf("over-limit metadata status=%d body=%q", metadataRejected.Code, metadataRejected.Body.String())
 	}
 }

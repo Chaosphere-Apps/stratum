@@ -359,6 +359,8 @@ func normalizedAIProvider(provider string) string {
 		return "anthropic"
 	case "openrouter":
 		return "openrouter"
+	case "google":
+		return "google"
 	case "custom":
 		return "custom"
 	default:
@@ -372,6 +374,8 @@ func defaultAIModel(provider string) string {
 		return "claude-3-5-sonnet-latest"
 	case "openrouter":
 		return "openai/gpt-4.1"
+	case "google":
+		return "gemini-2.5-flash"
 	default:
 		return "gpt-4.1"
 	}
