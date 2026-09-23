@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/system-design-evaluator/backend/internal/domain"
 	"github.com/system-design-evaluator/backend/internal/store"
@@ -42,6 +43,12 @@ func (s DesignService) Create(ctx context.Context, workspaceID string, name stri
 	}
 	if utf8.RuneCountInString(name) > domain.MaxDesignNameLength {
 		return domain.Design{}, fmt.Errorf("design name must be %d characters or fewer", domain.MaxDesignNameLength)
+	}
+	if len(document) > 0 && strings.TrimSpace(string(document)) != "null" {
+		var structured map[string]json.RawMessage
+		if err := json.Unmarshal(document, &structured); err != nil || structured == nil {
+			return domain.Design{}, fmt.Errorf("design document must be a JSON object")
+		}
 	}
 	return s.repo().CreateDesign(ctx, workspaceID, name, document, createdBy)
 }

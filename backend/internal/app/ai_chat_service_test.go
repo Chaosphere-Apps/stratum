@@ -24,6 +24,16 @@ func TestAIChatServicePersistsDesignScopedConversation(t *testing.T) {
 		CreatedBy:   "architect",
 	})
 	requireNoError(t, err)
+	conversations, err := service.ListConversations(ctx, workspace.ID, design.ID)
+	requireNoError(t, err)
+	if len(conversations) != 1 || conversations[0].ID != conversation.ID {
+		t.Fatalf("conversations = %#v", conversations)
+	}
+	conversation, err = service.UpdateConversationAccess(ctx, workspace.ID, design.ID, conversation.ID, "read_write")
+	requireNoError(t, err)
+	if conversation.AccessMode != "read_write" {
+		t.Fatalf("conversation access mode = %q", conversation.AccessMode)
+	}
 	if conversation.Title != "Architecture discussion" {
 		t.Fatalf("default title = %q", conversation.Title)
 	}

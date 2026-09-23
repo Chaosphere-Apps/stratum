@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,6 +69,27 @@ func TestAdminIntegrationSettingsRoundTripWithoutExposingSecrets(t *testing.T) {
 	}
 }
 
+func TestVerifyAIProviderDoesNotForwardCredentialsOnRedirect(t *testing.T) {
+	var redirected atomic.Bool
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected.Store(true)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer destination.Close()
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL, http.StatusFound)
+	}))
+	defer provider.Close()
+
+	err := verifyAIProvider(t.Context(), "google", "gemini-test", provider.URL, "sensitive-key", true)
+	if err == nil {
+		t.Fatal("verification should reject a provider redirect")
+	}
+	if redirected.Load() {
+		t.Fatal("provider credentials were forwarded to the redirect destination")
+	}
+}
+
 func TestVerifyGoogleAIProviderValidatesConfiguredModelAndAPIKeyHeader(t *testing.T) {
 	var receivedPath string
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -88,5 +110,58 @@ func TestVerifyGoogleAIProviderValidatesConfiguredModelAndAPIKeyHeader(t *testin
 	}
 	if receivedPath != "/v1beta/models/gemini-test" {
 		t.Fatalf("unexpected verification path %q", receivedPath)
+	}
+}
+
+func TestAIProviderConfigurationPreservesVerifiedCredentialAfterFailedRotation(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	admin, err := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := repo.CreateSession(t.Context(), admin.ID, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-goog-api-key") != "working-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[]}`))
+	}))
+	defer provider.Close()
+	server := NewServer(config.Config{AllowPrivateAIProviderURLs: true}, realtime.NewHub(repo, config.Logger()), config.Logger())
+	request := func(method, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, "/api/admin/ai-provider", strings.NewReader(body))
+		req.AddCookie(&http.Cookie{Name: "stratum_session", Value: token})
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	initial := request(http.MethodPatch, `{"enabled":true,"provider":"google","model":"gemini-first","baseUrl":"`+provider.URL+`","apiKey":"working-key"}`)
+	if initial.Code != http.StatusOK || strings.Contains(initial.Body.String(), "working-key") {
+		t.Fatalf("initial provider save status=%d body=%q", initial.Code, initial.Body.String())
+	}
+	failed := request(http.MethodPatch, `{"enabled":true,"provider":"google","model":"gemini-second","baseUrl":"`+provider.URL+`","apiKey":"invalid-key"}`)
+	if failed.Code != http.StatusBadRequest || strings.Contains(failed.Body.String(), "invalid-key") {
+		t.Fatalf("failed rotation status=%d body=%q", failed.Code, failed.Body.String())
+	}
+	stored, err := repo.GetAIProviderConfigWithSecret(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.APIKey != "working-key" || stored.Model != "gemini-first" || !stored.Enabled {
+		t.Fatalf("failed verification changed active provider: %#v", stored)
+	}
+	updated := request(http.MethodPatch, `{"enabled":true,"provider":"google","model":"gemini-second","baseUrl":"`+provider.URL+`"}`)
+	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), "gemini-second") {
+		t.Fatalf("model update with stored credential status=%d body=%q", updated.Code, updated.Body.String())
+	}
+	public := request(http.MethodGet, "")
+	if public.Code != http.StatusOK || strings.Contains(public.Body.String(), "working-key") || strings.Contains(public.Body.String(), "invalid-key") || !strings.Contains(public.Body.String(), `"apiKeySet":true`) {
+		t.Fatalf("provider readback leaked or lost credential state: status=%d body=%q", public.Code, public.Body.String())
 	}
 }

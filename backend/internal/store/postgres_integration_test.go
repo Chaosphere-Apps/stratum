@@ -93,6 +93,35 @@ func TestPostgresRepositoryAppliesMigrationsAndPreservesDesignData(t *testing.T)
 	if loadedDoc.Body != doc.Body {
 		t.Fatalf("doc body = %q, want %q", loadedDoc.Body, doc.Body)
 	}
+	conversation, err := repo.CreateAIConversation(ctx, domain.AIConversation{
+		WorkspaceID: workspace.ID, DesignID: design.ID, Title: "Database review", AccessMode: "read_write", CreatedBy: owner.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateAIConversation: %v", err)
+	}
+	conversation, err = repo.UpdateAIConversationAccess(ctx, workspace.ID, design.ID, conversation.ID, "read")
+	if err != nil || conversation.AccessMode != "read" {
+		t.Fatalf("UpdateAIConversationAccess conversation=%#v err=%v", conversation, err)
+	}
+	message, err := repo.CreateAIMessage(ctx, domain.AIMessage{
+		ConversationID: conversation.ID, Role: "assistant", Content: "Review the database failover path.",
+		References: []domain.AIMessageReference{{Kind: "component", ID: "api", Name: "API"}}, Provider: "google", Model: "gemini-test",
+	})
+	if err != nil {
+		t.Fatalf("CreateAIMessage: %v", err)
+	}
+	conversations, err := repo.ListAIConversations(ctx, workspace.ID, design.ID)
+	if err != nil || len(conversations) != 1 || conversations[0].ID != conversation.ID {
+		t.Fatalf("ListAIConversations conversations=%#v err=%v", conversations, err)
+	}
+	loadedConversation, err := repo.GetAIConversation(ctx, workspace.ID, design.ID, conversation.ID)
+	if err != nil || loadedConversation.AccessMode != "read" {
+		t.Fatalf("GetAIConversation conversation=%#v err=%v", loadedConversation, err)
+	}
+	messages, err := repo.ListAIMessages(ctx, conversation.ID, 10)
+	if err != nil || len(messages) != 1 || messages[0].ID != message.ID || len(messages[0].References) != 1 {
+		t.Fatalf("ListAIMessages messages=%#v err=%v", messages, err)
+	}
 	status, err := InspectPostgresMigrations(ctx, repo.pool)
 	if err != nil {
 		t.Fatalf("InspectPostgresMigrations: %v", err)

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -82,6 +83,9 @@ func TestDesignAIConversationPersistsGroundedMessages(t *testing.T) {
 	if !strings.Contains(gateway.request.System, "untrusted data") || len(gateway.request.Messages) < 2 {
 		t.Fatalf("gateway request lacks safety or history context: %#v", gateway.request)
 	}
+	if strings.Contains(gateway.request.System, "Stratum canvas schema") {
+		t.Fatal("read-only chat received write-tool schema")
+	}
 	listConversations := httptest.NewRequest(http.MethodGet, "/api/workspaces/"+workspace.ID+"/designs/"+design.ID+"/ai/conversations", nil)
 	listConversations.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
 	listConversationsRecorder := httptest.NewRecorder()
@@ -125,6 +129,55 @@ func TestAIConversationWriteAccessRequiresDesignEditPermission(t *testing.T) {
 	}
 }
 
+func TestAIConversationAccessCanChangeForWorkingDesignButNotSavedVersion(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	admin, _ := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
+	workspace, _ := repo.CreateWorkspace(t.Context(), "Platform", admin.ID)
+	design, _ := repo.CreateDesign(t.Context(), workspace.ID, "Payments", []byte(`{"schemaVersion":"1","id":"payments","components":[],"connectors":[]}`), admin.ID)
+	version, err := repo.CreateDesignVersion(t.Context(), workspace.ID, design.ID, admin.ID, "review snapshot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _ := repo.CreateSession(t.Context(), admin.ID, time.Now().Add(time.Hour))
+	server := NewServer(config.Config{}, realtime.NewHub(repo, config.Logger()), config.Logger())
+	call := func(method, path, payload string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, path, strings.NewReader(payload))
+		request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	base := "/api/workspaces/" + workspace.ID + "/designs/" + design.ID + "/ai/conversations"
+
+	working := call(http.MethodPost, base, `{"title":"Working review"}`)
+	var workingBody struct {
+		Conversation domain.AIConversation `json:"conversation"`
+	}
+	if working.Code != http.StatusCreated || json.Unmarshal(working.Body.Bytes(), &workingBody) != nil {
+		t.Fatalf("create working conversation status=%d body=%q", working.Code, working.Body.String())
+	}
+	updated := call(http.MethodPatch, base+"/"+workingBody.Conversation.ID, `{"accessMode":"read_write"}`)
+	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), `"accessMode":"read_write"`) {
+		t.Fatalf("enable working write access status=%d body=%q", updated.Code, updated.Body.String())
+	}
+	downgraded := call(http.MethodPatch, base+"/"+workingBody.Conversation.ID, `{"accessMode":"read"}`)
+	if downgraded.Code != http.StatusOK || !strings.Contains(downgraded.Body.String(), `"accessMode":"read"`) {
+		t.Fatalf("restore read access status=%d body=%q", downgraded.Code, downgraded.Body.String())
+	}
+
+	saved := call(http.MethodPost, base, fmt.Sprintf(`{"versionId":%q}`, version.ID))
+	var savedBody struct {
+		Conversation domain.AIConversation `json:"conversation"`
+	}
+	if saved.Code != http.StatusCreated || json.Unmarshal(saved.Body.Bytes(), &savedBody) != nil {
+		t.Fatalf("create saved-version conversation status=%d body=%q", saved.Code, saved.Body.String())
+	}
+	rejected := call(http.MethodPatch, base+"/"+savedBody.Conversation.ID, `{"accessMode":"read_write"}`)
+	if rejected.Code != http.StatusBadRequest || !strings.Contains(rejected.Body.String(), "saved-version conversations are read-only") {
+		t.Fatalf("saved-version write access status=%d body=%q", rejected.Code, rejected.Body.String())
+	}
+}
+
 func TestAIConversationAppliesValidatedWriteToolResult(t *testing.T) {
 	repo := store.NewMemoryRepository()
 	admin, _ := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
@@ -133,7 +186,7 @@ func TestAIConversationAppliesValidatedWriteToolResult(t *testing.T) {
 	design, _ := repo.CreateDesign(t.Context(), workspace.ID, "Payments", document, admin.ID)
 	_, _ = repo.UpdateAIProviderConfig(t.Context(), domain.AIProviderConfig{Enabled: true, Provider: "openai", Model: "model-a"}, "secret")
 	token, _ := repo.CreateSession(t.Context(), admin.ID, time.Now().Add(time.Hour))
-	gateway := &fakeModelGateway{response: `{"answer":"Added the database.","references":[],"followUps":[],"designUpdate":{"schemaVersion":"1","id":"design-ai","title":"Payments","components":[{"id":"api","name":"API"},{"id":"db","name":"Database"}],"connectors":[{"id":"api-db","fromComponentId":"api","toComponentId":"db"}]},"updateSummary":"Added a database dependency"}`}
+	gateway := &fakeModelGateway{response: `{"answer":"Added the database.","references":[],"followUps":[],"designUpdate":{"schemaVersion":"1","id":"design-ai","title":"Payments","components":[{"id":"api","shapeId":"shape-api","type":"compute.service","name":"API","purpose":"Accept payments","owner":"","criticality":"high","metadata":{"position":{"x":80,"y":120}},"notes":[]},{"id":"db","shapeId":"shape-db","type":"data.sql_database","name":"Payments database","purpose":"Store payment state","owner":"","criticality":"critical","metadata":{"position":{"x":600,"y":120}},"notes":[]}],"connectors":[{"id":"api-db","fromComponentId":"api","toComponentId":"db","type":"synchronous","protocol":"SQL","timeoutMs":1000,"consistencyExpectation":"strong","notes":"","animated":false}],"journeys":[]},"updateSummary":"Added a database dependency"}`}
 	server := NewServer(config.Config{}, realtime.NewHub(repo, config.Logger()), config.Logger())
 	server.ai = gateway
 
@@ -158,9 +211,138 @@ func TestAIConversationAppliesValidatedWriteToolResult(t *testing.T) {
 	if sentRecorder.Code != http.StatusCreated || !strings.Contains(sentRecorder.Body.String(), `"designUpdated":true`) {
 		t.Fatalf("write result status=%d body=%q", sentRecorder.Code, sentRecorder.Body.String())
 	}
+	if !strings.Contains(gateway.request.System, "Stratum canvas schema") || !strings.Contains(gateway.request.System, "metadata.parentFrameId") {
+		t.Fatalf("write conversation did not receive the canvas schema: %s", gateway.request.System)
+	}
 	updated, err := repo.GetDesign(t.Context(), workspace.ID, design.ID)
 	if err != nil || !strings.Contains(string(updated.Document), `"id":"db"`) {
 		t.Fatalf("validated design update was not stored: document=%s err=%v", updated.Document, err)
+	}
+}
+
+func TestReadOnlyAIConversationRejectsProviderDesignMutation(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	admin, _ := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
+	workspace, _ := repo.CreateWorkspace(t.Context(), "Platform", admin.ID)
+	document := []byte(`{"schemaVersion":"1","id":"design-ai","title":"Payments","components":[],"connectors":[]}`)
+	design, _ := repo.CreateDesign(t.Context(), workspace.ID, "Payments", document, admin.ID)
+	_, _ = repo.UpdateAIProviderConfig(t.Context(), domain.AIProviderConfig{Enabled: true, Provider: "openai", Model: "model-a"}, "secret")
+	token, _ := repo.CreateSession(t.Context(), admin.ID, time.Now().Add(time.Hour))
+	server := NewServer(config.Config{}, realtime.NewHub(repo, config.Logger()), config.Logger())
+	server.ai = &fakeModelGateway{response: `{"answer":"I changed it.","designUpdate":{"schemaVersion":"1","id":"design-ai","components":[{"id":"db"}],"connectors":[]}}`}
+
+	create := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/designs/"+design.ID+"/ai/conversations", strings.NewReader(`{"accessMode":"read"}`))
+	create.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	created := httptest.NewRecorder()
+	server.Handler().ServeHTTP(created, create)
+	var body struct {
+		Conversation domain.AIConversation `json:"conversation"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+
+	send := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/designs/"+design.ID+"/ai/conversations/"+body.Conversation.ID+"/messages", strings.NewReader(`{"content":"Review only"}`))
+	send.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, send)
+	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "without write access") {
+		t.Fatalf("read-only mutation status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	stored, _ := repo.GetDesign(t.Context(), workspace.ID, design.ID)
+	if string(stored.Document) != string(document) {
+		t.Fatalf("read-only AI mutation changed the design: %s", stored.Document)
+	}
+}
+
+func TestAIMessageValidationAndProviderAvailability(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	admin, _ := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
+	workspace, _ := repo.CreateWorkspace(t.Context(), "Platform", admin.ID)
+	design, _ := repo.CreateDesign(t.Context(), workspace.ID, "Payments", []byte(`{"schemaVersion":"1","id":"design-ai","components":[],"connectors":[]}`), admin.ID)
+	token, _ := repo.CreateSession(t.Context(), admin.ID, time.Now().Add(time.Hour))
+	server := NewServer(config.Config{}, realtime.NewHub(repo, config.Logger()), config.Logger())
+
+	create := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/designs/"+design.ID+"/ai/conversations", strings.NewReader(`{}`))
+	create.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	created := httptest.NewRecorder()
+	server.Handler().ServeHTTP(created, create)
+	var body struct {
+		Conversation domain.AIConversation `json:"conversation"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/workspaces/" + workspace.ID + "/designs/" + design.ID + "/ai/conversations/" + body.Conversation.ID + "/messages"
+	send := func(payload string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(payload))
+		request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	for _, scenario := range []struct{ name, payload, message string }{
+		{name: "blank", payload: `{"content":"   "}`, message: "content is required"},
+		{name: "too long", payload: fmt.Sprintf(`{"content":%q}`, strings.Repeat("界", maxAIChatMessageRunes+1)), message: "8000 characters or fewer"},
+		{name: "unknown field", payload: `{"content":"Review","role":"system"}`, message: "invalid request body"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			recorder := send(scenario.payload)
+			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), scenario.message) {
+				t.Fatalf("status=%d body=%q", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+	unconfigured := send(`{"content":"Review this design"}`)
+	if unconfigured.Code != http.StatusServiceUnavailable || !strings.Contains(unconfigured.Body.String(), "not configured") {
+		t.Fatalf("unconfigured provider status=%d body=%q", unconfigured.Code, unconfigured.Body.String())
+	}
+	messages, err := repo.ListAIMessages(t.Context(), body.Conversation.ID, 10)
+	if err != nil || len(messages) != 0 {
+		t.Fatalf("rejected messages must not be persisted: messages=%#v err=%v", messages, err)
+	}
+}
+
+func TestAIProviderFailureKeepsUserMessageAndExposesOnlySafeFeedback(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	admin, _ := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
+	workspace, _ := repo.CreateWorkspace(t.Context(), "Platform", admin.ID)
+	design, _ := repo.CreateDesign(t.Context(), workspace.ID, "Payments", []byte(`{"schemaVersion":"1","id":"design-ai","components":[],"connectors":[]}`), admin.ID)
+	_, _ = repo.UpdateAIProviderConfig(t.Context(), domain.AIProviderConfig{Enabled: true, Provider: "openai", Model: "model-a"}, "secret")
+	token, _ := repo.CreateSession(t.Context(), admin.ID, time.Now().Add(time.Hour))
+	server := NewServer(config.Config{}, realtime.NewHub(repo, config.Logger()), config.Logger())
+	server.ai = &fakeModelGateway{err: &modelgateway.ProviderHTTPError{StatusCode: http.StatusUnauthorized}}
+
+	create := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/designs/"+design.ID+"/ai/conversations", strings.NewReader(`{}`))
+	create.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	created := httptest.NewRecorder()
+	server.Handler().ServeHTTP(created, create)
+	var body struct {
+		Conversation domain.AIConversation `json:"conversation"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	send := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/designs/"+design.ID+"/ai/conversations/"+body.Conversation.ID+"/messages", strings.NewReader(`{"content":"Review authentication"}`))
+	send.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, send)
+	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), "configured credentials") || strings.Contains(recorder.Body.String(), "secret") {
+		t.Fatalf("provider failure status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	messages, err := repo.ListAIMessages(t.Context(), body.Conversation.ID, 10)
+	if err != nil || len(messages) != 1 || messages[0].Role != "user" || messages[0].Content != "Review authentication" {
+		t.Fatalf("user message was not safely retained: messages=%#v err=%v", messages, err)
+	}
+
+	server.ai = &fakeModelGateway{response: `not valid JSON`}
+	retry := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/designs/"+design.ID+"/ai/conversations/"+body.Conversation.ID+"/messages", strings.NewReader(`{"content":"Try again"}`))
+	retry.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+	retryRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(retryRecorder, retry)
+	if retryRecorder.Code != http.StatusBadGateway || !strings.Contains(retryRecorder.Body.String(), "invalid response") || strings.Contains(retryRecorder.Body.String(), "not valid JSON") {
+		t.Fatalf("invalid response status=%d body=%q", retryRecorder.Code, retryRecorder.Body.String())
 	}
 }
 

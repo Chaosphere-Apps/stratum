@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, ChevronDown, Eye, MessageCirclePlus, PencilLine, Send, ShieldCheck, X } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   createAIConversation,
   fetchAIConversations,
@@ -32,6 +34,29 @@ const starterPrompts = [
   'Trace the critical request path and identify failure points.',
   'Which requirement is least supported by the current architecture?',
 ]
+
+const chatMarkdownElements = [
+  'p', 'strong', 'em', 'ul', 'ol', 'li', 'code', 'pre', 'blockquote',
+  'h1', 'h2', 'h3', 'h4', 'a', 'hr', 'br', 'table', 'thead', 'tbody', 'tr', 'th', 'td',
+]
+
+export function AIChatMarkdown({ content }: { content: string }) {
+  return (
+    <div className="ai-chat-markdown">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        allowedElements={chatMarkdownElements}
+        unwrapDisallowed
+        skipHtml
+        components={{
+          a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer noopener">{children}</a>,
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  )
+}
 
 function aiChatErrorMessage(reason: unknown, fallback: string) {
   if (!(reason instanceof Error)) return fallback
@@ -229,7 +254,7 @@ export function AIChatPanel({
           ) : messages.map((message) => (
             <article className={`ai-chat-message ${message.role}`} key={message.id}>
               <span>{message.role === 'assistant' ? 'Stratum' : 'You'}</span>
-              <p>{message.content}</p>
+              {message.role === 'assistant' ? <AIChatMarkdown content={message.content} /> : <p>{message.content}</p>}
               {message.references?.length ? (
                 <div className="ai-message-references">
                   {message.references.map((reference) => (

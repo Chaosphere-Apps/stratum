@@ -1,18 +1,17 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/system-design-evaluator/backend/internal/analysis"
-	"github.com/system-design-evaluator/backend/internal/domain"
-	"github.com/system-design-evaluator/backend/internal/modelgateway"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/system-design-evaluator/backend/internal/analysis"
+	"github.com/system-design-evaluator/backend/internal/domain"
+	"github.com/system-design-evaluator/backend/internal/modelgateway"
 )
 
 func (s *Server) handleGetAIProviderConfig(w http.ResponseWriter, r *http.Request) {
@@ -399,7 +398,7 @@ func verifyAIProvider(ctx context.Context, provider string, model string, baseUR
 	}
 	request.Header.Set("Accept", "application/json")
 
-	client := http.Client{Timeout: 8 * time.Second}
+	client := modelgateway.NewProviderHTTPClient(8*time.Second, allowPrivateURLs)
 	response, err := client.Do(request)
 	if err != nil {
 		return errors.New("provider could not be reached")
@@ -431,100 +430,6 @@ func runAIAnalysis(ctx context.Context, gateway modelgateway.Gateway, config dom
 		return analysis.AIReview{}, err
 	}
 	return parseAIReview(content, config), nil
-}
-
-func runOpenAICompatibleAnalysis(ctx context.Context, endpoint string, config domain.AIProviderConfig, userPrompt string) (analysis.AIReview, error) {
-	payload := map[string]any{
-		"model":       strings.TrimSpace(config.Model),
-		"temperature": 0.1,
-		"messages": []map[string]string{
-			{"role": "system", "content": analysis.BuildSystemPrompt()},
-			{"role": "user", "content": userPrompt},
-		},
-		"response_format": map[string]string{"type": "json_object"},
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return analysis.AIReview{}, err
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(endpoint, "/")+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return analysis.AIReview{}, errors.New("provider URL is invalid")
-	}
-	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(config.APIKey))
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "application/json")
-	client := http.Client{Timeout: 24 * time.Second}
-	response, err := client.Do(request)
-	if err != nil {
-		return analysis.AIReview{}, errors.New("provider could not be reached")
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return analysis.AIReview{}, errors.New("provider rejected the analysis request")
-	}
-	var parsed struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&parsed); err != nil {
-		return analysis.AIReview{}, errors.New("provider returned invalid JSON")
-	}
-	if len(parsed.Choices) == 0 || strings.TrimSpace(parsed.Choices[0].Message.Content) == "" {
-		return analysis.AIReview{}, errors.New("provider returned an empty review")
-	}
-	return parseAIReview(parsed.Choices[0].Message.Content, config), nil
-}
-
-func runAnthropicAnalysis(ctx context.Context, endpoint string, config domain.AIProviderConfig, userPrompt string) (analysis.AIReview, error) {
-	payload := map[string]any{
-		"model":       strings.TrimSpace(config.Model),
-		"max_tokens":  2200,
-		"temperature": 0.1,
-		"system":      analysis.BuildSystemPrompt(),
-		"messages": []map[string]string{
-			{"role": "user", "content": userPrompt},
-		},
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return analysis.AIReview{}, err
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(endpoint, "/")+"/messages", bytes.NewReader(body))
-	if err != nil {
-		return analysis.AIReview{}, errors.New("provider URL is invalid")
-	}
-	request.Header.Set("x-api-key", strings.TrimSpace(config.APIKey))
-	request.Header.Set("anthropic-version", "2023-06-01")
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "application/json")
-	client := http.Client{Timeout: 24 * time.Second}
-	response, err := client.Do(request)
-	if err != nil {
-		return analysis.AIReview{}, errors.New("provider could not be reached")
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return analysis.AIReview{}, errors.New("provider rejected the analysis request")
-	}
-	var parsed struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&parsed); err != nil {
-		return analysis.AIReview{}, errors.New("provider returned invalid JSON")
-	}
-	for _, content := range parsed.Content {
-		if content.Type == "text" && strings.TrimSpace(content.Text) != "" {
-			return parseAIReview(content.Text, config), nil
-		}
-	}
-	return analysis.AIReview{}, errors.New("provider returned an empty review")
 }
 
 func parseAIReview(content string, config domain.AIProviderConfig) analysis.AIReview {
@@ -596,24 +501,5 @@ func normalizeAISuite(suite string) string {
 		return strings.ToLower(strings.TrimSpace(suite))
 	default:
 		return "integrity"
-	}
-}
-
-func providerBaseURL(provider string, baseURL string) (string, error) {
-	endpoint := strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if endpoint != "" {
-		return endpoint, nil
-	}
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "openai":
-		return "https://api.openai.com/v1", nil
-	case "anthropic":
-		return "https://api.anthropic.com/v1", nil
-	case "openrouter":
-		return "https://openrouter.ai/api/v1", nil
-	case "google":
-		return "https://generativelanguage.googleapis.com/v1beta", nil
-	default:
-		return "", errors.New("base URL is required for custom providers")
 	}
 }

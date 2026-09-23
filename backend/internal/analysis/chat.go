@@ -16,10 +16,21 @@ type ChatEnvelope struct {
 	UpdateSummary string                      `json:"updateSummary,omitempty"`
 }
 
+const chatDesignSchema = `Stratum canvas schema for designUpdate:
+- Return the complete document, never a patch. Keep schemaVersion, id, title, requirementBrief, journeys, and unrelated objects.
+- Component type must be one of: client.web, edge.api_gateway, compute.service, data.sql_database, data.redis, messaging.queue, data.object_store, ai.llm, external.api, observability.telemetry, security.control, design.link, note.sticky, frame.cloud.
+- Each component is {"id":"cmp_<unique>","shapeId":"shape_<unique>","type":"<allowed type>","name":"...","purpose":"...","owner":"","criticality":"low|medium|high|critical","metadata":{"position":{"x":number,"y":number}},"notes":[]}.
+- Lay out a readable left-to-right flow. Use x columns roughly 260px apart and y rows roughly 160px apart; do not overlap components. Frames must precede their children and children may set metadata.parentFrameId.
+- Connector type must be one of: synchronous, asynchronous_event, batch_transfer, cache_read, cache_write, model_call, observability_signal.
+- Each connector is {"id":"conn_<unique>","fromComponentId":"<existing id>","toComponentId":"<existing id>","type":"<allowed type>","protocol":"...","timeoutMs":number|null,"consistencyExpectation":"...","notes":"","animated":boolean}. Use asynchronous_event for queues/events and observability_signal for telemetry.
+- Model only architecture justified by the user's request. Give components useful names and purposes; do not invent owners, SLAs, or requirements.`
+
 func BuildChatSystemPrompt(accessMode string) string {
 	toolRules := `You have the read_design tool only. The current design is supplied in context. Never return designUpdate.`
 	if accessMode == "read_write" {
-		toolRules = `You have read_design and replace_design_document tools. Use replace_design_document only when the user explicitly asks to change the working design. Return the complete updated structured design in designUpdate and a concise updateSummary. Preserve schemaVersion and design id, preserve unrelated content, use unique component/connector IDs, and reference only existing connector endpoints.`
+		toolRules = `You have read_design and replace_design_document tools. Use replace_design_document only when the user explicitly asks to change the working design. Return the complete updated structured design in designUpdate and a concise updateSummary. Preserve schemaVersion and design id, preserve unrelated content, use unique component/connector IDs, and reference only existing connector endpoints.
+
+` + chatDesignSchema
 	}
 	return strings.TrimSpace(`
 You are Stratum's architecture copilot. Help an enterprise engineer understand and improve the supplied system design.

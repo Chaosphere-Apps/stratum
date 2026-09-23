@@ -171,7 +171,7 @@ func (s *Server) handleCreateAIMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	config, err := s.services.Identity.GetAIProviderConfigWithSecret(r.Context())
 	if err != nil || !config.Enabled || strings.TrimSpace(config.APIKey) == "" {
-		writeError(w, http.StatusServiceUnavailable, "AI provider is not configured")
+		writePublicError(w, http.StatusServiceUnavailable, "AI provider is not configured. Ask an administrator to configure and verify it.")
 		return
 	}
 	userMessage, err := s.services.AIChat.AddMessage(r.Context(), domain.AIMessage{
@@ -228,18 +228,20 @@ func (s *Server) handleCreateAIMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	envelope, err := analysis.ParseChatEnvelope(content)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		s.log.Warn("AI chat response rejected", "provider", config.Provider, "model", config.Model, "reason", err)
+		writePublicError(w, http.StatusBadGateway, "The AI provider returned an invalid response. Your message was saved; try again or ask an administrator to verify the configured model.")
 		return
 	}
 	envelope.References = validAIReferences(document, envelope.References)
 	var updatedDesign *domain.Design
 	if len(envelope.DesignUpdate) > 0 && string(envelope.DesignUpdate) != "null" {
 		if conversation.AccessMode != "read_write" {
-			writeError(w, http.StatusBadGateway, "AI attempted a design update without write-tool permission")
+			writePublicError(w, http.StatusBadGateway, "AI returned a design update without write access. No changes were applied.")
 			return
 		}
 		if err := validateAIDesignUpdate(document, envelope.DesignUpdate, s.cfg.MaxRequestBodyBytes); err != nil {
-			writeError(w, http.StatusBadGateway, "AI proposed an unsafe design update: "+err.Error())
+			s.log.Warn("AI design update rejected", "workspace_id", workspaceID, "design_id", designID, "conversation_id", conversation.ID, "reason", err)
+			writePublicError(w, http.StatusBadGateway, "AI returned a design update that failed safety validation. No changes were applied.")
 			return
 		}
 		updated, updateErr := s.services.Designs.UpdateDocument(r.Context(), workspaceID, designID, envelope.DesignUpdate, design.CanvasSnapshot, design.DocumentRevision)

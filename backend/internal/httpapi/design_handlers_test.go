@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/system-design-evaluator/backend/internal/config"
 	"github.com/system-design-evaluator/backend/internal/domain"
@@ -248,5 +249,67 @@ func TestDesignNameLengthBoundary(t *testing.T) {
 	metadataRejected := request(http.MethodPatch, "/api/workspaces/"+design.WorkspaceID+"/designs/"+design.ID, fmt.Sprintf(`{"name":%q}`, overLimitName))
 	if metadataRejected.Code != http.StatusBadRequest || !strings.Contains(metadataRejected.Body.String(), "120 characters or fewer") {
 		t.Fatalf("over-limit metadata status=%d body=%q", metadataRejected.Code, metadataRejected.Body.String())
+	}
+}
+
+func TestCreateDesignCoversUserSuccessAndValidationFailures(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	admin, err := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := repo.CreateSession(t.Context(), admin.ID, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(config.Config{}, realtime.NewHub(repo, config.Logger()), config.Logger())
+	path := "/api/workspaces/" + domain.GuestWorkspaceID + "/designs"
+	request := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	created := request(`{"name":"  Checkout platform  ","document":{"schemaVersion":"sde-ui/v0.1","id":"client-design","title":"Checkout platform","components":[],"connectors":[],"journeys":[]}}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("valid create status=%d body=%q", created.Code, created.Body.String())
+	}
+	var response struct {
+		Design domain.Design `json:"design"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Design.Name != "Checkout platform" || response.Design.Access != "private" || response.Design.DocumentRevision == "" {
+		t.Fatalf("created design did not preserve normalized user intent: %#v", response.Design)
+	}
+	grants, err := repo.ListDesignAccess(t.Context(), domain.GuestWorkspaceID, response.Design.ID)
+	if err != nil || len(grants) != 1 || grants[0].UserID != admin.ID || !grants[0].CanManage || !grants[0].CanEdit {
+		t.Fatalf("creator did not receive full design access: grants=%#v err=%v", grants, err)
+	}
+
+	for _, scenario := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "blank required name", body: `{"name":"   ","document":{}}`, want: "design name is required"},
+		{name: "non-object document", body: `{"name":"Bad document","document":["not","a","design"]}`, want: "JSON object"},
+		{name: "unknown request field", body: `{"name":"Unexpected","document":{},"ownerRole":"admin"}`, want: "invalid request body"},
+		{name: "malformed JSON", body: `{"name":"Broken"`, want: "invalid request body"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			rejected := request(scenario.body)
+			if rejected.Code != http.StatusBadRequest || !strings.Contains(rejected.Body.String(), scenario.want) {
+				t.Fatalf("status=%d body=%q, want 400 containing %q", rejected.Code, rejected.Body.String(), scenario.want)
+			}
+		})
+	}
+
+	designs, err := repo.ListDesigns(t.Context(), domain.GuestWorkspaceID)
+	if err != nil || len(designs) != 1 {
+		t.Fatalf("rejected creates must not persist designs: count=%d err=%v", len(designs), err)
 	}
 }

@@ -127,6 +127,10 @@ func TestVersionReviewLifecycleThroughHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	unassigned, err := repo.CreateUser(t.Context(), "Other reviewer", "other-reviewer@example.com", "reviewer", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
 	design, err := repo.CreateDesign(t.Context(), domain.GuestWorkspaceID, "Payments", []byte(`{"title":"Payments","components":[]}`), admin.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -140,11 +144,24 @@ func TestVersionReviewLifecycleThroughHTTP(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := repo.GrantDesignAccess(t.Context(), domain.DesignAccess{
+		WorkspaceID: design.WorkspaceID,
+		DesignID:    design.ID,
+		UserID:      unassigned.ID,
+		CanRead:     true,
+		CanReview:   true,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	adminToken, err := repo.CreateSession(t.Context(), admin.ID, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
 	reviewerToken, err := repo.CreateSession(t.Context(), reviewer.ID, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unassignedToken, err := repo.CreateSession(t.Context(), unassigned.ID, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,6 +227,14 @@ func TestVersionReviewLifecycleThroughHTTP(t *testing.T) {
 	notificationsAfterRead := request(http.MethodGet, "/api/notifications", "", reviewerToken)
 	if !strings.Contains(notificationsAfterRead.Body.String(), `"read":true`) {
 		t.Fatalf("notification not marked read body=%q", notificationsAfterRead.Body.String())
+	}
+	unauthorizedReview := request(http.MethodPatch, base+"/reviews/"+reviewBody.Reviews[0].ID, `{"status":"approved","summary":"Not assigned"}`, unassignedToken)
+	if unauthorizedReview.Code != http.StatusForbidden {
+		t.Fatalf("unassigned reviewer update status=%d body=%q", unauthorizedReview.Code, unauthorizedReview.Body.String())
+	}
+	stillRequested := request(http.MethodGet, base+"/reviews", "", reviewerToken)
+	if stillRequested.Code != http.StatusOK || !strings.Contains(stillRequested.Body.String(), `"status":"requested"`) || strings.Contains(stillRequested.Body.String(), "Not assigned") {
+		t.Fatalf("unassigned reviewer changed review status=%d body=%q", stillRequested.Code, stillRequested.Body.String())
 	}
 
 	approved := request(http.MethodPatch, base+"/reviews/"+reviewBody.Reviews[0].ID, `{"status":"approved","summary":"Looks good"}`, reviewerToken)

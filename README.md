@@ -71,3 +71,7 @@ make test-e2e
 ```
 
 See [Testing Stratum](docs/testing.md) for database integration tests, coverage gates, and individual commands.
+
+## Contributing and license
+
+Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow and security reporting guidance. Stratum is licensed under the [GNU General Public License, version 3](LICENSE.md) (GPL-3.0-only).

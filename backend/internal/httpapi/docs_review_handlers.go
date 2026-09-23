@@ -1,9 +1,12 @@
 package httpapi
 
 import (
-	"github.com/system-design-evaluator/backend/internal/policy"
+	"errors"
 	"net/http"
 	"strings"
+
+	"github.com/system-design-evaluator/backend/internal/app"
+	"github.com/system-design-evaluator/backend/internal/policy"
 )
 
 func (s *Server) handleListDesignDocs(w http.ResponseWriter, r *http.Request) {
@@ -212,6 +215,10 @@ func (s *Server) handleUpdateDesignReview(w http.ResponseWriter, r *http.Request
 	}
 	review, err := s.services.Reviews.UpdateReview(r.Context(), workspaceID, designID, reviewID, user, body.Status, body.Summary)
 	if err != nil {
+		if errors.Is(err, app.ErrReviewNotAssigned) {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
 		writeError(w, statusForDeleteError(err), err.Error())
 		return
 	}

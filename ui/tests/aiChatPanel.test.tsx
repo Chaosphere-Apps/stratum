@@ -134,4 +134,24 @@ describe('AIChatPanel tool access', () => {
     expect(alert.textContent).toContain('AI provider is temporarily unavailable')
     expect(alert.textContent).not.toContain('Backend request failed')
   })
+
+  it('renders assistant Markdown while dropping raw HTML and remote images', async () => {
+    fetchAIMessages.mockResolvedValue({
+      conversation,
+      messages: [{
+        id: 'm2', conversationId: conversation.id, role: 'assistant', createdAt: '2026-09-21T00:00:02Z',
+        content: '### Recommendation\n\n- Add **bounded retries**\n- Track `queue_depth`\n\n[Runbook](https://docs.example.com)\n\n<img src=x onerror="alert(1)">\n\n![tracker](https://tracker.example/pixel.png)',
+      }],
+    })
+    const { container } = renderPanel()
+
+    expect(await screen.findByRole('heading', { name: 'Recommendation' })).toBeTruthy()
+    expect(screen.getByText('bounded retries').tagName).toBe('STRONG')
+    expect(screen.getByText('queue_depth').tagName).toBe('CODE')
+    const link = screen.getByRole('link', { name: 'Runbook' })
+    expect(link.getAttribute('target')).toBe('_blank')
+    expect(link.getAttribute('rel')).toContain('noopener')
+    expect(container.querySelector('img')).toBeNull()
+    expect(container.innerHTML).not.toContain('onerror')
+  })
 })
