@@ -57,6 +57,33 @@ func TestClientRejectsInvalidURL(t *testing.T) {
 	}
 }
 
+func TestClientDoesNotForwardCustomAuthHeadersOnRedirect(t *testing.T) {
+	calls := 0
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if calls != 1 || r.URL.Host != "prometheus.example" {
+			t.Fatalf("unexpected redirected request to %s", r.URL)
+		}
+		return &http.Response{
+			StatusCode: http.StatusFound,
+			Header:     http.Header{"Location": []string{"https://untrusted.example/collect"}},
+			Body:       io.NopCloser(strings.NewReader("")),
+		}, nil
+	})}
+	_, err := NewClient(httpClient).Query(context.Background(), integrations.IntegrationConfig{
+		BaseURL: "https://prometheus.example",
+		Auth: integrations.AuthConfig{
+			Headers: map[string]string{"X-API-Key": "sensitive-key"},
+		},
+	}, "up")
+	if err == nil || !strings.Contains(err.Error(), "302") {
+		t.Fatalf("expected redirect rejection, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected one request, got %d", calls)
+	}
+}
+
 func TestClientEnforcesResponseLimit(t *testing.T) {
 	httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{

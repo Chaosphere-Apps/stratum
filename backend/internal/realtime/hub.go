@@ -136,6 +136,9 @@ func (h *Hub) Broadcast(ctx context.Context, workspaceID string, envelope Envelo
 }
 
 func (h *Hub) UpsertDesign(ctx context.Context, workspaceID string, payload UpsertDesignPayload) (domain.Design, error) {
+	if err := domain.ValidateDesignDocument(payload.Design, 4<<20); err != nil {
+		return domain.Design{}, err
+	}
 	var document struct {
 		ID    string `json:"id"`
 		Title string `json:"title"`
@@ -166,6 +169,13 @@ func (h *Hub) UpdateDesign(ctx context.Context, workspaceID string, payload Upse
 		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(payload.Design, &document); err != nil {
+		return domain.Design{}, err
+	}
+	current, err := h.Repository().GetDesign(ctx, workspaceID, document.ID)
+	if err != nil {
+		return domain.Design{}, err
+	}
+	if err := domain.ValidateDesignDocumentUpdate(current.Document, payload.Design, 4<<20); err != nil {
 		return domain.Design{}, err
 	}
 	return h.Repository().UpdateDesignDocument(ctx, workspaceID, document.ID, payload.Design, payload.CanvasSnapshot, payload.BaseRevision)

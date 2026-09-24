@@ -21,7 +21,13 @@ func NewClient(httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &Client{httpClient: httpClient, responseLimitBytes: defaultResponseLimitBytes}
+	// Integration credentials may include arbitrary headers. Never forward them
+	// to a URL supplied by a redirect response.
+	client := *httpClient
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &Client{httpClient: &client, responseLimitBytes: defaultResponseLimitBytes}
 }
 
 func (client *Client) Query(ctx context.Context, config integrations.IntegrationConfig, query string) ([]byte, error) {

@@ -47,13 +47,59 @@ type HTTPGateway struct {
 
 func New(allowPrivateURLs bool) *HTTPGateway {
 	return &HTTPGateway{
-		Client: &http.Client{
-			Timeout: 30 * time.Second,
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		Client:           NewProviderHTTPClient(30*time.Second, allowPrivateURLs),
 		AllowPrivateURLs: allowPrivateURLs,
+	}
+}
+
+// NewProviderHTTPClient keeps provider credentials on the configured endpoint and
+// checks the address used for each connection, including after DNS changes.
+func NewProviderHTTPClient(timeout time.Duration, allowPrivateURLs bool) *http.Client {
+	return newProviderHTTPClient(timeout, allowPrivateURLs, net.DefaultResolver.LookupIPAddr)
+}
+
+func newProviderHTTPClient(timeout time.Duration, allowPrivateURLs bool, lookup func(context.Context, string) ([]net.IPAddr, error)) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// An environment proxy could bypass the destination address check.
+	transport.Proxy = nil
+	transport.DialContext = func(ctx context.Context, network string, address string) (net.Conn, error) {
+		if allowPrivateURLs {
+			return (&net.Dialer{}).DialContext(ctx, network, address)
+		}
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, errors.New("provider address is invalid")
+		}
+		var addresses []net.IPAddr
+		if ip := net.ParseIP(host); ip != nil {
+			addresses = []net.IPAddr{{IP: ip}}
+		} else {
+			addresses, err = lookup(ctx, host)
+			if err != nil || len(addresses) == 0 {
+				return nil, errors.New("provider host could not be resolved")
+			}
+		}
+		for _, candidate := range addresses {
+			if candidate.IP == nil || isPrivateAddress(candidate.IP) {
+				return nil, errors.New("provider host resolves to a private network address")
+			}
+		}
+		var dialErr error
+		for _, candidate := range addresses {
+			connection, err := (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
+			if err == nil {
+				return connection, nil
+			}
+			dialErr = err
+		}
+		return nil, dialErr
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 }
 
@@ -199,7 +245,7 @@ func (g *HTTPGateway) doJSON(ctx context.Context, endpoint string, config domain
 	}
 	client := g.Client
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = NewProviderHTTPClient(30*time.Second, g.AllowPrivateURLs)
 	}
 	for attempt := 0; attempt < 3; attempt++ {
 		request, requestErr := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))

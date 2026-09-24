@@ -18,11 +18,12 @@ type fakeOIDCProtocol struct {
 type fakeModelGateway struct {
 	response string
 	request  modelgateway.Request
+	err      error
 }
 
 func (f *fakeModelGateway) Complete(_ context.Context, _ domain.AIProviderConfig, request modelgateway.Request) (string, error) {
 	f.request = request
-	return f.response, nil
+	return f.response, f.err
 }
 
 func (f *fakeOIDCProtocol) Begin(context.Context, domain.SignInConfig) (authn.Authorization, error) {

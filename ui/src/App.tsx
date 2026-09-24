@@ -3132,6 +3132,7 @@ export function App() {
             currentVersionId={versionPreview?.version.id}
             providerEnabled={Boolean(aiConnection?.enabled && aiConnection.apiKeySet)}
             canEditDesign={!isCanvasReadOnly && !hasPendingDesignChanges && homeDesigns.find((item) => item.id === selectedDesignId)?.effectiveAccess !== 'read'}
+            currentDesign={design}
             writeAccessReason={versionPreview
               ? 'Saved versions are read-only.'
               : homeDesigns.find((item) => item.id === selectedDesignId)?.effectiveAccess === 'read'

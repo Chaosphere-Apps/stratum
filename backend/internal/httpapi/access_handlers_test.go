@@ -169,7 +169,7 @@ func TestAccessGroupGrantsAuthorizeWorkspaceAndDesign(t *testing.T) {
 	}
 	server := NewServer(config.Config{}, realtime.NewHub(repo, config.Logger()), config.Logger())
 
-	createDesign := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/designs", strings.NewReader(`{"name":"Allowed","document":{}}`))
+	createDesign := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/designs", strings.NewReader(`{"name":"Allowed"}`))
 	createDesign.AddCookie(&http.Cookie{Name: "stratum_session", Value: token})
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, createDesign)
@@ -183,6 +183,71 @@ func TestAccessGroupGrantsAuthorizeWorkspaceAndDesign(t *testing.T) {
 	server.Handler().ServeHTTP(recorder, analyze)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("group analyze status = %d, want %d body=%q", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+}
+
+func TestRevokingGroupDesignAccessImmediatelyRemovesDesignFromReadsAndListing(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	admin, err := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member, err := repo.CreateUser(t.Context(), "Member", "member@example.com", "member", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := repo.CreateWorkspace(t.Context(), "Platform", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	design, err := repo.CreateDesign(t.Context(), workspace.ID, "Payments", []byte(`{"title":"Payments","components":[]}`), admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, err := repo.CreateAccessGroup(t.Context(), domain.AccessGroup{Name: "Architects"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ReplaceAccessGroupMembers(t.Context(), group.ID, []string{member.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.GrantWorkspaceGroupAccess(t.Context(), domain.WorkspaceGroupAccess{WorkspaceID: workspace.ID, GroupID: group.ID, CanRead: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.GrantDesignGroupAccess(t.Context(), domain.DesignGroupAccess{WorkspaceID: workspace.ID, DesignID: design.ID, GroupID: group.ID, CanRead: true}); err != nil {
+		t.Fatal(err)
+	}
+	memberToken, err := repo.CreateSession(t.Context(), member.ID, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminToken, err := repo.CreateSession(t.Context(), admin.ID, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(config.Config{}, realtime.NewHub(repo, config.Logger()), config.Logger())
+	base := "/api/workspaces/" + workspace.ID + "/designs"
+	request := func(method, path, token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		req.AddCookie(&http.Cookie{Name: "stratum_session", Value: token})
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, req)
+		return recorder
+	}
+	if got := request(http.MethodGet, base+"/"+design.ID, memberToken); got.Code != http.StatusOK {
+		t.Fatalf("granted design read status=%d body=%q", got.Code, got.Body.String())
+	}
+	if got := request(http.MethodGet, base, memberToken); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), design.ID) {
+		t.Fatalf("granted design list status=%d body=%q", got.Code, got.Body.String())
+	}
+	if got := request(http.MethodDelete, base+"/"+design.ID+"/group-access/"+group.ID, adminToken); got.Code != http.StatusNoContent {
+		t.Fatalf("revoke design group access status=%d body=%q", got.Code, got.Body.String())
+	}
+	if got := request(http.MethodGet, base+"/"+design.ID, memberToken); got.Code != http.StatusForbidden {
+		t.Fatalf("revoked design read status=%d body=%q", got.Code, got.Body.String())
+	}
+	if got := request(http.MethodGet, base, memberToken); got.Code != http.StatusOK || strings.Contains(got.Body.String(), design.ID) {
+		t.Fatalf("revoked design remained visible in listing: status=%d body=%q", got.Code, got.Body.String())
 	}
 }
 

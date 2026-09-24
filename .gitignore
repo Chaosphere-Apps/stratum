@@ -16,8 +16,9 @@ backend/.cache/
 coverage.out
 backend/server
 
-# Local AI planning/context notes
+# Temporary AI working documents (never commit)
 ai-docs/
+!ai-docs/.gitkeep
 about-stratum/
 
 # Logs and editor state

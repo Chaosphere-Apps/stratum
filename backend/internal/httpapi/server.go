@@ -148,6 +148,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PATCH /api/workspaces/{workspaceID}/designs/{designID}/ai/conversations/{conversationID}", s.handleUpdateAIConversation)
 	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/designs/{designID}/ai/conversations/{conversationID}/messages", s.handleListAIMessages)
 	s.mux.HandleFunc("POST /api/workspaces/{workspaceID}/designs/{designID}/ai/conversations/{conversationID}/messages", s.handleCreateAIMessage)
+	s.mux.HandleFunc("POST /api/workspaces/{workspaceID}/designs/{designID}/ai/conversations/{conversationID}/apply", s.handleApplyAIDesignProposal)
 	s.mux.HandleFunc("GET /api/workspaces/{workspaceID}/designs/{designID}/versions", s.handleListDesignVersions)
 	s.mux.HandleFunc("POST /api/workspaces/{workspaceID}/designs/{designID}/versions", s.handleCreateDesignVersion)
 	s.mux.HandleFunc("PATCH /api/workspaces/{workspaceID}/designs/{designID}/versions/{versionID}", s.handleUpdateDesignVersionStatus)

@@ -3,9 +3,12 @@ package app
 import (
 	"context"
 	"errors"
+
 	"github.com/system-design-evaluator/backend/internal/domain"
 	"github.com/system-design-evaluator/backend/internal/store"
 )
+
+var ErrReviewNotAssigned = errors.New("only the assigned reviewer can update this review")
 
 type DocsService struct {
 	provider RepositoryProvider
@@ -73,7 +76,7 @@ func (s ReviewService) UpdateReview(ctx context.Context, workspaceID string, des
 			continue
 		}
 		if actor.Role != "admin" && review.ReviewerID != actor.ID {
-			return domain.DesignReviewRequest{}, errors.New("only the assigned reviewer can update this review")
+			return domain.DesignReviewRequest{}, ErrReviewNotAssigned
 		}
 		return s.repo().UpdateDesignReviewRequest(ctx, workspaceID, designID, reviewID, status, summary)
 	}

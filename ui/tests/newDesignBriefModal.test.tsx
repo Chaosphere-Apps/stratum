@@ -48,4 +48,34 @@ describe('NewDesignBriefModal', () => {
     expect(functionalRequirements.compareDocumentPosition(sla) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(screen.queryByLabelText('Open questions')).toBeNull()
   })
+
+  it('submits only a nonblank name, captures optional context, and locks actions while creating', () => {
+    const onTitleChange = vi.fn()
+    const onBriefChange = vi.fn()
+    const onCancel = vi.fn()
+    const onCreate = vi.fn()
+    const brief = createEmptyRequirementBrief()
+    const props = { brief, onTitleChange, onBriefChange, onCancel, onCreate }
+    const { rerender } = render(<NewDesignBriefModal {...props} title="   " isCreating={false} />)
+
+    const create = screen.getByRole('button', { name: 'Create design' }) as HTMLButtonElement
+    expect(create.disabled).toBe(true)
+    fireEvent.change(screen.getByLabelText('Design name'), { target: { value: 'Notifications' } })
+    expect(onTitleChange).toHaveBeenCalledWith('Notifications')
+
+    rerender(<NewDesignBriefModal {...props} title="Notifications" isCreating={false} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add requirements and targets' }))
+    fireEvent.change(screen.getByLabelText('Functional requirements'), { target: { value: 'Deliver messages reliably' } })
+    expect(onBriefChange).toHaveBeenCalledWith(expect.objectContaining({ functionalRequirements: 'Deliver messages reliably' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Create design' }))
+    expect(onCreate).toHaveBeenCalledTimes(1)
+
+    rerender(<NewDesignBriefModal {...props} title="Notifications" isCreating />)
+    expect((screen.getByRole('button', { name: 'Creating...' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Cancel' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Creating...' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onCreate).toHaveBeenCalledTimes(1)
+    expect(onCancel).not.toHaveBeenCalled()
+  })
 })
