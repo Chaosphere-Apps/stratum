@@ -4,19 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/system-design-evaluator/backend/internal/domain"
 	"github.com/system-design-evaluator/backend/internal/store"
 )
 
+func canvasTestDocument(id, title string) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"schemaVersion":"sde-ui/v0.1","id":%q,"title":%q,"requirementBrief":{"useCase":""},"components":[],"connectors":[],"journeys":[]}`, id, title))
+}
+
 func TestHubUpsertDesign(t *testing.T) {
 	repo := store.NewMemoryRepository()
 	hub := NewHub(repo, slog.Default())
 
 	payload := UpsertDesignPayload{
-		Design:         json.RawMessage(`{"id":"design-1","title":"Design One","components":[],"connectors":[]}`),
+		Design:         canvasTestDocument("design-1", "Design One"),
 		CanvasSnapshot: json.RawMessage(`{"provider":"react-flow","viewport":{"x":0,"y":0,"zoom":1}}`),
 	}
 
@@ -48,7 +54,7 @@ func TestHubUpsertDesignDropsInvalidCanvasSnapshot(t *testing.T) {
 	hub := NewHub(repo, slog.Default())
 
 	payload := UpsertDesignPayload{
-		Design:         json.RawMessage(`{"id":"design-1","title":"Design One","components":[],"connectors":[]}`),
+		Design:         canvasTestDocument("design-1", "Design One"),
 		CanvasSnapshot: json.RawMessage(`null`),
 	}
 
@@ -61,16 +67,42 @@ func TestHubUpsertDesignDropsInvalidCanvasSnapshot(t *testing.T) {
 	}
 }
 
+func TestHubRejectsUnrenderableDesignBeforePersistence(t *testing.T) {
+	ctx := t.Context()
+	repo := store.NewMemoryRepository()
+	hub := NewHub(repo, slog.Default())
+	invalid := json.RawMessage(strings.Replace(string(canvasTestDocument("invalid", "Invalid")), `"components":[]`, `"components":null`, 1))
+	if _, err := hub.UpsertDesign(ctx, domain.GuestWorkspaceID, UpsertDesignPayload{Design: invalid}); err == nil {
+		t.Fatal("WebSocket upsert accepted a non-renderable components field")
+	}
+	items, err := repo.ListDesigns(ctx, domain.GuestWorkspaceID)
+	if err != nil || len(items) != 0 {
+		t.Fatalf("invalid WebSocket upsert persisted: designs=%#v err=%v", items, err)
+	}
+	design, err := repo.CreateDesign(ctx, domain.GuestWorkspaceID, "Valid", nil, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid = json.RawMessage(strings.Replace(string(design.Document), `"connectors":[]`, `"connectors":{}`, 1))
+	if _, err := hub.UpdateDesign(ctx, domain.GuestWorkspaceID, UpsertDesignPayload{Design: invalid, BaseRevision: design.DocumentRevision}); err == nil {
+		t.Fatal("WebSocket update accepted a non-renderable connectors field")
+	}
+	stored, err := repo.GetDesign(ctx, domain.GuestWorkspaceID, design.ID)
+	if err != nil || stored.DocumentRevision != design.DocumentRevision || string(stored.Document) != string(design.Document) {
+		t.Fatalf("invalid WebSocket update reached storage: design=%#v err=%v", stored, err)
+	}
+}
+
 func TestHubUpdateDesignUsesOptimisticConcurrency(t *testing.T) {
 	ctx := context.Background()
 	repo := store.NewMemoryRepository()
-	design, err := repo.CreateDesign(ctx, domain.GuestWorkspaceID, "Design", []byte(`{"id":"design-1","title":"Design"}`), "user-1")
+	design, err := repo.CreateDesign(ctx, domain.GuestWorkspaceID, "Design", nil, "user-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	hub := NewHub(repo, slog.Default())
-	firstDocument := json.RawMessage(`{"id":"` + design.ID + `","title":"First editor"}`)
-	staleDocument := json.RawMessage(`{"id":"` + design.ID + `","title":"Stale editor"}`)
+	firstDocument := canvasTestDocument(design.ID, "First editor")
+	staleDocument := canvasTestDocument(design.ID, "Stale editor")
 
 	if _, err := hub.UpdateDesign(ctx, domain.GuestWorkspaceID, UpsertDesignPayload{
 		Design:       firstDocument,

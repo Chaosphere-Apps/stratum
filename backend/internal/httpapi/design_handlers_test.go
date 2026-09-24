@@ -79,7 +79,7 @@ func TestSaveDesignDocumentRejectsStaleRevision(t *testing.T) {
 	target := fmt.Sprintf("/api/workspaces/%s/designs/%s/document", domain.GuestWorkspaceID, design.ID)
 
 	save := func(title string, revision string) *httptest.ResponseRecorder {
-		body := fmt.Sprintf(`{"document":{"id":%q,"title":%q,"components":[]},"baseRevision":%q}`, design.ID, title, revision)
+		body := fmt.Sprintf(`{"document":{"schemaVersion":"sde-ui/v0.1","id":%q,"title":%q,"requirementBrief":{"useCase":""},"components":[],"connectors":[],"journeys":[]},"baseRevision":%q}`, design.ID, title, revision)
 		request := httptest.NewRequest(http.MethodPut, target, strings.NewReader(body))
 		request.AddCookie(&http.Cookie{Name: "stratum_session", Value: token})
 		recorder := httptest.NewRecorder()
@@ -232,12 +232,12 @@ func TestDesignNameLengthBoundary(t *testing.T) {
 	}
 
 	boundaryName := strings.Repeat("界", domain.MaxDesignNameLength)
-	created := request(http.MethodPost, "/api/workspaces/"+domain.GuestWorkspaceID+"/designs", fmt.Sprintf(`{"name":%q,"document":{}}`, boundaryName))
+	created := request(http.MethodPost, "/api/workspaces/"+domain.GuestWorkspaceID+"/designs", fmt.Sprintf(`{"name":%q}`, boundaryName))
 	if created.Code != http.StatusCreated {
 		t.Fatalf("boundary name create status=%d body=%q", created.Code, created.Body.String())
 	}
 	overLimitName := strings.Repeat("a", domain.MaxDesignNameLength+1)
-	rejected := request(http.MethodPost, "/api/workspaces/"+domain.GuestWorkspaceID+"/designs", fmt.Sprintf(`{"name":%q,"document":{}}`, overLimitName))
+	rejected := request(http.MethodPost, "/api/workspaces/"+domain.GuestWorkspaceID+"/designs", fmt.Sprintf(`{"name":%q}`, overLimitName))
 	if rejected.Code != http.StatusBadRequest || !strings.Contains(rejected.Body.String(), "120 characters or fewer") {
 		t.Fatalf("over-limit name create status=%d body=%q", rejected.Code, rejected.Body.String())
 	}
@@ -272,7 +272,7 @@ func TestCreateDesignCoversUserSuccessAndValidationFailures(t *testing.T) {
 		return recorder
 	}
 
-	created := request(`{"name":"  Checkout platform  ","document":{"schemaVersion":"sde-ui/v0.1","id":"client-design","title":"Checkout platform","components":[],"connectors":[],"journeys":[]}}`)
+	created := request(`{"name":"  Checkout platform  ","document":{"schemaVersion":"sde-ui/v0.1","id":"client-design","title":"Checkout platform","requirementBrief":{"useCase":""},"components":[],"connectors":[],"journeys":[]}}`)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("valid create status=%d body=%q", created.Code, created.Body.String())
 	}
@@ -311,5 +311,81 @@ func TestCreateDesignCoversUserSuccessAndValidationFailures(t *testing.T) {
 	designs, err := repo.ListDesigns(t.Context(), domain.GuestWorkspaceID)
 	if err != nil || len(designs) != 1 {
 		t.Fatalf("rejected creates must not persist designs: count=%d err=%v", len(designs), err)
+	}
+}
+
+func TestDesignAPIsRejectUnrenderableCanvasDocumentsBeforeStorage(t *testing.T) {
+	repo := store.NewMemoryRepository()
+	admin, err := repo.CreateFirstAdmin(t.Context(), "Admin", "admin@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := repo.CreateSession(t.Context(), admin.ID, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(config.Config{}, realtime.NewHub(repo, config.Logger()), config.Logger())
+	base := "/api/workspaces/" + domain.GuestWorkspaceID + "/designs"
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: token})
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, req)
+		return recorder
+	}
+	created := request(http.MethodPost, base, `{"name":"Payments"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("blank design creation failed: status=%d body=%q", created.Code, created.Body.String())
+	}
+	var response struct {
+		Design domain.Design `json:"design"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	initial := response.Design
+	valid := string(initial.Document)
+	invalidDocuments := []struct{ name, document string }{
+		{"empty object", `{}`},
+		{"unsupported schema", strings.Replace(valid, `"schemaVersion":"sde-ui/v0.1"`, `"schemaVersion":"future-version"`, 1)},
+		{"missing components", strings.Replace(valid, `"components":[],`, ``, 1)},
+		{"null components", strings.Replace(valid, `"components":[]`, `"components":null`, 1)},
+		{"unsupported component", strings.Replace(valid, `"components":[]`, `"components":[{"id":"bad","shapeId":"shape-bad","type":"unrenderable","name":"Bad","criticality":"medium","metadata":{},"notes":[]}]`, 1)},
+		{"dangling connector", strings.Replace(valid, `"connectors":[]`, `"connectors":[{"id":"bad","type":"synchronous","fromComponentId":"missing","toComponentId":"also-missing"}]`, 1)},
+		{"invalid requirements", strings.Replace(valid, `"targetRps":null`, `"targetRps":"many"`, 1)},
+		{"invalid journey", strings.Replace(valid, `"journeys":[]`, `"journeys":[{"id":"j","title":"Checkout","steps":null}]`, 1)},
+		{"invalid nested metadata", strings.Replace(valid, `"components":[]`, `"components":[{"id":"cmp-1","shapeId":"shape-1","type":"design.link","name":"Linked","criticality":"medium","metadata":{"linkedDesign":{"title":{}}},"notes":[]}]`, 1)},
+	}
+	for _, scenario := range invalidDocuments {
+		t.Run(scenario.name, func(t *testing.T) {
+			if scenario.document == valid || !json.Valid([]byte(scenario.document)) {
+				t.Fatalf("invalid test fixture did not produce valid, modified JSON: %q", scenario.document)
+			}
+			create := request(http.MethodPost, base, fmt.Sprintf(`{"name":"Invalid","document":%s}`, scenario.document))
+			if create.Code != http.StatusBadRequest {
+				t.Fatalf("invalid create status=%d body=%q", create.Code, create.Body.String())
+			}
+			save := request(http.MethodPut, base+"/"+initial.ID+"/document", fmt.Sprintf(`{"document":%s,"baseRevision":%q}`, scenario.document, initial.DocumentRevision))
+			if save.Code != http.StatusBadRequest {
+				t.Fatalf("invalid save status=%d body=%q", save.Code, save.Body.String())
+			}
+			stored, err := repo.GetDesign(t.Context(), initial.WorkspaceID, initial.ID)
+			if err != nil || stored.DocumentRevision != initial.DocumentRevision || string(stored.Document) != valid {
+				t.Fatalf("rejected document reached storage: design=%#v err=%v", stored, err)
+			}
+		})
+	}
+	changedIdentity := strings.Replace(valid, `"id":"`+initial.ID+`"`, `"id":"different"`, 1)
+	identitySave := request(http.MethodPut, base+"/"+initial.ID+"/document", fmt.Sprintf(`{"document":%s,"baseRevision":%q}`, changedIdentity, initial.DocumentRevision))
+	if identitySave.Code != http.StatusBadRequest {
+		t.Fatalf("identity-changing save status=%d body=%q", identitySave.Code, identitySave.Body.String())
+	}
+	all, err := repo.ListDesigns(t.Context(), domain.GuestWorkspaceID)
+	if err != nil || len(all) != 1 {
+		t.Fatalf("rejected creates persisted a design: count=%d err=%v", len(all), err)
+	}
+	validSave := request(http.MethodPut, base+"/"+initial.ID+"/document", fmt.Sprintf(`{"document":%s,"baseRevision":%q}`, valid, initial.DocumentRevision))
+	if validSave.Code != http.StatusOK {
+		t.Fatalf("valid canvas save status=%d body=%q", validSave.Code, validSave.Body.String())
 	}
 }

@@ -20,7 +20,7 @@ Stratum supports OpenAI, Anthropic, OpenRouter, Google AI Studio (Gemini), and c
 
 Custom provider URLs must use HTTPS and cannot target private, loopback, link-local, or otherwise unsafe network addresses unless the deployment explicitly enables private provider URLs. Keep that override disabled for managed providers and internet-facing installations.
 
-AI chat is read-only by default. Users may grant read-and-edit access to one conversation only when they already have edit access to the current working design. This does not bypass backend permissions or document validation.
+AI chat is read-only by default. Users may grant read-and-edit access to one conversation only when they already have edit access to the current working design. AI changes remain a local proposal until a user explicitly applies them; the backend rechecks authorization, document validation, and revision at that point.
 
 ## Storage
 

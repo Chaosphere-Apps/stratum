@@ -10,6 +10,8 @@ import (
 	"github.com/system-design-evaluator/backend/internal/domain"
 	"github.com/system-design-evaluator/backend/internal/modelgateway"
 	"github.com/system-design-evaluator/backend/internal/policy"
+	"github.com/system-design-evaluator/backend/internal/realtime"
+	"github.com/system-design-evaluator/backend/internal/store"
 )
 
 const (
@@ -233,24 +235,20 @@ func (s *Server) handleCreateAIMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	envelope.References = validAIReferences(document, envelope.References)
-	var updatedDesign *domain.Design
+	var proposedDesign json.RawMessage
+	proposalRevision := ""
 	if len(envelope.DesignUpdate) > 0 && string(envelope.DesignUpdate) != "null" {
 		if conversation.AccessMode != "read_write" {
 			writePublicError(w, http.StatusBadGateway, "AI returned a design update without write access. No changes were applied.")
 			return
 		}
-		if err := validateAIDesignUpdate(document, envelope.DesignUpdate, s.cfg.MaxRequestBodyBytes); err != nil {
+		if err := domain.ValidateAIDesignUpdate(document, envelope.DesignUpdate, s.cfg.MaxRequestBodyBytes); err != nil {
 			s.log.Warn("AI design update rejected", "workspace_id", workspaceID, "design_id", designID, "conversation_id", conversation.ID, "reason", err)
 			writePublicError(w, http.StatusBadGateway, "AI returned a design update that failed safety validation. No changes were applied.")
 			return
 		}
-		updated, updateErr := s.services.Designs.UpdateDocument(r.Context(), workspaceID, designID, envelope.DesignUpdate, design.CanvasSnapshot, design.DocumentRevision)
-		if updateErr != nil {
-			writeError(w, http.StatusConflict, "AI design update was not applied: "+updateErr.Error())
-			return
-		}
-		updatedDesign = &updated
-		s.log.Info("AI design tool applied", "user_id", user.ID, "workspace_id", workspaceID, "design_id", designID, "conversation_id", conversation.ID, "document_revision", updated.DocumentRevision)
+		proposedDesign = envelope.DesignUpdate
+		proposalRevision = design.DocumentRevision
 	}
 	assistantMessage, err := s.services.AIChat.AddMessage(r.Context(), domain.AIMessage{
 		ConversationID: conversation.ID,
@@ -268,10 +266,59 @@ func (s *Server) handleCreateAIMessage(w http.ResponseWriter, r *http.Request) {
 		"userMessage":      userMessage,
 		"assistantMessage": assistantMessage,
 		"followUps":        envelope.FollowUps,
-		"designUpdated":    updatedDesign != nil,
-		"updatedDesign":    updatedDesign,
+		"proposedDesign":   proposedDesign,
+		"baseRevision":     proposalRevision,
 		"updateSummary":    envelope.UpdateSummary,
 	})
+}
+
+func (s *Server) handleApplyAIDesignProposal(w http.ResponseWriter, r *http.Request) {
+	workspaceID, designID := r.PathValue("workspaceID"), r.PathValue("designID")
+	user, design, ok := s.requireDesignAccess(w, r, workspaceID, designID, policy.DesignEdit)
+	if !ok {
+		return
+	}
+	conversation, err := s.services.AIChat.GetConversation(r.Context(), workspaceID, designID, r.PathValue("conversationID"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if conversation.AccessMode != "read_write" || conversation.VersionID != "" {
+		writeError(w, http.StatusForbidden, "AI write tools are not permitted for this conversation")
+		return
+	}
+	var body struct {
+		Document     json.RawMessage `json:"document"`
+		BaseRevision string          `json:"baseRevision"`
+	}
+	if err := decodeJSON(w, r, s.cfg.MaxRequestBodyBytes, &body); err != nil {
+		writeError(w, http.StatusBadRequest, jsonRequestError(err))
+		return
+	}
+	if strings.TrimSpace(body.BaseRevision) == "" {
+		writeError(w, http.StatusBadRequest, "base revision is required")
+		return
+	}
+	if err := domain.ValidateAIDesignUpdate(design.Document, body.Document, s.cfg.MaxRequestBodyBytes); err != nil {
+		writeError(w, http.StatusBadRequest, "proposed design failed validation")
+		return
+	}
+	updated, err := s.services.Designs.UpdateDocument(r.Context(), workspaceID, designID, body.Document, design.CanvasSnapshot, body.BaseRevision)
+	if err != nil {
+		if errors.Is(err, store.ErrDesignConflict) {
+			writeError(w, http.StatusConflict, "the design changed since this AI proposal was created; request a new proposal")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if s.hub != nil {
+		if encoded, encodeErr := json.Marshal(realtime.DesignUpdatedPayload{Design: updated}); encodeErr == nil {
+			s.hub.Broadcast(r.Context(), workspaceID, realtime.Envelope{Type: realtime.MessageDesignUpdated, Payload: encoded})
+		}
+	}
+	s.log.Info("AI design proposal applied", "user_id", user.ID, "workspace_id", workspaceID, "design_id", designID, "conversation_id", conversation.ID, "document_revision", updated.DocumentRevision)
+	writeJSON(w, http.StatusOK, map[string]any{"design": updated})
 }
 
 func boundedAIChatHistory(history []domain.AIMessage, maxMessages int, maxRunes int) []domain.AIMessage {
@@ -325,52 +372,6 @@ func normalizeAIChatAccessMode(accessMode string) string {
 		return "read_write"
 	}
 	return "read"
-}
-
-func validateAIDesignUpdate(current json.RawMessage, proposed json.RawMessage, maxBytes int64) error {
-	if maxBytes <= 0 {
-		maxBytes = 4 << 20
-	}
-	if int64(len(proposed)) > maxBytes || len(proposed) == 0 || !json.Valid(proposed) {
-		return errors.New("design document is invalid or exceeds the configured size limit")
-	}
-	type graphDocument struct {
-		SchemaVersion string `json:"schemaVersion"`
-		ID            string `json:"id"`
-		Components    []struct {
-			ID string `json:"id"`
-		} `json:"components"`
-		Connectors []struct {
-			ID   string `json:"id"`
-			From string `json:"fromComponentId"`
-			To   string `json:"toComponentId"`
-		} `json:"connectors"`
-	}
-	var before, after graphDocument
-	if json.Unmarshal(current, &before) != nil || json.Unmarshal(proposed, &after) != nil {
-		return errors.New("design document does not match the structured schema")
-	}
-	if before.ID != after.ID || before.SchemaVersion != after.SchemaVersion || after.ID == "" || after.SchemaVersion == "" {
-		return errors.New("schema version and design identity must be preserved")
-	}
-	if len(after.Components) > 500 || len(after.Connectors) > 1000 {
-		return errors.New("design update exceeds component or connector limits")
-	}
-	componentIDs := map[string]bool{}
-	for _, component := range after.Components {
-		if strings.TrimSpace(component.ID) == "" || componentIDs[component.ID] {
-			return errors.New("component IDs must be present and unique")
-		}
-		componentIDs[component.ID] = true
-	}
-	connectorIDs := map[string]bool{}
-	for _, connector := range after.Connectors {
-		if strings.TrimSpace(connector.ID) == "" || connectorIDs[connector.ID] || !componentIDs[connector.From] || !componentIDs[connector.To] {
-			return errors.New("connectors must have unique IDs and reference existing components")
-		}
-		connectorIDs[connector.ID] = true
-	}
-	return nil
 }
 
 func validAIReferences(document json.RawMessage, references []domain.AIMessageReference) []domain.AIMessageReference {

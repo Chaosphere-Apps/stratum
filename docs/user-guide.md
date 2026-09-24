@@ -43,7 +43,7 @@ Each conversation has its own design access mode:
 - **Read only** lets the assistant inspect a compact representation of the selected design and discuss it.
 - **Read + edit** lets the assistant propose validated changes to the current working design only when you already have edit permission.
 
-Read only is the default. Saved-version conversations cannot write. Backend authorization is rechecked for every message, and proposed edits must pass schema, graph, identity, size, and revision validation before storage. Follow-up messages retain a bounded amount of recent conversation context.
+Read only is the default. Saved-version conversations cannot write. AI-generated edits appear as a temporary preview showing added, changed, and removed elements; they do not change the working design until you select **Apply to design**. Select **Discard proposal** to keep the original design. The preview is not stored with the conversation and is lost if the page closes. Backend edit permission, conversation access, renderable document shape, and the original revision are checked again on Apply; a stale proposal must be regenerated. Follow-up messages retain a bounded amount of recent conversation context.
 
 ## Versions, reviews, and collaboration
 

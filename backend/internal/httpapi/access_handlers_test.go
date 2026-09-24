@@ -169,7 +169,7 @@ func TestAccessGroupGrantsAuthorizeWorkspaceAndDesign(t *testing.T) {
 	}
 	server := NewServer(config.Config{}, realtime.NewHub(repo, config.Logger()), config.Logger())
 
-	createDesign := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/designs", strings.NewReader(`{"name":"Allowed","document":{}}`))
+	createDesign := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/designs", strings.NewReader(`{"name":"Allowed"}`))
 	createDesign.AddCookie(&http.Cookie{Name: "stratum_session", Value: token})
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, createDesign)

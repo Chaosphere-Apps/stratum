@@ -3,6 +3,7 @@ import { Bot, ChevronDown, Eye, MessageCirclePlus, PencilLine, Send, ShieldCheck
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
+  applyAIDesignProposal,
   createAIConversation,
   fetchAIConversations,
   fetchAIMessages,
@@ -23,6 +24,7 @@ interface AIChatPanelProps {
   currentVersionId?: string
   providerEnabled: boolean
   canEditDesign: boolean
+  currentDesign: BackendDesign['document']
   writeAccessReason?: string
   onClose: () => void
   onDesignUpdated: (design: BackendDesign) => void
@@ -71,6 +73,7 @@ export function AIChatPanel({
   currentVersionId,
   providerEnabled,
   canEditDesign,
+  currentDesign,
   writeAccessReason,
   onClose,
   onDesignUpdated,
@@ -85,11 +88,41 @@ export function AIChatPanel({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [newConversationAccess, setNewConversationAccess] = useState<'read' | 'read_write'>('read')
+  const [pendingProposal, setPendingProposal] = useState<{
+    document: BackendDesign['document']
+    baseRevision: string
+    conversationId: string
+    summary: string
+  } | null>(null)
+  const [proposalDocumentOpen, setProposalDocumentOpen] = useState(false)
   const endRef = useRef<HTMLDivElement | null>(null)
 
   const activeConversation = conversations.find((item) => item.id === activeId)
   const accessMode = activeConversation?.accessMode ?? newConversationAccess
   const writeAvailable = canEditDesign && !currentVersionId
+  const proposalChanges = useMemo(() => {
+    if (!pendingProposal) return null
+    const before = new Map(currentDesign.components.map((component) => [component.id, component]))
+    const after = new Map(pendingProposal.document.components.map((component) => [component.id, component]))
+    const previousConnections = new Map(currentDesign.connectors.map((connector) => [connector.id, connector]))
+    const proposedConnections = new Map(pendingProposal.document.connectors.map((connector) => [connector.id, connector]))
+    return {
+      added: pendingProposal.document.components.filter((component) => !before.has(component.id)).map((component) => component.name),
+      removed: currentDesign.components.filter((component) => !after.has(component.id)).map((component) => component.name),
+      changed: pendingProposal.document.components.filter((component) => {
+        const previous = before.get(component.id)
+        return previous && JSON.stringify(previous) !== JSON.stringify(component)
+      }).map((component) => component.name),
+      addedConnections: pendingProposal.document.connectors.filter((connector) => !previousConnections.has(connector.id)).length,
+      removedConnections: currentDesign.connectors.filter((connector) => !proposedConnections.has(connector.id)).length,
+      changedConnections: pendingProposal.document.connectors.filter((connector) => {
+        const previous = previousConnections.get(connector.id)
+        return previous && JSON.stringify(previous) !== JSON.stringify(connector)
+      }).length,
+      requirementsChanged: JSON.stringify(currentDesign.requirementBrief) !== JSON.stringify(pendingProposal.document.requirementBrief),
+      journeysChanged: JSON.stringify(currentDesign.journeys) !== JSON.stringify(pendingProposal.document.journeys),
+    }
+  }, [currentDesign, pendingProposal])
   const versionLabel = useMemo(() => {
     const id = activeConversation?.versionId ?? currentVersionId
     if (!id) return 'Working design'
@@ -134,6 +167,7 @@ export function AIChatPanel({
   }, [messages, busy])
 
   async function startConversation() {
+    if (pendingProposal) return
     setBusy(true)
     setError(null)
     try {
@@ -155,7 +189,7 @@ export function AIChatPanel({
 
   async function submit(content = draft) {
     const message = content.trim()
-    if (!message || busy || !providerEnabled) return
+    if (!message || busy || !providerEnabled || pendingProposal) return
     setBusy(true)
     setError(null)
     setFollowUps([])
@@ -175,9 +209,32 @@ export function AIChatPanel({
       const response = await sendAIMessage(workspaceId, designId, conversationId, message)
       setMessages((current) => [...current, response.userMessage, response.assistantMessage])
       setFollowUps(response.followUps ?? [])
-      if (response.updatedDesign) onDesignUpdated(response.updatedDesign)
+      if (response.proposedDesign && response.baseRevision) {
+        setProposalDocumentOpen(false)
+        setPendingProposal({
+          document: response.proposedDesign,
+          baseRevision: response.baseRevision,
+          conversationId,
+          summary: response.updateSummary || 'Review the proposed design changes.',
+        })
+      }
     } catch (reason) {
       setError(aiChatErrorMessage(reason, 'AI could not answer this question'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function applyProposal() {
+    if (!pendingProposal || busy || !writeAvailable || accessMode !== 'read_write') return
+    setBusy(true)
+    setError(null)
+    try {
+      const response = await applyAIDesignProposal(workspaceId, designId, pendingProposal.conversationId, pendingProposal.document, pendingProposal.baseRevision)
+      onDesignUpdated(response.design)
+      setPendingProposal(null)
+    } catch (reason) {
+      setError(aiChatErrorMessage(reason, 'Could not apply the AI proposal'))
     } finally {
       setBusy(false)
     }
@@ -202,28 +259,28 @@ export function AIChatPanel({
   }
 
   return (
-    <div className="ai-chat-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <div className="ai-chat-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !pendingProposal && onClose()}>
       <aside className="ai-chat-panel" role="dialog" aria-modal="true" aria-labelledby="ai-chat-title">
         <header className="ai-chat-header">
           <div className="ai-chat-heading">
             <span className="ai-chat-mark"><Bot size={18} /></span>
             <div><strong id="ai-chat-title">Architecture copilot</strong><small>{designName} · {versionLabel}</small></div>
           </div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Close architecture copilot"><X size={18} /></button>
+          <button className="icon-button" type="button" onClick={onClose} disabled={Boolean(pendingProposal)} title={pendingProposal ? 'Apply or discard the pending proposal before closing.' : undefined} aria-label="Close architecture copilot"><X size={18} /></button>
         </header>
 
         <div className="ai-chat-threadbar">
           <label>
             <span>Conversation</span>
             <span className="ai-chat-select-wrap">
-              <select value={activeId} onChange={(event) => setActiveId(event.target.value)} disabled={!conversations.length}>
+              <select value={activeId} onChange={(event) => setActiveId(event.target.value)} disabled={!conversations.length || Boolean(pendingProposal)}>
                 {!conversations.length ? <option value="">New conversation</option> : null}
                 {conversations.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
               </select>
               <ChevronDown size={15} />
             </span>
           </label>
-          <button className="secondary-action compact" type="button" onClick={() => void startConversation()} disabled={busy}>
+          <button className="secondary-action compact" type="button" onClick={() => void startConversation()} disabled={busy || Boolean(pendingProposal)}>
             <MessageCirclePlus size={16} /> New
           </button>
         </div>
@@ -231,10 +288,10 @@ export function AIChatPanel({
         <div className="ai-chat-access">
           <span className="ai-chat-access-label"><ShieldCheck size={16} /><span><strong>Design access</strong><small>Applies only to this conversation</small></span></span>
           <div className="ai-chat-access-options" role="group" aria-label="AI design access">
-            <button type="button" className={accessMode === 'read' ? 'active' : ''} onClick={() => void changeAccessMode('read')} disabled={busy} aria-pressed={accessMode === 'read'}><Eye size={15} /> Read only</button>
-            <button type="button" className={accessMode === 'read_write' ? 'active' : ''} onClick={() => void changeAccessMode('read_write')} disabled={busy || !writeAvailable} aria-pressed={accessMode === 'read_write'} title={!writeAvailable ? writeAccessReason ?? 'Edit access is unavailable for this design.' : undefined}><PencilLine size={15} /> Read + edit</button>
+            <button type="button" className={accessMode === 'read' ? 'active' : ''} onClick={() => void changeAccessMode('read')} disabled={busy || Boolean(pendingProposal)} aria-pressed={accessMode === 'read'}><Eye size={15} /> Read only</button>
+            <button type="button" className={accessMode === 'read_write' ? 'active' : ''} onClick={() => void changeAccessMode('read_write')} disabled={busy || Boolean(pendingProposal) || !writeAvailable} aria-pressed={accessMode === 'read_write'} title={!writeAvailable ? writeAccessReason ?? 'Edit access is unavailable for this design.' : undefined}><PencilLine size={15} /> Read + edit</button>
           </div>
-          <small>{accessMode === 'read_write' ? 'The copilot may update this working design only when you explicitly ask it to. Backend permissions and document validation still apply.' : writeAccessReason ?? 'The copilot can inspect this design but cannot change it.'}</small>
+          <small>{accessMode === 'read_write' ? 'The copilot may propose changes when you ask. Nothing is saved until you review and apply the proposal.' : writeAccessReason ?? 'The copilot can inspect this design but cannot change it.'}</small>
         </div>
 
         <div className="ai-chat-messages" aria-live="polite">
@@ -272,6 +329,34 @@ export function AIChatPanel({
               {followUps.map((followUp) => <button key={followUp} type="button" onClick={() => void submit(followUp)}>{followUp}</button>)}
             </div>
           ) : null}
+          {pendingProposal && proposalChanges ? (
+            <section className="ai-chat-proposal" aria-label="Proposed design changes">
+              <strong>Review proposed design</strong>
+              <p>{pendingProposal.summary}</p>
+              <small>Temporary preview · nothing has been saved to the design.</small>
+              <div className="ai-chat-proposal-changes">
+                <span>{proposalChanges.added.length} added</span>
+                <span>{proposalChanges.changed.length} changed</span>
+                <span>{proposalChanges.removed.length} removed</span>
+                <span>{proposalChanges.addedConnections} connections added</span>
+                <span>{proposalChanges.changedConnections} connections changed</span>
+                <span>{proposalChanges.removedConnections} connections removed</span>
+              </div>
+              {proposalChanges.requirementsChanged ? <p>Requirements changed</p> : null}
+              {proposalChanges.journeysChanged ? <p>Journeys changed</p> : null}
+              {proposalChanges.added.length ? <p><b>Added:</b> {proposalChanges.added.join(', ')}</p> : null}
+              {proposalChanges.changed.length ? <p><b>Changed:</b> {proposalChanges.changed.join(', ')}</p> : null}
+              {proposalChanges.removed.length ? <p className="ai-chat-proposal-warning"><b>Removed:</b> {proposalChanges.removed.join(', ')}</p> : null}
+              <details className="ai-chat-proposal-document" onToggle={(event) => setProposalDocumentOpen(event.currentTarget.open)}>
+                <summary>Inspect full proposed document</summary>
+                {proposalDocumentOpen ? <pre>{JSON.stringify(pendingProposal.document, null, 2)}</pre> : null}
+              </details>
+              <div className="ai-chat-proposal-actions">
+                <button className="secondary-action" type="button" onClick={() => setPendingProposal(null)} disabled={busy}>Discard proposal</button>
+                <button className="primary-action" type="button" onClick={() => void applyProposal()} disabled={busy || !writeAvailable || accessMode !== 'read_write'} title={!writeAvailable ? writeAccessReason : undefined}>Apply to design</button>
+              </div>
+            </section>
+          ) : null}
           {busy ? <div className="ai-chat-thinking"><span className="ai-thinking" /> Reviewing the model…</div> : null}
           <div ref={endRef} />
         </div>
@@ -284,12 +369,12 @@ export function AIChatPanel({
             placeholder="Ask about risks, flows, requirements, or tradeoffs…"
             rows={3}
             maxLength={8000}
-            disabled={!providerEnabled || busy}
+            disabled={!providerEnabled || busy || Boolean(pendingProposal)}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submit() }
             }}
           />
-          <div><small>{draft.length.toLocaleString()}/8,000 · Enter to send · Shift+Enter for a new line</small><button type="submit" disabled={!draft.trim() || busy || !providerEnabled} aria-label="Send message"><Send size={17} /></button></div>
+          <div><small>{pendingProposal ? 'Apply or discard the proposal before continuing.' : `${draft.length.toLocaleString()}/8,000 · Enter to send · Shift+Enter for a new line`}</small><button type="submit" disabled={!draft.trim() || busy || !providerEnabled || Boolean(pendingProposal)} aria-label="Send message"><Send size={17} /></button></div>
         </form>
       </aside>
     </div>

@@ -283,8 +283,8 @@ interface AIMessageResponse {
   userMessage: BackendAIMessage
   assistantMessage: BackendAIMessage
   followUps: string[]
-  designUpdated: boolean
-  updatedDesign?: BackendDesign
+  proposedDesign?: BackendDesign['document'] | null
+  baseRevision?: string
   updateSummary?: string
 }
 interface CatalogAssetsResponse {
@@ -1089,6 +1089,19 @@ export function sendAIMessage(workspaceId: string, designId: string, conversatio
   return request<AIMessageResponse>(
     `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/ai/conversations/${encodeURIComponent(conversationId)}/messages`,
     { method: 'POST', body: JSON.stringify({ content }) },
+  )
+}
+
+export function applyAIDesignProposal(
+  workspaceId: string,
+  designId: string,
+  conversationId: string,
+  document: BackendDesign['document'],
+  baseRevision: string,
+) {
+  return request<DesignResponse>(
+    `/api/workspaces/${encodeURIComponent(workspaceId)}/designs/${encodeURIComponent(designId)}/ai/conversations/${encodeURIComponent(conversationId)}/apply`,
+    { method: 'POST', body: JSON.stringify({ document, baseRevision }) },
   )
 }
 

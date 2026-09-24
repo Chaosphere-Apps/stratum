@@ -41,6 +41,16 @@ func (s *Server) handleCreateDesign(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if strings.TrimSpace(body.Name) == "" {
+		writeError(w, http.StatusBadRequest, "design name is required")
+		return
+	}
+	if len(body.Document) > 0 && string(body.Document) != "null" {
+		if err := domain.ValidateDesignDocument(body.Document, s.cfg.MaxRequestBodyBytes); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	design, err := s.services.Designs.Create(r.Context(), workspaceID, body.Name, body.Document, user.ID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -254,8 +264,8 @@ func (s *Server) handleSaveDesignDocument(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if len(body.Document) == 0 || !json.Valid(body.Document) {
-		writeError(w, http.StatusBadRequest, "design document must be valid JSON")
+	if err := domain.ValidateDesignDocumentUpdate(existing.Document, body.Document, s.cfg.MaxRequestBodyBytes); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	canvasSnapshot := existing.CanvasSnapshot
